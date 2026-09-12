@@ -4,13 +4,13 @@
   "description": "Lanka Lens — Sri Lanka's Camera Marketplace (used DSLR, mirrorless, lenses, GoPro, DJI Action, drones, accessories)",
   "main": "server/index.js",
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
-    "dev": "node --watch --disable-warning=ExperimentalWarning server/index.js",
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
     "seed": "node server/seed.js",
     "test": "node server/test/smoke.js"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.13.0"
   },
   "license": "UNLICENSED",
   "private": true,
