@@ -20,6 +20,34 @@ pip install -r server/requirements.txt
 python3 server/app.py        # serves on http://localhost:8000
 ```
 
+Open **http://localhost:8000** — Flask serves both the SPA and the JSON API from
+the same origin, which is what the frontend expects.
+
+### Serving the frontend separately (optional)
+
+If you serve `index.html` from something else (a static dev server, a preview
+host, or by opening the file directly), the API is on a different origin. Two
+ways to point the SPA at it:
+
+- **Automatic (local dev only)** — when the page is on `localhost` / `127.0.0.1`
+  / `file://` and no API answers on that origin, the client probes
+  `http://localhost:8000/api` and switches to it for the session.
+- **Explicit** — set the base before the app boots:
+
+  ```html
+  <meta name="ll-api-base" content="https://api.example.com/api">
+  <!-- or -->
+  <script>window.LL_API_BASE = 'https://api.example.com/api';</script>
+  ```
+
+  An explicit base is never overridden. The API sends CORS headers
+  (`Access-Control-Allow-Origin`, `Authorization`/`Content-Type`, preflight
+  `OPTIONS`); restrict them with `LL_CORS_ORIGINS=https://your.site` if you want
+  a closed list instead of the permissive default.
+
+Either way, sign-in failures report the real cause inline on the form (HTTP
+status, unreachable API, non-JSON response) instead of a generic message.
+
 ## Demo accounts
 
 | Role | Email | Password |

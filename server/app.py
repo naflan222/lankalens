@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, request, jsonify, g, abort, send_from_directory
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1017,20 +1018,62 @@ _RATE = {}  # ip -> list of timestamps
 
 
 def rate_limit(limit, window=60):
-    """Allow `limit` requests per `window` seconds per client IP."""
+    """Allow `limit` requests per `window` seconds per client IP, per endpoint.
+
+    Buckets are keyed by endpoint *and* IP: previously every limited endpoint
+    shared one bucket per IP, so a handful of sign-ups / password resets from
+    the same device could exhaust the sign-in budget and return a spurious 429.
+    """
     def deco(fn):
+        bucket_name = fn.__name__
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+            key = f"{bucket_name}:{ip}"
             t = now()
-            bucket = [x for x in _RATE.get(ip, []) if x > t - window]
+            bucket = [x for x in _RATE.get(key, []) if x > t - window]
             if len(bucket) >= limit:
-                abort(429, description="Too many requests, please slow down")
+                abort(429, description="Too many attempts — please wait a minute and try again")
             bucket.append(t)
-            _RATE[ip] = bucket
+            _RATE[key] = bucket
             return fn(*args, **kwargs)
         return wrapper
     return deco
+
+
+def json_body():
+    """Parse a JSON request body.
+
+    Returns ``(data, error_response)``. ``error_response`` is ``None`` when the
+    body parsed (an absent body is treated as ``{}``); otherwise it is a ready
+    to return 422 response so the client gets an accurate, non-misleading error
+    instead of a silent ``{}`` that used to surface as "Invalid email or password".
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        raw = (request.get_data(as_text=True) or "").strip()
+        if raw:
+            return None, err("Request body is not valid JSON", 422)
+        return {}, None
+    if not isinstance(data, dict):
+        return None, err("Request body must be a JSON object", 422)
+    return data, None
+
+
+def missing_fields_error(body, *fields):
+    """400 response listing the required fields that are empty/absent."""
+    missing = [f for f in fields if not str(body.get(f) or "").strip()]
+    if not missing:
+        return None
+    labels = {
+        "email": "email", "password": "password", "name": "name",
+        "token": "reset link", "code": "verification code", "message": "message",
+    }
+    names = [labels.get(f, f.replace("_", " ")) for f in missing]
+    if len(names) == 1:
+        return err(f"Please enter your {names[0]}")
+    return err("Please enter your " + " and ".join(names))
 
 
 def user_payload(u):
@@ -1072,10 +1115,63 @@ def err(message, code=400):
 @app.errorhandler(401)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(409)
 @app.errorhandler(413)
+@app.errorhandler(415)
+@app.errorhandler(422)
 @app.errorhandler(429)
+@app.errorhandler(500)
 def handle_http_error(e):
     return jsonify({"ok": False, "error": getattr(e, "description", None) or e.name}), e.code
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    """Every API failure must come back as JSON with an honest status code.
+
+    Without this an unhandled exception on an /api route returned Werkzeug's
+    HTML 500 page, which the SPA could not parse — the user only ever saw a
+    generic "Something went wrong".
+    """
+    if isinstance(e, HTTPException):
+        return handle_http_error(e)
+    if request.path.startswith("/api/"):
+        app.logger.exception(e)
+        return jsonify({"ok": False, "error": "Internal server error"}), 500
+    raise e
+
+
+# Comma separated list of allowed browser origins, or "*" (default). The API is
+# token based (Authorization: Bearer …) and never uses cookies, so a permissive
+# Allow-Origin does not expose session credentials. Set LL_CORS_ORIGINS to
+# restrict it, e.g. LL_CORS_ORIGINS=https://lankalens.lk
+CORS_ORIGINS = [o.strip() for o in os.environ.get("LL_CORS_ORIGINS", "*").split(",") if o.strip()]
+
+
+@app.after_request
+def add_cors_headers(resp):
+    """Allow the SPA to talk to the API when it is served from another origin.
+
+    The frontend is normally served by Flask itself (same origin), but it is
+    also commonly opened from a static dev server / preview host — without
+    these headers every request failed in the browser as an opaque CORS error
+    and sign-in simply showed "Something went wrong".
+    """
+    if not request.path.startswith("/api/"):
+        return resp
+    origin = request.headers.get("Origin")
+    if "*" in CORS_ORIGINS:
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin or "*")
+    elif origin and origin in CORS_ORIGINS:
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin)
+    else:
+        return resp
+    resp.headers.setdefault("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+    resp.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+    resp.headers.setdefault("Access-Control-Max-Age", "86400")
+    resp.headers.setdefault("Vary", "Origin")
+    return resp
 
 
 @app.after_request
@@ -2298,14 +2394,24 @@ def business_page(slug):
 # ---------------------------------------------------------------------------
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Used to keep the response time of a failed sign-in the same whether or not the
+# email exists (avoids leaking which addresses have accounts).
+_DUMMY_HASH = hash_password("lankalens-not-a-real-password")
+
 
 @app.route("/api/auth/signup", methods=["POST"])
 @rate_limit(10, 60)
 def signup():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     name = (body.get("name") or "").strip()
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
+    missing = missing_fields_error({"name": name, "email": email, "password": password},
+                                   "name", "email", "password")
+    if missing:
+        return missing
     if len(name) < 2:
         return err("Please enter your name")
     if not EMAIL_RE.match(email):
@@ -2338,14 +2444,26 @@ def signup():
 @app.route("/api/auth/login", methods=["POST"])
 @rate_limit(20, 60)
 def login():
-    body = request.get_json(silent=True) or {}
-    email = (body.get("email") or "").strip().lower()
+    body, bad = json_body()
+    if bad:
+        return bad
+    email = (body.get("email") or body.get("username") or "").strip().lower()
     password = body.get("password") or ""
+    missing = missing_fields_error({"email": email, "password": password}, "email", "password")
+    if missing:
+        return missing
+
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
-    if not u or not verify_password(password, u["password_hash"]):
+    if not u:
+        verify_password(password, _DUMMY_HASH)  # constant-time: no account enumeration
+        return err("Invalid email or password", 401)
+    if not verify_password(password, u["password_hash"]):
         return err("Invalid email or password", 401)
     if u.get("status") == "banned":
         return err("This account has been banned", 403)
+    if u.get("status") == "suspended":
+        return err("This account has been suspended. Contact support.", 403)
+
     token = secrets.token_hex(32)
     execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, u["id"], now()))
     return ok({"token": token, "user": user_payload(u)})
@@ -2362,8 +2480,13 @@ def logout():
 @app.route("/api/auth/forgot", methods=["POST"])
 @rate_limit(10, 300)
 def forgot_password():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     email = (body.get("email") or "").strip().lower()
+    missing = missing_fields_error({"email": email}, "email")
+    if missing:
+        return missing
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
     if not u:
         # Do not reveal whether the email exists.
@@ -2374,8 +2497,13 @@ def forgot_password():
 
 @app.route("/api/auth/reset", methods=["POST"])
 def reset_password():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     token = (body.get("token") or "").strip()
+    missing = missing_fields_error({"token": token, "password": body.get("password")}, "token", "password")
+    if missing:
+        return missing
     row = consume_token(token, "reset")
     if not row:
         return err("This reset link is invalid or has expired", 400)
@@ -2389,8 +2517,13 @@ def reset_password():
 
 @app.route("/api/auth/verify-email", methods=["POST"])
 def verify_email():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     token = (body.get("token") or "").strip()
+    missing = missing_fields_error({"token": token}, "token")
+    if missing:
+        return missing
     row = consume_token(token, "email")
     if not row:
         return err("This verification link is invalid or has expired", 400)

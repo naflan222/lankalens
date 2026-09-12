@@ -126,43 +126,170 @@
     meta: null,
     locations: null,
     favIds: [],
+    sessionRestored: false,
     route: { path: '/', query: new URLSearchParams() }
   };
 
-  /* ---------- api ---------- */
+  /* ---------- storage helpers (private-mode safe) ---------- */
+  function storeGet(key) { try { return window.localStorage.getItem(key); } catch (e) { return null; } }
+  function storeSet(key, val) { try { window.localStorage.setItem(key, val); } catch (e) {} }
+  function storeDel(key) { try { window.localStorage.removeItem(key); } catch (e) {} }
+  function sessGet(key) { try { return window.sessionStorage.getItem(key); } catch (e) { return null; } }
+  function sessSet(key, val) { try { window.sessionStorage.setItem(key, val); } catch (e) {} }
+
+  /* ---------- api ----------
+     The SPA is normally served by the Flask app itself, so a relative base is
+     correct. It is also regularly opened from a static dev server, a preview
+     host or straight off disk (file://) — there is no API on those origins, so
+     the base can be overridden and, on local dev origins only, falls back to
+     the Flask dev server instead of failing every request. */
+  var API_LOCAL_FALLBACK = 'http://localhost:8000/api';
+
+  function configuredApiBase() {
+    var explicit = window.LL_API_BASE;
+    if (!explicit) {
+      var meta = document.querySelector('meta[name="ll-api-base"]');
+      if (meta) explicit = meta.getAttribute('content');
+    }
+    if (explicit) {
+      // An explicit override is authoritative: never second-guess it.
+      api.baseExplicit = true;
+      return String(explicit).replace(/\/+$/, '');
+    }
+    var remembered = sessGet('ll_api_base');
+    if (remembered) return remembered;
+    if (location.protocol === 'file:') return API_LOCAL_FALLBACK;
+    return '/api';
+  }
+  function isLocalDevOrigin() {
+    var h = location.hostname;
+    return location.protocol === 'file:' || h === '' || h === 'localhost' || h === '127.0.0.1' ||
+      h === '0.0.0.0' || h === '[::1]' || h === '::1';
+  }
+  function isAuthPath(path) { return /^\/auth\/(login|signup|forgot|reset)/.test(path || ''); }
+
+  function apiError(message, status, extra) {
+    var e = new Error(message || 'Something went wrong');
+    e.status = status || 0;
+    e.isApiError = true;
+    if (extra) { for (var k in extra) { if (Object.prototype.hasOwnProperty.call(extra, k)) e[k] = extra[k]; } }
+    return e;
+  }
+  function statusMessage(status, path) {
+    if (status === 400) return 'That request was rejected. Please check the details and try again.';
+    if (status === 401) return isAuthPath(path) ? 'Invalid email or password.' : 'Your session has expired — please sign in again.';
+    if (status === 403) return 'You don’t have permission to do that.';
+    if (status === 404) return 'We couldn’t reach that endpoint (' + path + '). It may not exist on this server.';
+    if (status === 405) return 'That action isn’t allowed here.';
+    if (status === 408) return 'The request timed out. Please try again.';
+    if (status === 409) return 'That conflicts with data that already exists.';
+    if (status === 413) return 'That file is too large to upload.';
+    if (status === 415) return 'Unsupported request format.';
+    if (status === 422) return 'Please check the form and try again.';
+    if (status === 429) return 'Too many attempts — please wait a minute and try again.';
+    if (status >= 500) return 'Server error (' + status + '). Please try again in a moment.';
+    if (status > 0) return 'Request failed (HTTP ' + status + ').';
+    return 'Cannot reach the Lanka Lens server. Check your connection, then try again.';
+  }
+  function notJsonMessage(status, path, text) {
+    if (!(text || '').length) return 'The server returned an empty response. Please try again.';
+    var htmlish = /<\/?(html|head|body|!doctype)/i.test(text);
+    if (!htmlish) return statusMessage(status, path);
+    // An HTML page where JSON was expected is almost always "this origin is not
+    // the Flask API" (static dev server, preview host, proxy error page).
+    if (status >= 500) {
+      return 'The server returned an error page instead of data (HTTP ' + status + '). Please try again in a moment.';
+    }
+    if (status === 404) {
+      return 'No Lanka Lens API at ' + api.base + ' (HTTP 404, HTML returned). ' +
+        'Run “python3 server/app.py” and open the site from http://localhost:8000, ' +
+        'or point the app at your API with <meta name="ll-api-base">.';
+    }
+    return 'Unexpected response from ' + api.base + ' (HTTP ' + status + ', expected JSON).';
+  }
+
   var api = {
-    token: localStorage.getItem('ll_token') || '',
+    base: '/api',
+    baseExplicit: false,
+    token: (storeGet('ll_token') || '').replace(/^undefined$|^null$/, ''),
     req: function (method, path, body) {
       var headers = {};
       if (body !== undefined) headers['Content-Type'] = 'application/json';
       if (api.token) headers['Authorization'] = 'Bearer ' + api.token;
-      return fetch('/api' + path, {
+      return fetch(api.base + path, {
         method: method, headers: headers, body: body !== undefined ? JSON.stringify(body) : undefined
       }).then(function (res) {
-        return res.json().catch(function () { return {}; }).then(function (data) {
+        return res.text().catch(function () { return ''; }).then(function (text) {
+          var data = null;
+          if (text) { try { data = JSON.parse(text); } catch (parseErr) { data = null; } }
+          var isJson = !!(data && typeof data === 'object');
+          if (res.ok && (res.status === 204 || !text)) return null;  // no content is a valid success
           if (!res.ok) {
-            var e = new Error((data && data.error) || 'Something went wrong');
-            e.status = res.status;
-            throw e;
+            var msg = isJson ? (data.error || data.message || '') : '';
+            if (!msg) msg = isJson ? statusMessage(res.status, path) : notJsonMessage(res.status, path, text);
+            // A rejected token on a normal (non-auth) call means the stored session is dead.
+            if (res.status === 401 && api.token && !isAuthPath(path)) clearSession();
+            throw apiError(msg, res.status, { path: path, notJson: !isJson });
           }
+          if (!isJson) throw apiError(notJsonMessage(res.status, path, text), res.status, { path: path, notJson: true });
+          if (data.ok === false) throw apiError(data.error || statusMessage(res.status, path), res.status, { path: path });
           return data.data;
         });
+      }, function (netErr) {
+        // fetch itself failed: offline, DNS, mixed content, CORS or a dead server.
+        throw apiError('Cannot reach the Lanka Lens server at ' + api.base + '. ' +
+          'Check your connection and that the backend is running (python3 server/app.py).',
+          0, { path: path, network: true, cause: netErr && netErr.message });
       });
     },
     get: function (p) { return api.req('GET', p); },
     post: function (p, b) { return api.req('POST', p, b); },
     patch: function (p, b) { return api.req('PATCH', p, b); },
     put: function (p, b) { return api.req('PUT', p, b); },
-    del: function (p) { return api.req('DELETE', p); }
+    del: function (p) { return api.req('DELETE', p); },
+    /** Resolve the API base once the api object exists (see configuredApiBase). */
+    init: function () { api.base = configuredApiBase(); return api.base; },
+    health: function (base) {
+      return fetch((base || api.base) + '/health').then(function (res) {
+        return res.text().then(function (t) {
+          var parsed = null;
+          try { parsed = JSON.parse(t); } catch (e) { parsed = null; }
+          return !!(res.ok && parsed && parsed.ok);
+        });
+      }).catch(function () { return false; });
+    },
+    /** Local dev only: if the current origin has no API, try the Flask dev server. */
+    recoverBase: function () {
+      if (api.baseExplicit) return Promise.resolve(false);
+      if (!isLocalDevOrigin() || api.base === API_LOCAL_FALLBACK) return Promise.resolve(false);
+      if (location.protocol === 'https:') return Promise.resolve(false); // mixed content would be blocked anyway
+      return api.health(API_LOCAL_FALLBACK).then(function (good) {
+        if (!good) return false;
+        api.base = API_LOCAL_FALLBACK;
+        sessSet('ll_api_base', API_LOCAL_FALLBACK);
+        return true;
+      });
+    }
   };
+
+  /** Drop every trace of the signed-in session. */
+  function clearSession() {
+    api.token = '';
+    storeDel('ll_token');
+    state.user = null;
+    state.favIds = [];
+  }
 
   function requireAuth() {
     if (state.user) return true;
+    // Don't bounce to the sign-in page while the stored session is still being
+    // restored on boot — that used to log people out on every refresh.
+    if (!state.sessionRestored) return false;
     location.hash = '#/sign-in?next=' + encodeURIComponent(location.hash || '#/');
     return false;
   }
   function setUser(u) {
-    state.user = u;
+    state.user = u || null;
     refreshFavIds();
     renderDrawer();
     renderTabbar();
@@ -1315,7 +1442,7 @@
       if (files.length) {
         var fd = new FormData();
         files.forEach(function (f) { fd.append('files', f); });
-        fetch('/api/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+        fetch(api.base + '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
           .then(function (r) { return r.json(); })
           .then(function (d) {
             if (!d.ok) throw new Error(d.error || 'Upload failed');
@@ -1913,7 +2040,7 @@
           var f = this.files[0];
           if (!f) return;
           var fd = new FormData(); fd.append('file', f);
-          fetch('/api/me/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+          fetch(api.base + '/me/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
             .then(function (r) { return r.json(); })
             .then(function (d) {
               if (!d.ok) throw new Error(d.error || 'Upload failed');
@@ -1980,11 +2107,84 @@
   };
   views.settingsRemount = function () { var v = views.settings(); if (v.mount) v.mount(); };
 
+  /* ---------- auth form helpers ---------- */
+  var EMAIL_RE_CLIENT = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  function formErrorBox(form) {
+    if (!form) return null;
+    var box = form.querySelector('.form-error');
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'form-error';
+      box.setAttribute('role', 'alert');
+      form.insertBefore(box, form.firstChild);
+    }
+    return box;
+  }
+  function showFormError(form, message) {
+    var box = formErrorBox(form);
+    if (!box) { toast(message, 'error'); return; }
+    box.textContent = message;
+    box.classList.add('show');
+    toast(message, 'error');
+  }
+  function clearFormError(form) {
+    var box = form && form.querySelector('.form-error');
+    if (box) { box.textContent = ''; box.classList.remove('show'); }
+  }
+  function setPending(form, pending, label) {
+    if (!form) return;
+    var btn = form.querySelector('button[type="submit"]');
+    if (!btn) return;
+    if (pending) {
+      if (!btn.getAttribute('data-label')) btn.setAttribute('data-label', btn.textContent);
+      btn.disabled = true;
+      btn.classList.add('is-pending');
+      btn.textContent = label || 'Please wait…';
+    } else {
+      btn.disabled = false;
+      btn.classList.remove('is-pending');
+      var prev = btn.getAttribute('data-label');
+      if (prev) btn.textContent = prev;
+    }
+  }
+  /** Only ever navigate to an internal hash route after signing in. */
+  function safeNext(raw) {
+    var n = String(raw == null ? '' : raw).trim();
+    if (!n) return '#/';
+    if (/[a-z][a-z0-9+.\-]*:/i.test(n) || n.indexOf('//') !== -1) return '#/';  // any scheme or protocol-relative URL
+    if (n.charAt(0) !== '#') n = '#' + (n.charAt(0) === '/' ? '' : '/') + n;
+    if (n.slice(0, 2) !== '#/') return '#/';                  // must be an internal hash route
+    if (/^#\/\/+/.test(n)) return '#/';                       // "#//evil.com" → external
+    if (/^#\/(sign-in|sign-up|sign-out|forgot|reset-password|verify-email)([/?]|$)/.test(n)) return '#/';
+    return n;
+  }
+  /** Persist a freshly issued session token (guards against a malformed 200). */
+  function applySession(d) {
+    if (!d || typeof d.token !== 'string' || !d.token) {
+      throw apiError('The server did not return a session token. Please try again.', 0);
+    }
+    if (!d.user || !d.user.id) {
+      throw apiError('The server did not return your account details. Please try again.', 0);
+    }
+    api.token = d.token;
+    storeSet('ll_token', d.token);
+    setUser(d.user);
+    return d;
+  }
+  function firstName(u) {
+    var n = (u && u.name ? String(u.name) : '').trim();
+    return n ? n.split(/\s+/)[0] : 'there';
+  }
+
   views.signin = function (query) {
     var html = header('Sign In', {});
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Welcome back</h1><p>Sign in to manage your listings and chats.</p></div>' +
-      '<form id="login-form"><div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
-      '<div class="form-group"><label>Password</label><input class="input" type="password" name="password" required placeholder="••••••••"></div>' +
+      '<form id="login-form" class="auth-form"><div class="form-error" role="alert"></div>' +
+      '<div class="form-group"><label for="si-email">Email</label>' +
+      '<input class="input" id="si-email" type="email" name="email" required placeholder="you@example.com" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false"></div>' +
+      '<div class="form-group"><label for="si-password">Password</label>' +
+      '<input class="input" id="si-password" type="password" name="password" required placeholder="••••••••" autocomplete="current-password"></div>' +
       '<button class="btn btn-primary" type="submit">Sign In</button></form>' +
       '<div class="flex jcsb aic" style="margin-top:10px">' +
       '<a class="fs12 fw7" data-nav="#/forgot">Forgot password?</a></div>' +
@@ -1992,37 +2192,68 @@
       '<div class="auth-alt">New to Lanka Lens? <a data-nav="#/sign-up">Create an account</a></div></div>';
     return {
       html: html,
+      hideTabbar: true,
+      pageClass: 'page-auth',
       mount: function () {
-        $('#login-form').addEventListener('submit', function (e) {
+        var form = $('#login-form');
+        if (!form) return;
+        var emailEl = $('[name="email"]', form);
+        var passEl = $('[name="password"]', form);
+        if (emailEl) emailEl.addEventListener('input', function () { clearFormError(form); });
+        if (passEl) passEl.addEventListener('input', function () { clearFormError(form); });
+
+        form.addEventListener('submit', function (e) {
           e.preventDefault();
-          api.post('/auth/login', { email: $('[name="email"]', this).value, password: $('[name="password"]', this).value }).then(function (d) {
-            api.token = d.token; localStorage.setItem('ll_token', d.token);
-            setUser(d.user);
-            toast('Welcome back, ' + d.user.name.split(' ')[0] + '!', 'success');
-            var next = query.get('next');
-            location.hash = next && next !== '#/sign-in' ? next : '#/';
-          }).catch(function (er) { toast(er.message, 'error'); });
+          clearFormError(form);
+          var email = (emailEl.value || '').trim();
+          var password = passEl.value || '';
+
+          // Client-side checks mirror the API so the user gets an instant, precise
+          // message; server errors are still shown verbatim below.
+          if (!email) { showFormError(form, 'Please enter your email.'); emailEl.focus(); return; }
+          if (!EMAIL_RE_CLIENT.test(email)) { showFormError(form, 'That doesn’t look like a valid email address.'); emailEl.focus(); return; }
+          if (!password) { showFormError(form, 'Please enter your password.'); passEl.focus(); return; }
+
+          setPending(form, true, 'Signing in…');
+          api.post('/auth/login', { email: email, password: password }).then(function (d) {
+            applySession(d);
+            setPending(form, false);
+            toast('Welcome back, ' + firstName(d.user) + '!', 'success');
+            location.hash = safeNext(query && query.get ? query.get('next') : '');
+          }).catch(function (er) {
+            setPending(form, false);
+            showFormError(form, (er && er.message) || 'Sign in failed. Please try again.');
+            if (er && er.status === 401) { passEl.value = ''; passEl.focus(); }
+            else if (er && (er.network || er.notJson)) { emailEl.focus(); }
+          });
         });
       }
     };
   };
 
-  views.signup = function () {
+  views.signup = function (query) {
     var html = header('Create Account', {});
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Join Lanka Lens</h1><p>Create a free account to buy and sell camera gear.</p></div>' +
-      '<form id="signup-form"><div class="form-group"><label>Full name</label><input class="input" name="name" required placeholder="Your name"></div>' +
-      '<div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
-      '<div class="form-group"><label>Phone (optional)</label><input class="input" name="phone" placeholder="+94 77 123 4567"></div>' +
-      '<div class="form-group"><label>Password</label><input class="input" type="password" name="password" required placeholder="At least 6 characters"></div>' +
+      '<form id="signup-form" class="auth-form"><div class="form-error" role="alert"></div>' +
+      '<div class="form-group"><label for="su-name">Full name</label><input class="input" id="su-name" name="name" required placeholder="Your name" autocomplete="name"></div>' +
+      '<div class="form-group"><label for="su-email">Email</label><input class="input" id="su-email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false"></div>' +
+      '<div class="form-group"><label for="su-phone">Phone (optional)</label><input class="input" id="su-phone" type="tel" name="phone" placeholder="+94 77 123 4567" autocomplete="tel" inputmode="tel"></div>' +
+      '<div class="form-group"><label for="su-password">Password</label><input class="input" id="su-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
       '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
-      '<div class="opt active" data-stype="individual">Individual</div>' +
-      '<div class="opt" data-stype="business">Business</div></div></div>' +
-      '<button class="btn btn-primary" type="submit">Create Account</button></form>' +
+      '<div class="opt active" data-stype="individual" role="button" tabindex="0">Individual</div>' +
+      '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div></div>' +
+      '<button class="btn btn-primary" type="submit">Create Account</button>' +
+      '<p class="form-hint" style="margin-top:12px;text-align:center">By creating an account you agree to our ' +
+      '<a data-nav="#/terms">Terms</a> and <a data-nav="#/privacy">Privacy Policy</a>.</p></form>' +
       '<div id="verify-banner"></div>' +
       '<div class="auth-alt">Already have an account? <a data-nav="#/sign-in">Sign in</a></div></div>';
     return {
       html: html,
+      hideTabbar: true,
+      pageClass: 'page-auth',
       mount: function () {
+        var form = $('#signup-form');
+        if (!form) return;
         var stype = 'individual';
         $$('#stype-seg .opt').forEach(function (o) {
           o.addEventListener('click', function () {
@@ -2031,38 +2262,69 @@
             stype = o.getAttribute('data-stype');
           });
         });
-        $('#signup-form').addEventListener('submit', function (e) {
+        $$('input', form).forEach(function (i) { i.addEventListener('input', function () { clearFormError(form); }); });
+
+        form.addEventListener('submit', function (e) {
           e.preventDefault();
-          var pw = $('[name="password"]', this).value;
+          clearFormError(form);
+          var name = ($('[name="name"]', form).value || '').trim();
+          var email = ($('[name="email"]', form).value || '').trim();
+          var phone = ($('[name="phone"]', form).value || '').trim();
+          var pw = $('[name="password"]', form).value || '';
+
+          if (name.length < 2) { showFormError(form, 'Please enter your name.'); $('[name="name"]', form).focus(); return; }
+          if (!EMAIL_RE_CLIENT.test(email)) { showFormError(form, 'Please enter a valid email address.'); $('[name="email"]', form).focus(); return; }
+          if (pw.length < 6) { showFormError(form, 'Password must be at least 6 characters.'); $('[name="password"]', form).focus(); return; }
+
+          setPending(form, true, 'Creating account…');
           api.post('/auth/signup', {
-            name: $('[name="name"]', this).value, email: $('[name="email"]', this).value,
-            phone: $('[name="phone"]', this).value, password: pw, seller_type: stype
+            name: name, email: email, phone: phone, password: pw, seller_type: stype
           }).then(function (d) {
-            api.token = d.token; localStorage.setItem('ll_token', d.token);
-            setUser(d.user);
-            toast('Account created — welcome!', 'success');
+            applySession(d);
+            setPending(form, false);
+            toast('Account created — welcome, ' + firstName(d.user) + '!', 'success');
             if (d.dev && d.dev.verify_email_token) {
-              $('#verify-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px">' +
-                '<div class="fs13" style="color:var(--ink)"><b>Verify your email</b></div>' +
-                '<p class="fs12 muted" style="margin:6px 0 10px">We sent a link to your inbox. In this dev build you can verify instantly:</p>' +
-                '<a class="btn btn-primary btn-sm" data-nav="#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token) + '">Verify now</a></div>';
+              var banner = $('#verify-banner');
+              if (banner) {
+                banner.innerHTML = '<div class="info-card mt16" style="padding:13px 14px">' +
+                  '<div class="fs13" style="color:var(--ink)"><b>Verify your email</b></div>' +
+                  '<p class="fs12 muted" style="margin:6px 0 10px">We sent a link to your inbox. In this dev build you can verify instantly:</p>' +
+                  '<div class="flex gap8" style="flex-wrap:wrap">' +
+                  '<a class="btn btn-primary btn-sm" data-nav="#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token) + '">Verify now</a>' +
+                  '<a class="btn btn-outline btn-sm" data-nav="' + esc(safeNext(query && query.get ? query.get('next') : '')) + '">Continue browsing</a></div></div>';
+                if (banner.scrollIntoView) { try { banner.scrollIntoView({ block: 'nearest' }); } catch (e2) {} }
+              }
             } else {
-              location.hash = '#/';
+              location.hash = safeNext(query && query.get ? query.get('next') : '');
             }
-          }).catch(function (er) { toast(er.message, 'error'); });
+          }).catch(function (er) {
+            setPending(form, false);
+            showFormError(form, (er && er.message) || 'Sign up failed. Please try again.');
+            if (er && er.status === 409) { $('[name="email"]', form).focus(); }
+          });
         });
       }
     };
   };
 
   views.signout = function () {
-    api.post('/auth/logout').catch(function () {});
-    api.token = ''; localStorage.removeItem('ll_token');
-    state.user = null; state.favIds = [];
+    // Ask the server to drop the session, but clear local state regardless of
+    // the outcome so a failed request can never leave the user "signed in".
+    // The request must be built while the token is still set (headers are read
+    // synchronously), so fire it before clearing.
+    if (api.token) {
+      api.post('/auth/logout').catch(function () {});
+    }
+    clearSession();
     renderDrawer(); renderTabbar();
     toast('Signed out');
+    state.sessionRestored = true;
     location.hash = '#/';
-    return { html: '<div class="spinner" style="margin-top:80px"></div>', mount: function () {} };
+    return {
+      html: '<div class="spinner" style="margin-top:80px"></div>',
+      hideTabbar: true,
+      mount: function () {}
+    };
   };
 
   views.contact = function () {
@@ -2285,22 +2547,35 @@
   views.forgot = function () {
     var html = header('Forgot Password', {});
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Reset your password</h1><p>Enter your email and we’ll send you a reset link.</p></div>' +
-      '<form id="forgot-form"><div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
+      '<form id="forgot-form" class="auth-form"><div class="form-error" role="alert"></div>' +
+      '<div class="form-group"><label for="fp-email">Email</label><input class="input" id="fp-email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autocapitalize="none" spellcheck="false"></div>' +
       '<button class="btn btn-primary" type="submit">Send reset link</button></form>' +
       '<div id="reset-banner"></div>' +
       '<div class="auth-alt">Remembered it? <a data-nav="#/sign-in">Sign in</a></div></div>';
     return {
       html: html,
+      hideTabbar: true,
+      pageClass: 'page-auth',
       mount: function () {
-        $('#forgot-form').addEventListener('submit', function (e) {
+        var form = $('#forgot-form');
+        if (!form) return;
+        form.addEventListener('submit', function (e) {
           e.preventDefault();
-          api.post('/auth/forgot', { email: $('[name="email"]', this).value }).then(function (d) {
+          clearFormError(form);
+          var email = ($('[name="email"]', form).value || '').trim();
+          if (!EMAIL_RE_CLIENT.test(email)) { showFormError(form, 'Please enter a valid email address.'); return; }
+          setPending(form, true, 'Sending…');
+          api.post('/auth/forgot', { email: email }).then(function (d) {
+            setPending(form, false);
             if (d.dev && d.dev.reset_token) {
               $('#reset-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px"><div class="fs13" style="color:var(--ink)"><b>Reset link created</b></div><p class="fs12 muted" style="margin:6px 0 10px">We emailed you a link. In this dev build:</p><a class="btn btn-primary btn-sm" data-nav="#/reset-password?token=' + encodeURIComponent(d.dev.reset_token) + '">Open reset page</a></div>';
             } else {
               $('#reset-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px"><p class="fs13">If that email exists, a reset link has been sent.</p></div>';
             }
-          }).catch(function (er) { toast(er.message, 'error'); });
+          }).catch(function (er) {
+            setPending(form, false);
+            showFormError(form, (er && er.message) || 'Could not send the reset link. Please try again.');
+          });
         });
       }
     };
@@ -2310,22 +2585,35 @@
     var token = q.get('token') || '';
     var html = header('Set New Password', {});
     html += '<div class="auth-wrap"><div class="auth-hero"><h1>Choose a new password</h1><p>Enter a new password for your account.</p></div>' +
-      '<form id="reset-form"><div class="form-group"><label>New password</label><input class="input" type="password" name="password" required placeholder="At least 6 characters"></div>' +
-      '<div class="form-group"><label>Confirm password</label><input class="input" type="password" name="confirm" required placeholder="Repeat it"></div>' +
+      '<form id="reset-form" class="auth-form"><div class="form-error" role="alert"></div>' +
+      '<div class="form-group"><label for="rp-password">New password</label><input class="input" id="rp-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
+      '<div class="form-group"><label for="rp-confirm">Confirm password</label><input class="input" id="rp-confirm" type="password" name="confirm" required minlength="6" placeholder="Repeat it" autocomplete="new-password"></div>' +
       '<button class="btn btn-primary" type="submit">Reset password</button></form>' +
       '<div class="auth-alt"><a data-nav="#/sign-in">Back to sign in</a></div></div>';
     return {
       html: html,
+      hideTabbar: true,
+      pageClass: 'page-auth',
       mount: function () {
-        $('#reset-form').addEventListener('submit', function (e) {
+        var form = $('#reset-form');
+        if (!form) return;
+        form.addEventListener('submit', function (e) {
           e.preventDefault();
-          var pw = $('[name="password"]', this).value;
-          var cf = $('[name="confirm"]', this).value;
-          if (pw !== cf) return toast('Passwords do not match', 'error');
+          clearFormError(form);
+          var pw = $('[name="password"]', form).value || '';
+          var cf = $('[name="confirm"]', form).value || '';
+          if (!token) { showFormError(form, 'This reset link is missing its token. Request a new one.'); return; }
+          if (pw.length < 6) { showFormError(form, 'Password must be at least 6 characters.'); return; }
+          if (pw !== cf) { showFormError(form, 'Passwords do not match.'); $('[name="confirm"]', form).focus(); return; }
+          setPending(form, true, 'Resetting…');
           api.post('/auth/reset', { token: token, password: pw }).then(function () {
+            setPending(form, false);
             toast('Password reset — sign in with your new password', 'success');
             location.hash = '#/sign-in';
-          }).catch(function (er) { toast(er.message, 'error'); });
+          }).catch(function (er) {
+            setPending(form, false);
+            showFormError(form, (er && er.message) || 'Could not reset the password. Please try again.');
+          });
         });
       }
     };
@@ -2337,7 +2625,13 @@
     html += '<div id="verify-root"><div class="spinner" style="margin-top:80px"></div></div>';
     return {
       html: html,
+      hideTabbar: true,
+      pageClass: 'page-auth',
       mount: function () {
+        if (!token) {
+          $('#verify-root').innerHTML = '<div class="empty"><div class="e-icon">' + icon('alert-circle-outline') + '</div><h3>Missing token</h3><p>This verification link is incomplete.</p></div>';
+          return;
+        }
         api.post('/auth/verify-email', { token: token }).then(function () {
           if (state.user) { state.user.email_verified = true; renderDrawer(); }
           $('#verify-root').innerHTML = '<div class="empty"><div class="e-icon">' + icon('checkmark-circle-outline') + '</div><h3>Email verified</h3><p>Thanks — your email is now confirmed.</p><a class="btn btn-primary btn-sm" data-nav="#/" style="margin-top:12px">Continue</a></div>';
@@ -2435,7 +2729,7 @@
         var f = this.files[0];
         if (!f) return;
         var fd = new FormData(); fd.append('file', f);
-        fetch('/api/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+        fetch(api.base + '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
           .then(function (r) { return r.json(); })
           .then(function (d) {
             if (!d.ok) throw new Error(d.error || 'Upload failed');
@@ -3407,7 +3701,7 @@
     { re: /^\/my-shop$/, handler: function () { return views.myShop(); } },
     { re: /^\/shop\/([^\/]+)$/, handler: function (p, q, m) { return views.shopPage({ slug: m[1] }); } },
     { re: /^\/sign-in$/, handler: function (p, q) { return views.signin(q); } },
-    { re: /^\/sign-up$/, handler: function () { return views.signup(); } },
+    { re: /^\/sign-up$/, handler: function (p, q) { return views.signup(q); } },
     { re: /^\/forgot$/, handler: function () { return views.forgot(); } },
     { re: /^\/reset-password$/, handler: function (p, q) { return views.resetPassword(q); } },
     { re: /^\/verify-email$/, handler: function (p, q) { return views.verifyEmail(q); } },
@@ -3452,6 +3746,12 @@
     var route = currentRoute();
     var v = route.view;
     var page = $('#page');
+    // A view that needs a session but renders nothing while the stored token is
+    // still being verified would otherwise flash an empty page.
+    if (!v.html && !state.sessionRestored) {
+      v = { html: '<div class="spinner" style="margin-top:80px"></div>', mount: function () {}, hideTabbar: v.hideTabbar, pageClass: v.pageClass };
+    }
+    page.className = 'page-view' + (v.pageClass ? ' ' + v.pageClass : '');
     page.innerHTML = v.html;
     document.getElementById('app').classList.toggle('hide-tabbar', !!v.hideTabbar);
     window.scrollTo(0, 0);
@@ -3617,7 +3917,45 @@
     return null;
   }
 
+  function loadBootstrapData() {
+    function load() {
+      return Promise.all([
+        api.get('/meta').then(function (d) { state.meta = d; }),
+        api.get('/locations').then(function (d) { state.locations = d; })
+      ]);
+    }
+    return load().catch(function () {
+      // Nothing answered on this origin. When the page is being served from a
+      // local dev origin without the Flask app behind it, point the client at
+      // the dev server and retry once instead of failing every later request.
+      return api.recoverBase().then(function (switched) {
+        if (!switched) return null;
+        return load().catch(function () { return null; });
+      });
+    });
+  }
+
+  function restoreSession() {
+    if (!api.token) {
+      state.sessionRestored = true;
+      return Promise.resolve();
+    }
+    return api.get('/me').then(function (d) {
+      state.user = (d && d.user) || null;
+      if (!state.user) clearSession();
+    }).catch(function (e) {
+      // A rejected token means the stored session is dead — drop it so the UI
+      // never claims to be signed in. On a pure network failure keep it and
+      // retry on the next load.
+      if (!e || e.status !== 0) clearSession();
+    }).then(function () {
+      state.sessionRestored = true;
+      refreshFavIds();
+    });
+  }
+
   function boot() {
+    api.init();
     renderTabbar();
     renderDrawer();
 
@@ -3627,21 +3965,23 @@
       history.replaceState(null, '', location.pathname + location.search + target);
     }
 
-    Promise.all([
-      api.get('/meta').then(function (d) { state.meta = d; }),
-      api.get('/locations').then(function (d) { state.locations = d; })
-    ]).catch(function () {}).then(function () {
+    // Both the reference data and the stored session must be resolved BEFORE the
+    // first render. Previously the first render raced the /api/me call, so
+    // refreshing a protected route (e.g. #/profile, #/favorites) rendered as
+    // signed-out and bounced a signed-in user straight back to the sign-in page.
+    var bootDone = false;
+    function firstRender() {
+      renderDrawer();
+      renderTabbar();
       render();
+    }
+    // Never leave the shell blank if the API is unreachable/very slow.
+    setTimeout(function () { if (!bootDone) firstRender(); }, 6000);
+    Promise.all([loadBootstrapData(), restoreSession()]).then(function () {
+      bootDone = true;
+      firstRender();
     });
 
-    if (api.token) {
-      api.get('/me').then(function (d) {
-        state.user = d.user;
-        renderDrawer(); renderTabbar();
-      }).catch(function () {
-        api.token = ''; localStorage.removeItem('ll_token');
-      }).then(function () { refreshFavIds(); });
-    }
     bindGlobal();
   }
 

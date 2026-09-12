@@ -30,10 +30,27 @@
 
 * { box-sizing: border-box; }
 
+/* ---- Document scrolling (overrides the Framework7 app-shell reset) --------
+   css/framework7.bundle.min.css ships a reset for Framework7's own
+   ".framework7-root" layout which sets position relative, height 100% and
+   overflow-x hidden on html and body, and overflow hidden on body itself.
+   Lanka Lens never initialises Framework7 — it renders a normal, scrolling
+   document into #app — so those rules turned body into a rigid,
+   viewport-height clipping box. The document could not scroll at all, which
+   is why the bottom of the sign-in / sign-up pages (the submit button) sat
+   below the fold and was unreachable on phones. The rules below restore
+   natural document scrolling while keeping the template's look and its
+   horizontal clipping. */
+html {
+  height: 100%;
+  overflow-x: hidden;
+  overflow-y: auto;
+  -webkit-text-size-adjust: 100%;
+}
+
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
   background: #E9EEEB;
   color: var(--ink-2);
   font-family: 'Montserrat', 'Segoe UI', system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
@@ -42,6 +59,12 @@ html, body {
 
 body {
   color: var(--ink-2) !important;
+  /* Undo the Framework7 bundle's rigid body box: the body must be allowed to
+     grow with its content (height auto, overflow visible) so the viewport can
+     scroll it. min-height keeps the shell filling short pages. */
+  height: auto;
+  min-height: 100%;
+  overflow: visible;
 }
 
 h1,h2,h3,h4,h5,h6 {
@@ -68,15 +91,20 @@ button { font-family: inherit; }
 #app {
   max-width: var(--shell);
   margin: 0 auto;
-  min-height: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;   /* dynamic viewport height: correct on mobile browsers */
   background: var(--bg);
   position: relative;
   box-shadow: 0 0 60px rgba(16,32,27,.14);
 }
 
 .page-view {
+  /* min-height (not a fixed height) so the page always grows with its content
+     and the document — not an inner box — does the scrolling. 100dvh/100svh
+     avoid the classic mobile bug where 100vh is taller than the visible area. */
   padding-bottom: calc(70px + env(safe-area-inset-bottom));
   min-height: 100vh;
+  min-height: 100dvh;
   animation: fadein .18s ease;
 }
 
@@ -671,13 +699,52 @@ button { font-family: inherit; }
 .switch input:checked + .slider::before { transform: translateX(20px); }
 
 /* ============ Auth ============ */
-.auth-wrap { max-width: 400px; margin: 0 auto; padding: 26px 20px; }
+.auth-wrap {
+  max-width: 400px;
+  margin: 0 auto;
+  padding: 26px 20px;
+  /* room for the submit button + the "already have an account?" line + the
+     iOS/Android gesture bar, so nothing is ever cut off on a small phone */
+  padding-bottom: calc(36px + env(safe-area-inset-bottom));
+}
+/* The bottom tab bar is not needed on the auth pages — hiding it removes the
+   fixed 64px strip that used to cover the submit button. */
+.page-view.page-auth,
+#app.hide-tabbar .page-view.page-auth { padding-bottom: 0; }
+.auth-form { margin-top: 2px; }
 .auth-hero { text-align: center; margin-bottom: 22px; }
 .auth-hero .brand-mark { width: 62px; height: 62px; margin: 0 auto 12px; }
 .auth-hero h1 { font-size: 22px; font-weight: 800; }
 .auth-hero p { font-size: 13px; color: var(--muted); margin-top: 4px; }
 .auth-alt { text-align: center; margin-top: 18px; font-size: 13px; color: var(--muted); }
 .auth-alt a { color: var(--brand); font-weight: 700; }
+
+/* Inline form error (used by sign in / sign up / password reset). Errors are
+   shown here *and* as a toast so they survive the toast's 2.4s timeout. */
+.form-error {
+  display: none;
+  background: #FDECEC;
+  border: 1px solid #F5C9C9;
+  color: #B42318;
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  word-break: break-word;
+}
+.form-error.show { display: block; }
+.btn.is-pending { opacity: .7; pointer-events: none; }
+
+/* Very short viewports (small phones, landscape): keep the form compact so the
+   submit button needs as little scrolling as possible. */
+@media (max-height: 560px) {
+  .auth-wrap { padding-top: 14px; }
+  .auth-hero { margin-bottom: 14px; }
+  .auth-hero .brand-mark { width: 48px; height: 48px; margin-bottom: 8px; }
+  .auth-hero h1 { font-size: 19px; }
+}
 
 /* ============ Chat ============ */
 .chat-list-item {
