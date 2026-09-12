@@ -1,0 +1,13 @@
+node_modules/
+data/*.sqlite
+data/*.sqlite-*
+uploads/users/
+.env
+npm-debug.log*
+.DS_Store
+
+# generated at seed/runtime
+uploads/seed/
+uploads/listings/
+uploads/messages/
+tmp-e2e/

@@ -1,108 +1,104 @@
-"use strict";
-var routes = [
-  {
-    path: '/',
-    Url: './index.html',
-  },
+/* Lanka Lens clean-URL routes (sections 46-47, 55).
+   Fragment pages are framework7 page elements in /pages. */
+'use strict';
+const routes = [
+  { path: '/', url: '/pages/home.html' },
+  { path: '/search/', url: '/pages/browse.html' },
+  { path: '/search', url: '/pages/browse.html' },
 
-  {
-    path: '/ads/',
-    url: './ads.html',
-  },
+  // category tree
+  { path: '/cameras/', url: '/pages/browse.html' },
+  { path: '/cameras', url: '/pages/browse.html' },
+  { path: '/cameras/:sub/', url: '/pages/browse.html' },
+  { path: '/cameras/:sub', url: '/pages/browse.html' },
+  { path: '/lenses/', url: '/pages/browse.html' },
+  { path: '/lenses', url: '/pages/browse.html' },
+  { path: '/lenses/:sub/', url: '/pages/browse.html' },
+  { path: '/lenses/:sub', url: '/pages/browse.html' },
+  { path: '/action-cameras/', url: '/pages/browse.html' },
+  { path: '/action-cameras', url: '/pages/browse.html' },
+  { path: '/action-cameras/:sub/', url: '/pages/browse.html' },
+  { path: '/action-cameras/:sub', url: '/pages/browse.html' },
+  { path: '/drones/', url: '/pages/browse.html' },
+  { path: '/drones', url: '/pages/browse.html' },
+  { path: '/drones/:sub/', url: '/pages/browse.html' },
+  { path: '/drones/:sub', url: '/pages/browse.html' },
+  { path: '/accessories/', url: '/pages/browse.html' },
+  { path: '/accessories', url: '/pages/browse.html' },
+  { path: '/accessories/:sub/', url: '/pages/browse.html' },
+  { path: '/accessories/:sub', url: '/pages/browse.html' },
+  { path: '/brand/:brand/', url: '/pages/browse.html' },
+  { path: '/brand/:brand', url: '/pages/browse.html' },
 
-  {
-    path: '/ads-details/',
-    url: './ads-details.html',
-  },
+  // listings
+  { path: '/listing/:slug/', url: '/pages/listing.html' },
+  { path: '/listing/:slug', url: '/pages/listing.html' },
 
-  {
-    path: '/add-ads/',
-    url: './add-ads.html',
-  },
+  // posting & account
+  { path: '/post/', url: '/pages/post.html' },
+  { path: '/post', url: '/pages/post.html' },
+  { path: '/my-listings/', url: '/pages/my-listings.html' },
+  { path: '/my-listings', url: '/pages/my-listings.html' },
+  { path: '/favorites/', url: '/pages/favorites.html' },
+  { path: '/favorites', url: '/pages/favorites.html' },
+  { path: '/chat/', url: '/pages/chat.html' },
+  { path: '/chat', url: '/pages/chat.html' },
+  { path: '/notifications/', url: '/pages/notifications.html' },
+  { path: '/notifications', url: '/pages/notifications.html' },
+  { path: '/profile/', url: '/pages/profile.html' },
+  { path: '/profile', url: '/pages/profile.html' },
+  { path: '/user/:id/', url: '/pages/profile.html' },
+  { path: '/user/:id', url: '/pages/profile.html' },
+  { path: '/settings/', url: '/pages/settings.html' },
+  { path: '/settings', url: '/pages/settings.html' },
+  { path: '/dashboard/', url: '/pages/dashboard.html' },
+  { path: '/dashboard', url: '/pages/dashboard.html' },
 
-  {
-    path: '/add-ads-product-details/',
-    url: './add-ads-product-details.html',
-  },
+  // auth
+  { path: '/sign-in/', url: '/pages/auth.html' },
+  { path: '/sign-in', url: '/pages/auth.html' },
+  { path: '/sign-up/', url: '/pages/auth.html' },
+  { path: '/sign-up', url: '/pages/auth.html' },
+  { path: '/forgot-password/', url: '/pages/auth.html' },
+  { path: '/forgot-password', url: '/pages/auth.html' },
+  { path: '/reset-password/', url: '/pages/auth.html' },
+  { path: '/reset-password', url: '/pages/auth.html' },
+  { path: '/verify-email/', url: '/pages/auth.html' },
+  { path: '/verify-email', url: '/pages/auth.html' },
 
-  {
-    path: '/my-ads/',
-    url: './my-ads.html',
-  },
+  // shops
+  { path: '/shops/', url: '/pages/shops.html' },
+  { path: '/shops', url: '/pages/shops.html' },
+  { path: '/shop/:slug/', url: '/pages/shop.html' },
+  { path: '/shop/:slug', url: '/pages/shop.html' },
 
-  {
-    path: '/favorites/',
-    url: './favorites.html',
-  },
+  // content
+  { path: '/blog/', url: '/pages/blog.html' },
+  { path: '/blog', url: '/pages/blog.html' },
+  { path: '/blog/:slug/', url: '/pages/blog-article.html' },
+  { path: '/blog/:slug', url: '/pages/blog-article.html' },
+  { path: '/about/', url: '/pages/cms.html' },
+  { path: '/about', url: '/pages/cms.html' },
+  { path: '/safety/', url: '/pages/cms.html' },
+  { path: '/safety', url: '/pages/cms.html' },
+  { path: '/buying-guide/', url: '/pages/cms.html' },
+  { path: '/buying-guide', url: '/pages/cms.html' },
+  { path: '/sell/', url: '/pages/cms.html' },
+  { path: '/sell', url: '/pages/cms.html' },
+  { path: '/privacy/', url: '/pages/cms.html' },
+  { path: '/privacy', url: '/pages/cms.html' },
+  { path: '/terms/', url: '/pages/cms.html' },
+  { path: '/terms', url: '/pages/cms.html' },
+  { path: '/faq/', url: '/pages/cms.html' },
+  { path: '/faq', url: '/pages/cms.html' },
+  { path: '/help/', url: '/pages/cms.html' },
+  { path: '/help', url: '/pages/cms.html' },
+  { path: '/contact/', url: '/pages/contact.html' },
+  { path: '/contact', url: '/pages/contact.html' },
+  { path: '/report/', url: '/pages/report.html' },
+  { path: '/report', url: '/pages/report.html' },
 
-  {
-    path: '/search/',
-    url: './search.html',
-  },
-
-  {
-    path: '/profile/',
-    url: './profile.html',
-  },
-
-  {
-    path: '/categories/',
-    url: './categories.html',
-  },
-
-  {
-    path: '/category-details/',
-    url: './category-details.html',
-  },
-
-  {
-    path: '/chat/',
-    url: './chat.html',
-  },
-
-  {
-    path: '/notifications/',
-    url: './notifications.html',
-  },
-
-  {
-    path: '/settings/',
-    url: './settings.html',
-  },
-
-  {
-    path: '/blog/',
-    url: './blog.html',
-  },
-
-  {
-    path: '/blog-details/',
-    url: './blog-details.html',
-  },
-
-  {
-    path: '/sign-in/',
-    url: './sign-in.html',
-  },
-
-  {
-    path: '/sign-up/',
-    url: './sign-up.html',
-  },
-
-  {
-    path: '/contact/',
-    url: './contact.html',
-  },
-
-  {
-    path: '/pages/',
-    url: './pages.html',
-  },
-
-  {
-    path: '/blank-page/',
-    url: './blank-page.html',
-  },
-
+  // admin
+  { path: '/admin/', url: '/pages/admin.html' },
+  { path: '/admin', url: '/pages/admin.html' },
 ];
