@@ -1,4 +1,9 @@
 Flask>=3.0
 Pillow>=10.0
 gunicorn>=23.0,<24
+# B2 is reached through the S3-compatible API. boto3 >= 1.36 adds an automatic
+# CRC32 checksum to every PutObject and sends it as an aws-chunked trailer,
+# which Backblaze rejects; server/app.py:b2_client_config() turns that off with
+# request/response_checksum_calculation="when_required" (and falls back cleanly
+# on botocore < 1.36, which never sent those headers). Do not remove that config.
 boto3>=1.34
