@@ -113,6 +113,7 @@ Static cascade analysis of both stylesheets (no fixed-width overflow risks found
 - Failed login returns a useful message **without** revealing whether the account exists.
 - No secret, key, hash or token is present in any frontend file; `/admin/users` was asserted not to leak `password_hash`.
 - Weak passwords and duplicate emails are rejected at signup.
+- **Rate limited:** `login` (20/min/IP), `signup` (10/min/IP) and `forgot_password` (10/5min/IP) each get their own bucket keyed by endpoint *and* IP, returning 429 with a JSON body. (Gaps in §17.3.)
 
 ## 10. Form & input security (requirement 10)
 
@@ -198,9 +199,9 @@ None of these are application defects found by the audit; they are environment a
 
 1. **No real browser was available.** Chromium/Firefox could not be installed in this sandbox (every CDN and the apt mirrors are unreachable), so all UI verification is jsdom plus static CSS cascade analysis. DOM structure, class names, inline styles, computed padding and listener/timer behaviour are genuinely verified; **actual painted pixels at 320–1920 px, real `env(safe-area-inset-bottom)` values, on-device keyboard behaviour and paint timing are reasoned about, not observed.** A pass on real hardware is the one thing this audit cannot substitute for.
 2. **Development server.** Flask's built-in server is what runs here (`WARNING: This is a development server`). Production needs gunicorn/waitress behind a reverse proxy.
-3. **No rate limiting.** There is no throttle on `/api/auth/login` or on uploads, so credential stuffing and upload abuse are possible. Recommend `flask-limiter` (e.g. 5 logins/min/IP).
+3. **Rate limiting covers auth but not uploads.** `login` (20/min/IP), `signup` (10/min/IP) and `forgot_password` (10/5min/IP) are throttled by a per-endpoint-per-IP bucket that honours `X-Forwarded-For`, so credential stuffing is blunted. Two gaps remain: `/api/upload` has **no** throttle (an authenticated user could spam uploads to exhaust disk), and the buckets live in an in-process dict — they are per-worker, so running N gunicorn workers multiplies the effective limit by N, and they reset on restart. A shared store (Redis) plus `flask-limiter` would close both.
 4. **Token storage.** Session tokens are returned in JSON and kept in `localStorage`, which is readable by any script on the origin. The XSS audit found no injection vector, but `httpOnly` + `SameSite` cookies would remove the class of risk entirely.
-5. **No Content-Security-Policy header.** `X-Content-Type-Options`, `X-Frame-Options` and `Referrer-Policy` are set; a CSP would add defence in depth (note: the app uses inline styles heavily, so a CSP would need `style-src 'unsafe-inline'` or a refactor).
+5. **No Content-Security-Policy or HSTS header.** `X-Content-Type-Options: nosniff`, `X-Frame-Options: SAMEORIGIN` and `Referrer-Policy: strict-origin-when-cross-origin` are all set and verified; CSP and `Strict-Transport-Security` are absent. A CSP would add defence in depth (note: the app uses inline styles heavily, so a CSP would need `style-src 'unsafe-inline'` or a refactor), and HSTS is normally best set at the reverse proxy.
 6. **Password-reset email is not wired.** The flow issues and stores a reset token correctly, but there is no SMTP provider configured, so no mail is actually delivered.
 
 ## 18. Tests performed
