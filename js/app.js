@@ -295,20 +295,26 @@
     return 'Cannot reach the Lanka Lens server. Check your connection, then try again.';
   }
   function notJsonMessage(status, path, text) {
-    if (!(text || '').length) return 'The server returned an empty response. Please try again.';
+    // Keep the actionable HTTP result when a proxy/static server sends no body.
+    // This is deliberately not a raw response dump: upstream error pages can
+    // contain implementation details, but the status and requested endpoint are
+    // enough for a user (and support) to diagnose the failed request.
+    var endpoint = api.base + path;
+    if (!(text || '').length) {
+      return 'Request to ' + endpoint + ' failed with HTTP ' + (status || 'unknown') +
+        ': the server returned an empty response.';
+    }
     var htmlish = /<\/?(html|head|body|!doctype)/i.test(text);
     if (!htmlish) return statusMessage(status, path);
     // An HTML page where JSON was expected is almost always "this origin is not
     // the Flask API" (static dev server, preview host, proxy error page).
     if (status >= 500) {
-      return 'The server returned an error page instead of data (HTTP ' + status + '). Please try again in a moment.';
+      return 'Request to ' + endpoint + ' returned an error page instead of JSON (HTTP ' + status + '). Please try again in a moment.';
     }
     if (status === 404) {
-      return 'No Lanka Lens API at ' + api.base + ' (HTTP 404, HTML returned). ' +
-        'Run “python3 server/app.py” and open the site from http://localhost:8000, ' +
-        'or point the app at your API with <meta name="ll-api-base">.';
+      return 'Request to ' + endpoint + ' returned HTML instead of the Lanka Lens API (HTTP 404).';
     }
-    return 'Unexpected response from ' + api.base + ' (HTTP ' + status + ', expected JSON).';
+    return 'Unexpected response from ' + endpoint + ' (HTTP ' + status + ', expected JSON).';
   }
 
   var api = {
@@ -340,6 +346,33 @@
         });
       }, function (netErr) {
         // fetch itself failed: offline, DNS, mixed content, CORS or a dead server.
+        throw apiError('Cannot reach the Lanka Lens server at ' + api.base + '. ' +
+          'Check your connection and that the backend is running (python3 server/app.py).',
+          0, { path: path, network: true, cause: netErr && netErr.message });
+      });
+    },
+    // Multipart uploads use the same response/error contract as JSON requests.
+    // Do not call response.json() directly: an empty or HTML proxy response
+    // must retain its HTTP status and surface a useful, safe error message.
+    form: function (path, formData) {
+      var headers = {};
+      if (api.token) headers['Authorization'] = 'Bearer ' + api.token;
+      return fetch(api.base + path, { method: 'POST', headers: headers, body: formData }).then(function (res) {
+        return res.text().catch(function () { return ''; }).then(function (text) {
+          var data = null;
+          if (text) { try { data = JSON.parse(text); } catch (parseErr) { data = null; } }
+          var isJson = !!(data && typeof data === 'object');
+          if (!res.ok) {
+            var msg = isJson ? (data.error || data.message || '') : '';
+            if (!msg) msg = isJson ? statusMessage(res.status, path) : notJsonMessage(res.status, path, text);
+            if (res.status === 401 && api.token) clearSession();
+            throw apiError(msg, res.status, { path: path, notJson: !isJson });
+          }
+          if (!isJson) throw apiError(notJsonMessage(res.status, path, text), res.status, { path: path, notJson: true });
+          if (data.ok === false) throw apiError(data.error || statusMessage(res.status, path), res.status, { path: path });
+          return data.data;
+        });
+      }, function (netErr) {
         throw apiError('Cannot reach the Lanka Lens server at ' + api.base + '. ' +
           'Check your connection and that the backend is running (python3 server/app.py).',
           0, { path: path, network: true, cause: netErr && netErr.message });
@@ -586,8 +619,14 @@
   /* ---------- components ---------- */
   function header(title, opts) {
     opts = opts || {};
+    // Authentication routes must always offer a safe route back into the app.
+    // A browser-history entry can belong to another site (or not exist at all),
+    // so auth pages use the SPA router's explicit home target rather than a bare
+    // history.back(). Other in-app pages retain their existing back behaviour.
     var left = opts.back === false ? '<span style="width:40px"></span>' :
-      '<button class="back-btn" data-back aria-label="Back">' + icon('chevron-back-outline') + '</button>';
+      (opts.backTo
+        ? '<button class="back-btn" data-nav="' + esc(opts.backTo) + '" aria-label="Back to Home">' + icon('chevron-back-outline') + '</button>'
+        : '<button class="back-btn" data-back aria-label="Back">' + icon('chevron-back-outline') + '</button>');
     var right = opts.right || '<span style="width:40px"></span>';
     // The header title is the page's <h1> unless the view renders its own
     // heading (opts.heading === false) - exactly one h1 per page.
@@ -1799,11 +1838,9 @@
       if (files.length) {
         var fd = new FormData();
         files.forEach(function (f) { fd.append('files', f); });
-        fetch(api.base + '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
-          .then(function (r) { return r.json(); })
+        api.form('/upload', fd)
           .then(function (d) {
-            if (!d.ok) throw new Error(d.error || 'Upload failed');
-            finish((d.data.items || []).map(function (x) { return x.url; }));
+            finish(((d && d.items) || []).map(function (x) { return x.url; }));
           })
           .catch(function (er) { toast(er.message, 'error'); setBusy(false); });
       } else finish([]);
@@ -2455,11 +2492,9 @@
           var f = this.files[0];
           if (!f) return;
           var fd = new FormData(); fd.append('file', f);
-          fetch(api.base + '/me/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
-            .then(function (r) { return r.json(); })
+          api.form('/me/avatar', fd)
             .then(function (d) {
-              if (!d.ok) throw new Error(d.error || 'Upload failed');
-              state.user.avatar = d.data.url;
+              state.user.avatar = d.url;
               renderDrawer(); renderTabbar();
               toast('Photo updated', 'success');
               views.settingsRemount();
@@ -2593,7 +2628,7 @@
   }
 
   views.signin = function (query) {
-    var html = header('Sign In', { heading: false });
+    var html = header('Sign In', { heading: false, backTo: '#/' });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Welcome back</h1><p>Sign in to manage your listings and chats.</p></div>' +
       '<form id="login-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="si-email">Email</label>' +
@@ -2647,7 +2682,7 @@
   };
 
   views.signup = function (query) {
-    var html = header('Create Account', { heading: false });
+    var html = header('Create Account', { heading: false, backTo: '#/' });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Join Lanka Lens</h1><p>Create a free account to buy and sell camera gear.</p></div>' +
       '<form id="signup-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="su-name">Full name</label><input class="input" id="su-name" name="name" required placeholder="Your name" autocomplete="name"></div>' +
@@ -2979,7 +3014,7 @@
   views.help = staticPage('help');
 
   views.forgot = function () {
-    var html = header('Forgot Password', { heading: false });
+    var html = header('Forgot Password', { heading: false, backTo: '#/' });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Reset your password</h1><p>Enter your email and we’ll send you a reset link.</p></div>' +
       '<form id="forgot-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="fp-email">Email</label><input class="input" id="fp-email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autocapitalize="none" spellcheck="false"></div>' +
@@ -3017,7 +3052,7 @@
 
   views.resetPassword = function (q) {
     var token = q.get('token') || '';
-    var html = header('Set New Password', { heading: false });
+    var html = header('Set New Password', { heading: false, backTo: '#/' });
     html += '<div class="auth-wrap"><div class="auth-hero"><h1>Choose a new password</h1><p>Enter a new password for your account.</p></div>' +
       '<form id="reset-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="rp-password">New password</label><input class="input" id="rp-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
@@ -3055,7 +3090,7 @@
 
   views.verifyEmail = function (q) {
     var token = q.get('token') || '';
-    var html = header('Verify Email', {});
+    var html = header('Verify Email', { backTo: '#/' });
     html += '<div id="verify-root"><div class="spinner" style="margin-top:80px"></div></div>';
     return {
       html: html,
@@ -3166,11 +3201,11 @@
         var f = this.files[0];
         if (!f) return;
         var fd = new FormData(); fd.append('file', f);
-        fetch(api.base + '/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
-          .then(function (r) { return r.json(); })
+        api.form('/upload', fd)
           .then(function (d) {
-            if (!d.ok) throw new Error(d.error || 'Upload failed');
-            biz.logo = d.data.items[0].url;
+            var item = d && d.items && d.items[0];
+            if (!item || !item.url) throw apiError('The server did not return an uploaded image.', 0, { path: '/upload' });
+            biz.logo = item.url;
             var p = $('#logo-prev');
             if (p) p.outerHTML = '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo' + '">';
           }).catch(function (e) { toast(e.message, 'error'); });

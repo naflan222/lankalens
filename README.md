@@ -23,6 +23,27 @@ python3 server/app.py        # serves on http://localhost:8000
 Open **http://localhost:8000** — Flask serves both the SPA and the JSON API from
 the same origin, which is what the frontend expects.
 
+### Railway production
+
+This is a **single Flask service**, not a static-site deployment. `Dockerfile` and
+`railway.json` force Railway to run the following command from the repository
+root:
+
+```bash
+gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --access-logfile - --error-logfile - server.app:app
+```
+
+`/api/*`, the SPA shell (`/`), and the app assets are all served by that Flask
+application. Do not configure Caddy, a Railway static-files service, or a
+separate frontend process for this service. Railway's deployment logs should
+show `Using detected Dockerfile!`, Gunicorn listening on `0.0.0.0:$PORT`, and
+access-log entries such as `POST /api/auth/login ... 200`.
+
+The SQLite file is deliberately excluded from the image (`server/*.db` in
+`.dockerignore`), so an existing Railway volume/database is never copied over by
+a build. Preserve its existing mount and database path before deploying; the
+application only seeds when no database file exists.
+
 ### Serving the frontend separately (optional)
 
 If you serve `index.html` from something else (a static dev server, a preview

@@ -1,0 +1,11 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.pyc
+server/__pycache__
+server/*.db
+uploads
+node_modules
+QA-REPORT-PART3.md
