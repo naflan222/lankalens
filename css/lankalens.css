@@ -30,6 +30,26 @@
 
 * { box-sizing: border-box; }
 
+/* ---- Base element resets -------------------------------------------------
+   These four rules used to come from css/framework7.bundle.min.css (545 KB of
+   unused framework CSS). They are the only rules in that bundle that could
+   affect markup Lanka Lens actually renders — every one of its class selectors
+   needs a Framework7 ancestor/class (.ios, .md, .navbar, .modal-in, .page…)
+   that this app never produces. They are kept verbatim so removing the bundle
+   changes nothing visually. */
+* {
+  -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+a { cursor: pointer; }
+p { margin: 1em 0; }
+button {
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  width: 100%;
+}
+
 /* ---- Document scrolling (overrides the Framework7 app-shell reset) --------
    css/framework7.bundle.min.css ships a reset for Framework7's own
    ".framework7-root" layout which sets position relative, height 100% and
@@ -815,6 +835,14 @@ button { font-family: inherit; }
 }
 .shop-card .cover { height: 130px; background: #eef1ef; }
 .shop-card .cover img { width: 100%; height: 100%; object-fit: cover; }
+/* A failed image is replaced by an inline SVG placeholder (see
+   bindImageFallbacks in js/app.js) so card grids, galleries and avatars keep
+   their shape instead of collapsing or showing a broken-image glyph. */
+.img-fallback {
+  object-fit: contain !important;
+  background: #E4EAE7;
+}
+
 .shop-card .cover .ph {
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   color: #b9c4bf; font-size: 40px;

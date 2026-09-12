@@ -463,19 +463,44 @@
   function siteTagline() {
     return (state.meta && state.meta.settings && state.meta.settings.tagline) || 'Buy & Sell Cameras in Sri Lanka';
   }
-  function setMeta(title, desc, canonical) {
-    document.title = title;
-    var d = document.querySelector('meta[name="description"]');
-    if (d) d.setAttribute('content', desc || '');
-    var canon = document.querySelector('link[rel="canonical"]');
-    var url = canonical || (location.origin + location.pathname);
-    if (canon) canon.setAttribute('href', url);
-    else {
-      canon = document.createElement('link');
-      canon.setAttribute('rel', 'canonical');
-      canon.setAttribute('href', url);
-      document.head.appendChild(canon);
+  /** Absolute URL for a possibly root-relative asset (needed by OG tags). */
+  function absUrl(u) {
+    if (!u) return '';
+    if (/^https?:\/\//i.test(u) || u.indexOf('data:') === 0) return u;
+    return location.origin + (u.charAt(0) === '/' ? u : '/' + u);
+  }
+
+  function setMetaTag(selector, attr, value) {
+    var el = document.querySelector(selector);
+    if (!el) {
+      var m = selector.match(/\[(\w+)="([^"]+)"\]/);
+      if (!m) return;
+      el = document.createElement('meta');
+      el.setAttribute(m[1], m[2]);
+      document.head.appendChild(el);
     }
+    el.setAttribute(attr, value);
+  }
+
+  /**
+   * Per-route metadata. Also keeps Open Graph / Twitter tags in sync, because
+   * listings are mostly shared over WhatsApp and Facebook in Sri Lanka: without
+   * this the share preview always showed the homepage title and no photo.
+   */
+  function setMeta(title, desc, canonical, image) {
+    document.title = title;
+    var url = canonical || (location.origin + location.pathname);
+    var img = absUrl(image || '/images/hero-camera.jpg');
+    setMetaTag('meta[name="description"]', 'content', desc || '');
+    setMetaTag('link[rel="canonical"]', 'href', url);
+    setMetaTag('meta[property="og:title"]', 'content', title);
+    setMetaTag('meta[property="og:description"]', 'content', desc || '');
+    setMetaTag('meta[property="og:url"]', 'content', url);
+    setMetaTag('meta[property="og:image"]', 'content', img);
+    setMetaTag('meta[property="og:type"]', 'content', image ? 'product' : 'website');
+    setMetaTag('meta[name="twitter:title"]', 'content', title);
+    setMetaTag('meta[name="twitter:description"]', 'content', desc || '');
+    setMetaTag('meta[name="twitter:image"]', 'content', img);
   }
   function defaultMeta(path) {
     var s = siteName();
@@ -1162,9 +1187,10 @@
   function renderDetail(l) {
     var imgs = l.images && l.images.length ? l.images : [];
     var favOn = isFav(l.id);
-    setMeta((l.title || 'Listing') + ' — ' + siteName(),
-      (l.description || (l.title + ' — ' + fmtLKR(l.price))).slice(0, 160),
-      location.origin + '/listing/' + (l.slug || slugify(l.title || '')) + '-' + l.id);
+    setMeta((l.title || 'Listing') + ' — ' + fmtLKR(l.price) + ' — ' + siteName(),
+      (l.description || (l.title + ' — ' + fmtLKR(l.price) + ' — ' + (l.location || 'Sri Lanka'))).slice(0, 160),
+      location.origin + '/listing/' + (l.slug || slugify(l.title || '')) + '-' + l.id,
+      (l.images && l.images[0]) || '');
     var crumbs = '<nav class="breadcrumbs" aria-label="Breadcrumb">' +
       '<a data-nav="#/">Home</a><span>/</span>' +
       (l.top_category ? '<a data-nav="#/category/' + esc(l.top_category.slug) + '">' + esc(l.top_category.name) + '</a><span>/</span>' : '') +
@@ -2129,7 +2155,10 @@
             } }
           ]);
         });
-        setInterval(load, 6000);
+        addPoller(function () {
+          // Only refresh while the thread is still the visible view.
+          if (threadEl && document.body.contains(threadEl)) load();
+        }, 6000);
       }
     };
   };
@@ -2777,7 +2806,7 @@
       mount: function () {
         api.get('/posts/' + params.slug).then(function (p) {
           setMeta(p.title + ' — ' + siteName() + ' Buying Guide', (p.excerpt || p.title).slice(0, 160),
-            location.origin + '/guide/' + p.slug);
+            location.origin + '/guide/' + p.slug, p.image || '');
           $('#post-root').innerHTML = header('Guide', {}) +
             (p.image ? '<img src="' + esc(p.image) + '" style="width:100%;height:210px;object-fit:cover" alt="">' : '') +
             '<div class="detail-wrap"><span class="vbadge">' + esc(p.category || 'Guide') + '</span>' +
@@ -3172,7 +3201,7 @@
         api.get('/business/' + params.slug).then(function (d) {
           var b = d.business;
           setMeta(b.name + ' — Camera Shop on ' + siteName(), (b.description || b.name).slice(0, 160),
-            location.origin + '/shop/' + b.slug);
+            location.origin + '/shop/' + b.slug, b.logo || '');
           var days = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
           var hoursHtml = days.map(function (dd) {
             return '<div class="spec-row"><span class="k">' + dd[1] + '</span><span class="v">' + esc((b.opening_hours || {})[dd[0]] || '—') + '</span></div>';
@@ -4165,7 +4194,52 @@
   }
 
   var renderTimer = null;
+  /**
+   * Views that poll (the chat thread refreshes every 6s) register their timer
+   * here. Every route change clears them, so navigating away cannot leave an
+   * interval polling the API forever and writing into a detached node.
+   */
+  var activePollers = [];
+  function addPoller(fn, ms) {
+    var id = setInterval(function () {
+      // Stop polling as soon as the view's container is gone from the document.
+      if (!document.body.contains(($('#page') || document.body))) { clearInterval(id); return; }
+      fn();
+    }, ms);
+    activePollers.push(id);
+    return id;
+  }
+  function clearPollers() {
+    activePollers.forEach(function (id) { clearInterval(id); });
+    activePollers = [];
+  }
+
+  /**
+   * A broken, missing or still-uploading image must never punch a hole in a
+   * card or show the browser's broken-image glyph. Swap in the branded
+   * placeholder (image error events do not bubble, so this listens in the
+   * capture phase).
+   */
+  var IMG_FALLBACK = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 120">' +
+    '<rect width="160" height="120" fill="#E4EAE7"/>' +
+    '<g fill="none" stroke="#9AA8A2" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M46 46h14l6-9h28l6 9h14a6 6 0 0 1 6 6v34a6 6 0 0 1-6 6H46a6 6 0 0 1-6-6V52a6 6 0 0 1 6-6z"/>' +
+    '<circle cx="80" cy="69" r="13"/></g></svg>');
+  function bindImageFallbacks() {
+    document.addEventListener('error', function (e) {
+      var el = e.target;
+      if (!el || el.tagName !== 'IMG') return;
+      if (el.getAttribute('data-img-fallback') === '1') return;   // never loop
+      el.setAttribute('data-img-fallback', '1');
+      el.classList.add('img-fallback');
+      el.src = IMG_FALLBACK;
+      if (!el.getAttribute('alt')) el.setAttribute('alt', 'Image unavailable');
+    }, true);
+  }
+
   function render() {
+    clearPollers();
     var h = parseHash();
     state.route = h;
     var route = currentRoute();
@@ -4411,6 +4485,7 @@
     });
 
     bindGlobal();
+    bindImageFallbacks();
   }
 
   if (document.readyState === 'loading') {
