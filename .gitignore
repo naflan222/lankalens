@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+server/lankalens.db
+server/*.db
+.venv/
+venv/
+
+# Uploads (user-generated)
+uploads/
+
+# Node / misc
+node_modules/
+.DS_Store
