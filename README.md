@@ -20,6 +20,34 @@ pip install -r server/requirements.txt
 python3 server/app.py        # serves on http://localhost:8000
 ```
 
+Open **http://localhost:8000** — Flask serves both the SPA and the JSON API from
+the same origin, which is what the frontend expects.
+
+### Serving the frontend separately (optional)
+
+If you serve `index.html` from something else (a static dev server, a preview
+host, or by opening the file directly), the API is on a different origin. Two
+ways to point the SPA at it:
+
+- **Automatic (local dev only)** — when the page is on `localhost` / `127.0.0.1`
+  / `file://` and no API answers on that origin, the client probes
+  `http://localhost:8000/api` and switches to it for the session.
+- **Explicit** — set the base before the app boots:
+
+  ```html
+  <meta name="ll-api-base" content="https://api.example.com/api">
+  <!-- or -->
+  <script>window.LL_API_BASE = 'https://api.example.com/api';</script>
+  ```
+
+  An explicit base is never overridden. The API sends CORS headers
+  (`Access-Control-Allow-Origin`, `Authorization`/`Content-Type`, preflight
+  `OPTIONS`); restrict them with `LL_CORS_ORIGINS=https://your.site` if you want
+  a closed list instead of the permissive default.
+
+Either way, sign-in failures report the real cause inline on the form (HTTP
+status, unreachable API, non-JSON response) instead of a generic message.
+
 ## Demo accounts
 
 | Role | Email | Password |
@@ -39,7 +67,12 @@ python3 server/app.py        # serves on http://localhost:8000
 - **Categories** — database-driven (Cameras, Lenses, Action Cameras, Drones,
   Accessories + subcategories), manageable via the admin API.
 - **Search / browse** — keyword, category, condition, province, price and sort
-  filters.
+  filters. Keyword search is tokenised: every word must match *somewhere* in the
+  title, brand, model, description, specs, category or seller/shop name, so
+  "Canon 5D", "sony a7 iii body" and "gopro hero 13" all find their listing even
+  though no single column contains that exact phrase. Matching is
+  case-insensitive, whitespace is trimmed, `%`/`_` are escaped (they are matched
+  literally), and every value is bound as a SQL parameter.
 - **Listing details** — gallery, price (LKR), condition, location, description,
   category-specific specifications, seller info, and Call / WhatsApp / Chat /
   Make Offer / Favorite / Share / Report actions.
@@ -135,6 +168,35 @@ python3 server/app.py        # serves on http://localhost:8000
 > No email/SMS gateway is configured, so verification codes and reset links are
 > surfaced in the API responses under a `dev` field for local testing (the same
 > flow works unchanged once a real provider is plugged in).
+
+## Loading / empty / error states
+
+Every section that reads from the API renders one of four explicit states, so a
+slow, failed or empty request can never leave the UI stuck on a spinner or
+silently blank:
+
+| State   | What you see                                                        |
+|---------|---------------------------------------------------------------------|
+| Loading | Spinner plus a label ("Loading camera shops…")                       |
+| Success | The normal content                                                   |
+| Empty   | A message that fits the section ("No trusted camera shops yet.")     |
+| Error   | What went wrong + a **Try again** button that re-runs that request    |
+
+This is implemented once in `renderAsync()` (`js/app.js`) and used by the home
+strips (categories, brands, featured, latest, shops, guides), search, browse,
+category pages, camera shops, shop pages, buying guides, notifications,
+favourites and the Post Ad category list.
+
+Background calls that must not interrupt the user (favourite sync, contact
+analytics, share sheet, logout, metadata refresh) are recorded through
+`logNonCritical()` instead of being swallowed, and mutations (delete / renew /
+accept / block / save…) go through `act()`, which always ends in a success or
+error toast — there are no empty `.catch(function () {})` handlers left.
+
+The Post Ad wizard additionally validates every required field across all steps
+before publishing (jumping back to the offending step), disables its buttons
+while a request is in flight, and ignores repeat clicks, so a double tap can
+never create two listings.
 
 ## Project layout
 

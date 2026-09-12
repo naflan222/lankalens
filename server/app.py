@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, request, jsonify, g, abort, send_from_directory
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -28,6 +29,12 @@ ALLOWED_IMG = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_IMG_BYTES = 8 * 1024 * 1024
 PER_PAGE = 24
 EXPIRY_DAYS = 30
+# Auth tokens used to live forever: the sessions table had no expiry column, so
+# a leaked token stayed valid until someone logged out or an admin banned the
+# account. Sessions now expire after SESSION_TTL_DAYS of inactivity, sliding
+# forward while the account is actually being used.
+SESSION_TTL_DAYS = 30
+SESSION_RENEW_WINDOW = 7 * 86400
 
 CONDITIONS = [
     "Brand New",
@@ -343,23 +350,6 @@ CREATE TABLE IF NOT EXISTS contact_messages (
     created_at INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS shops (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    slug TEXT UNIQUE NOT NULL,
-    area TEXT DEFAULT '',
-    city TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    province TEXT DEFAULT '',
-    phone TEXT DEFAULT '',
-    whatsapp TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    specialties TEXT DEFAULT '',
-    image TEXT DEFAULT '',
-    verified INTEGER DEFAULT 0,
-    created_at INTEGER
-);
-
 CREATE TABLE IF NOT EXISTS posts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     slug TEXT UNIQUE NOT NULL,
@@ -470,6 +460,14 @@ def migrate(conn):
     if "rejection_reason" not in lc:
         conn.execute("ALTER TABLE listings ADD COLUMN rejection_reason TEXT DEFAULT ''")
 
+    sc = cols("sessions")
+    if "expires_at" not in sc:
+        conn.execute("ALTER TABLE sessions ADD COLUMN expires_at INTEGER")
+        # Give pre-existing sessions a full lifetime measured from their creation
+        # so upgrading does not sign everybody out at once.
+        conn.execute("UPDATE sessions SET expires_at = created_at + ? WHERE expires_at IS NULL",
+                     (SESSION_TTL_DAYS * 86400,))
+
     oc = cols("offers")
     if "counter_amount" not in oc:
         conn.execute("ALTER TABLE offers ADD COLUMN counter_amount INTEGER")
@@ -483,6 +481,16 @@ def migrate(conn):
         conn.execute("ALTER TABLE reports ADD COLUMN resolved_by INTEGER")
     if "resolved_at" not in rc:
         conn.execute("ALTER TABLE reports ADD COLUMN resolved_at INTEGER")
+
+    # Retire the orphaned `shops` table. Nothing reads it: the shop directory the
+    # app renders comes from `businesses` (rows owned by real seller accounts).
+    # It held six seeded rows, three of which duplicated a business by name and
+    # three of which (Galle Lens Center, Negombo Camera Mart, Colombo Lens
+    # Exchange) described shops that do not exist anywhere else in the product.
+    # Dropping it is safe because no foreign key references it.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shops'").fetchone():
+        conn.execute("DROP TABLE shops")
+
     conn.commit()
 
 
@@ -733,7 +741,37 @@ def _top_category_for(cat_id):
     return cat
 
 
-def serialize_listing(l, include_seller=True):
+SELLER_COLS = ("id, name, phone, whatsapp, province, district, city, bio, avatar, "
+               "verified, seller_type, created_at")
+
+
+def listing_ctx(rows, include_seller=True):
+    """Pre-load everything serialize_listing() would otherwise query per row.
+
+    A page of 24 listings used to run 77 SQL statements (one urgent-promotion
+    probe, one seller lookup and one business lookup per card). This collapses
+    those into three queries for the whole page.
+    """
+    ids = [r["id"] for r in rows if r.get("id") is not None]
+    uids = sorted({r["user_id"] for r in rows if r.get("user_id") is not None})
+    ctx = {"urgent": set(), "sellers": {}, "businesses": {}}
+    if not ids:
+        return ctx
+    ph = ",".join("?" * len(ids))
+    ctx["urgent"] = {r["listing_id"] for r in query(
+        f"SELECT DISTINCT listing_id FROM promotions WHERE listing_id IN ({ph}) "
+        "AND ptype = 'urgent' AND (ends_at IS NULL OR ends_at >= ?)",
+        tuple(ids) + (now(),))}
+    if include_seller and uids:
+        uph = ",".join("?" * len(uids))
+        ctx["sellers"] = {r["id"]: r for r in query(
+            f"SELECT {SELLER_COLS} FROM users WHERE id IN ({uph})", tuple(uids))}
+        ctx["businesses"] = {r["user_id"]: r for r in query(
+            f"SELECT id, name, slug, logo, user_id FROM businesses WHERE user_id IN ({uph})", tuple(uids))}
+    return ctx
+
+
+def serialize_listing(l, include_seller=True, ctx=None):
     images = json.loads(l.get("images") or "[]")
     specs = json.loads(l.get("specs") or "{}")
     prefs = json.loads(l.get("contact_prefs") or "{}")
@@ -770,22 +808,31 @@ def serialize_listing(l, include_seller=True):
         "expiry_at": expiry,
         "category_id": l.get("category_id"),
         "rejection_reason": l.get("rejection_reason") or "",
-        "urgent": has_urgent_badge(l["id"]),
+        "urgent": (l["id"] in ctx["urgent"]) if ctx else has_urgent_badge(l["id"]),
     }
     if l.get("category_name"):
         out["category_name"] = l["category_name"]
     if l.get("category_slug"):
         out["category_slug"] = l["category_slug"]
     if include_seller:
-        seller = query(
-            "SELECT id, name, phone, whatsapp, province, district, city, bio, avatar, verified, seller_type, created_at FROM users WHERE id = ?",
-            (l["user_id"],), one=True)
+        if ctx:
+            seller = ctx["sellers"].get(l["user_id"])
+        else:
+            seller = query(f"SELECT {SELLER_COLS} FROM users WHERE id = ?", (l["user_id"],), one=True)
         if seller:
             out["seller"] = public_user(seller)
-            biz = query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True)
+            biz = (ctx["businesses"].get(seller["id"]) if ctx
+                   else query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
             if biz:
                 out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz["logo"]}
     return out
+
+
+def serialize_listings(rows, include_seller=True):
+    """Serialize a page of listings with batched lookups (see listing_ctx)."""
+    rows = list(rows)
+    ctx = listing_ctx(rows, include_seller=include_seller)
+    return [serialize_listing(r, include_seller=include_seller, ctx=ctx) for r in rows]
 
 
 def listing_query_base():
@@ -797,7 +844,10 @@ def listing_query_base():
 
 def expire_overdue():
     """Mark past-due active listings as expired (cheap, run on read)."""
-    execute("UPDATE listings SET status = 'expired' WHERE status = 'active' AND expiry_at IS NOT NULL AND expiry_at < ?", (now(),))
+    ts = now()
+    execute("UPDATE listings SET status = 'expired' WHERE status = 'active' AND expiry_at IS NOT NULL AND expiry_at < ?", (ts,))
+    # Drop dead sessions so the table cannot grow without bound.
+    execute("DELETE FROM sessions WHERE expires_at IS NOT NULL AND expires_at < ?", (ts,))
     expire_promotions()
 
 
@@ -810,6 +860,14 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_listings_expiry ON listings(expiry_at)",
     "CREATE INDEX IF NOT EXISTS idx_listings_featured ON listings(featured)",
     "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id)",
+    # The conversation list filters on receiver_id alone (unread counts) and on
+    # "sender_id = ? OR receiver_id = ?"; the composite index above cannot serve
+    # either, so this one is what keeps the inbox off a full table scan.
+    "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_id, read)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_favorites_listing ON favorites(listing_id)",
+    "CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_created ON listings(created_at)",
     "CREATE INDEX IF NOT EXISTS idx_messages_listing ON messages(listing_id)",
     "CREATE INDEX IF NOT EXISTS idx_offers_listing ON offers(listing_id)",
     "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON offers(buyer_id)",
@@ -978,9 +1036,17 @@ def current_user():
         token = token[7:]
     if not token:
         return None
+    ts = now()
     row = query(
-        "SELECT u.* FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
-        (token,), one=True)
+        "SELECT u.*, s.expires_at AS session_expires_at FROM sessions s "
+        "JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at IS NOT NULL AND s.expires_at > ?",
+        (token, ts), one=True)
+    if not row:
+        return None
+    # Sliding window: an active user is never logged out mid-session, but a
+    # token that stops being used expires.
+    if row["session_expires_at"] - ts < SESSION_RENEW_WINDOW:
+        execute("UPDATE sessions SET expires_at = ? WHERE token = ?", (ts + SESSION_TTL_DAYS * 86400, token))
     return row
 
 
@@ -1017,20 +1083,62 @@ _RATE = {}  # ip -> list of timestamps
 
 
 def rate_limit(limit, window=60):
-    """Allow `limit` requests per `window` seconds per client IP."""
+    """Allow `limit` requests per `window` seconds per client IP, per endpoint.
+
+    Buckets are keyed by endpoint *and* IP: previously every limited endpoint
+    shared one bucket per IP, so a handful of sign-ups / password resets from
+    the same device could exhaust the sign-in budget and return a spurious 429.
+    """
     def deco(fn):
+        bucket_name = fn.__name__
+
         @wraps(fn)
         def wrapper(*args, **kwargs):
             ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+            key = f"{bucket_name}:{ip}"
             t = now()
-            bucket = [x for x in _RATE.get(ip, []) if x > t - window]
+            bucket = [x for x in _RATE.get(key, []) if x > t - window]
             if len(bucket) >= limit:
-                abort(429, description="Too many requests, please slow down")
+                abort(429, description="Too many attempts — please wait a minute and try again")
             bucket.append(t)
-            _RATE[ip] = bucket
+            _RATE[key] = bucket
             return fn(*args, **kwargs)
         return wrapper
     return deco
+
+
+def json_body():
+    """Parse a JSON request body.
+
+    Returns ``(data, error_response)``. ``error_response`` is ``None`` when the
+    body parsed (an absent body is treated as ``{}``); otherwise it is a ready
+    to return 422 response so the client gets an accurate, non-misleading error
+    instead of a silent ``{}`` that used to surface as "Invalid email or password".
+    """
+    data = request.get_json(silent=True)
+    if data is None:
+        raw = (request.get_data(as_text=True) or "").strip()
+        if raw:
+            return None, err("Request body is not valid JSON", 422)
+        return {}, None
+    if not isinstance(data, dict):
+        return None, err("Request body must be a JSON object", 422)
+    return data, None
+
+
+def missing_fields_error(body, *fields):
+    """400 response listing the required fields that are empty/absent."""
+    missing = [f for f in fields if not str(body.get(f) or "").strip()]
+    if not missing:
+        return None
+    labels = {
+        "email": "email", "password": "password", "name": "name",
+        "token": "reset link", "code": "verification code", "message": "message",
+    }
+    names = [labels.get(f, f.replace("_", " ")) for f in missing]
+    if len(names) == 1:
+        return err(f"Please enter your {names[0]}")
+    return err("Please enter your " + " and ".join(names))
 
 
 def user_payload(u):
@@ -1072,10 +1180,63 @@ def err(message, code=400):
 @app.errorhandler(401)
 @app.errorhandler(403)
 @app.errorhandler(404)
+@app.errorhandler(405)
+@app.errorhandler(409)
 @app.errorhandler(413)
+@app.errorhandler(415)
+@app.errorhandler(422)
 @app.errorhandler(429)
+@app.errorhandler(500)
 def handle_http_error(e):
     return jsonify({"ok": False, "error": getattr(e, "description", None) or e.name}), e.code
+
+
+@app.errorhandler(Exception)
+def handle_unexpected_error(e):
+    """Every API failure must come back as JSON with an honest status code.
+
+    Without this an unhandled exception on an /api route returned Werkzeug's
+    HTML 500 page, which the SPA could not parse — the user only ever saw a
+    generic "Something went wrong".
+    """
+    if isinstance(e, HTTPException):
+        return handle_http_error(e)
+    if request.path.startswith("/api/"):
+        app.logger.exception(e)
+        return jsonify({"ok": False, "error": "Internal server error"}), 500
+    raise e
+
+
+# Comma separated list of allowed browser origins, or "*" (default). The API is
+# token based (Authorization: Bearer …) and never uses cookies, so a permissive
+# Allow-Origin does not expose session credentials. Set LL_CORS_ORIGINS to
+# restrict it, e.g. LL_CORS_ORIGINS=https://lankalens.lk
+CORS_ORIGINS = [o.strip() for o in os.environ.get("LL_CORS_ORIGINS", "*").split(",") if o.strip()]
+
+
+@app.after_request
+def add_cors_headers(resp):
+    """Allow the SPA to talk to the API when it is served from another origin.
+
+    The frontend is normally served by Flask itself (same origin), but it is
+    also commonly opened from a static dev server / preview host — without
+    these headers every request failed in the browser as an opaque CORS error
+    and sign-in simply showed "Something went wrong".
+    """
+    if not request.path.startswith("/api/"):
+        return resp
+    origin = request.headers.get("Origin")
+    if "*" in CORS_ORIGINS:
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin or "*")
+    elif origin and origin in CORS_ORIGINS:
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin)
+    else:
+        return resp
+    resp.headers.setdefault("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+    resp.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+    resp.headers.setdefault("Access-Control-Max-Age", "86400")
+    resp.headers.setdefault("Vary", "Origin")
+    return resp
 
 
 @app.after_request
@@ -1350,13 +1511,43 @@ def brands():
 # ---------------------------------------------------------------------------
 # Listings
 # ---------------------------------------------------------------------------
+# Fields a free-text search token may match. Every token must match at least one
+# of these (tokens are ANDed, fields are ORed) so that "Canon 5D" or
+# "sony a7 iii body" find listings even when the words are not adjacent in any
+# single column. Always parameterized - user input never reaches the SQL text.
+SEARCH_TOKEN_SQL = (
+    "l.title LIKE ? ESCAPE '\\' OR l.brand LIKE ? ESCAPE '\\' OR l.model LIKE ? ESCAPE '\\' "
+    "OR l.description LIKE ? ESCAPE '\\' OR l.specs LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' "
+    "OR EXISTS (SELECT 1 FROM users su WHERE su.id = l.user_id AND su.name LIKE ? ESCAPE '\\') "
+    "OR EXISTS (SELECT 1 FROM businesses sb WHERE sb.user_id = l.user_id AND sb.name LIKE ? ESCAPE '\\')"
+)
+SEARCH_TOKEN_PARAMS = 8
+MAX_SEARCH_TOKENS = 8
+
+
+def like_escape(value):
+    """Escape LIKE wildcards so '%'/'_' typed by a user are matched literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_tokens(q):
+    """Split a search string into bounded, wildcard-escaped LIKE patterns."""
+    out = []
+    for tok in re.split(r"[\s,;/|]+", (q or "").strip()):
+        if not tok:
+            continue
+        out.append("%" + like_escape(tok) + "%")
+        if len(out) >= MAX_SEARCH_TOKENS:
+            break
+    return out
+
+
 def build_listing_where(args):
     conds, params = [], []
     q = (args.get("q") or "").strip()
-    if q:
-        like = f"%{q}%"
-        conds.append("(l.title LIKE ? OR l.brand LIKE ? OR l.model LIKE ? OR l.description LIKE ? OR l.specs LIKE ? OR c.name LIKE ?)")
-        params += [like, like, like, like, like, like]
+    for pattern in search_tokens(q):
+        conds.append("(" + SEARCH_TOKEN_SQL + ")")
+        params += [pattern] * SEARCH_TOKEN_PARAMS
 
     category = (args.get("category") or "").strip()
     subcategory = (args.get("subcategory") or "").strip()
@@ -1374,8 +1565,8 @@ def build_listing_where(args):
 
     model = (args.get("model") or "").strip()
     if model:
-        like = f"%{model}%"
-        conds.append("(l.model LIKE ? OR l.title LIKE ?)")
+        like = f"%{like_escape(model)}%"
+        conds.append("(l.model LIKE ? ESCAPE '\\' OR l.title LIKE ? ESCAPE '\\')")
         params += [like, like]
 
     condition = (args.get("condition") or "").strip()
@@ -1462,7 +1653,7 @@ def listings():
 
     sql = (listing_query_base() + where + f" ORDER BY {order}, l.id DESC LIMIT ? OFFSET ?")
     rows = query(sql, params + [PER_PAGE, (page - 1) * PER_PAGE])
-    data = [serialize_listing(r) for r in rows]
+    data = serialize_listings(rows)
     return ok({"items": data, "total": total, "page": page, "pages": max(1, -(-total // PER_PAGE))})
 
 
@@ -1525,46 +1716,146 @@ def listing_detail(lid):
     related = query(
         listing_query_base() + " WHERE c.id = ? AND l.id != ? AND l.status = 'active' ORDER BY l.created_at DESC LIMIT 4",
         (row["category_id"], lid))
-    data["related"] = [serialize_listing(r) for r in related]
+    data["related"] = serialize_listings(related)
     return ok(data)
+
+
+# Field limits enforced on the server. The wizard already caps these in the UI,
+# but the API is public: without server-side limits a client could store a
+# 5 000-character title, a 200 KB description or a listing with no price and no
+# location at all.
+TITLE_MAX = 120
+DESC_MAX = 4000
+SPEC_VALUE_MAX = 200
+SPEC_KEYS_MAX = 40
+LOCATION_MAX = 80
+PRICE_MAX = 1_000_000_000
+
+
+def validate_listing_fields(body, require_complete=True):
+    """Validate the writable fields of a listing payload.
+
+    Returns (cleaned_values, error_message). `require_complete` is False for
+    drafts, where only the fields that *are* present need to be well formed.
+    """
+    out = {}
+
+    if "title" in body or require_complete:
+        title = str(body.get("title") or "").strip()
+        if not title:
+            return None, "Title is required"
+        if len(title) > TITLE_MAX:
+            return None, f"Title must be {TITLE_MAX} characters or fewer"
+        out["title"] = title
+
+    if "description" in body:
+        desc = str(body.get("description") or "")
+        if len(desc) > DESC_MAX:
+            return None, f"Description must be {DESC_MAX} characters or fewer"
+        out["description"] = desc.strip()
+
+    if "price" in body or require_complete:
+        raw = body.get("price")
+        try:
+            price = int(raw) if raw not in (None, "") else 0
+        except (TypeError, ValueError):
+            return None, "Price must be a number"
+        if price < 0:
+            return None, "Price cannot be negative"
+        if price > PRICE_MAX:
+            return None, "Price is too large"
+        if require_complete and price <= 0:
+            return None, "Please enter a price greater than zero"
+        out["price"] = price
+
+    if "condition" in body:
+        cond = str(body.get("condition") or "").strip()
+        if cond and cond not in CONDITIONS:
+            return None, "Invalid condition"
+        out["condition"] = cond or "Good"
+
+    for field in ("province", "district", "city"):
+        if field in body or (require_complete and field != "city"):
+            val = str(body.get(field) or "").strip()
+            if len(val) > LOCATION_MAX:
+                return None, f"{field.capitalize()} is too long"
+            if require_complete and field != "city" and not val:
+                return None, "Please choose a location (province and district)"
+            out[field] = val
+
+    # The location pickers are fed from /api/locations, so a real client always
+    # sends names that exist. Anything else is a hand-built request.
+    if out.get("province"):
+        if not query("SELECT id FROM provinces WHERE name = ?", (out["province"],), one=True):
+            return None, "Unknown province"
+    if out.get("district"):
+        if not query("SELECT id FROM districts WHERE name = ?", (out["district"],), one=True):
+            return None, "Unknown district"
+
+    if "specs" in body:
+        specs = body.get("specs")
+        if not isinstance(specs, dict):
+            return None, "Specifications must be an object"
+        if len(specs) > SPEC_KEYS_MAX:
+            return None, f"Too many specification fields (max {SPEC_KEYS_MAX})"
+        clean = {}
+        for key, val in specs.items():
+            # Scalars only: nested objects/arrays would be stored verbatim in the
+            # JSON blob and echoed back into other users' pages.
+            if isinstance(val, bool) or val is None or isinstance(val, (int, float)):
+                clean[str(key)[:60]] = val
+            elif isinstance(val, str):
+                if len(val) > SPEC_VALUE_MAX:
+                    return None, f"{key} is too long (max {SPEC_VALUE_MAX} characters)"
+                clean[str(key)[:60]] = val.strip()
+            else:
+                return None, f"{key} must be a simple value"
+        out["specs"] = clean
+
+    if "category_id" in body or require_complete:
+        cat_id = body.get("category_id")
+        try:
+            cat_id = int(cat_id)
+        except (TypeError, ValueError):
+            return None, "Please choose a valid category"
+        if not query("SELECT id FROM categories WHERE id = ?", (cat_id,), one=True):
+            return None, "Please choose a valid category"
+        out["category_id"] = cat_id
+
+    return out, None
 
 
 @app.route("/api/listings", methods=["POST"])
 def create_listing():
     u = require_auth()
     body = request.get_json(silent=True) or {}
-    cat_id = body.get("category_id")
-    cat = query("SELECT * FROM categories WHERE id = ?", (cat_id,), one=True) if cat_id else None
+
+    status = body.get("status") or "active"
+    if status not in ("active", "draft", "pending"):
+        status = "active"
+
+    # Server-side validation. Drafts only need the fields that are present to be
+    # well formed; anything published needs a title, a real price and a location.
+    clean, verr = validate_listing_fields(body, require_complete=(status != "draft"))
+    if verr:
+        return err(verr)
+    cat_id = clean["category_id"]
+    cat = query("SELECT * FROM categories WHERE id = ?", (cat_id,), one=True)
     if not cat:
         return err("Please choose a valid category")
-
-    title = (body.get("title") or "").strip()
-    if not title:
-        return err("Title is required")
-    price = body.get("price")
-    try:
-        price = int(price) if price not in (None, "") else 0
-    except (TypeError, ValueError):
-        return err("Price must be a number")
-    if price < 0:
-        return err("Price must be a number")
+    title = clean["title"]
+    price = clean.get("price", 0)
 
     images = body.get("images") or []
     if isinstance(images, str):
         images = [images]
     images = [i for i in images if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
 
-    specs = body.get("specs") or {}
-    if not isinstance(specs, dict):
-        specs = {}
+    specs = clean.get("specs", {})
 
     prefs = body.get("contact_prefs") or {}
     if not isinstance(prefs, dict):
         prefs = {}
-
-    status = body.get("status") or "active"
-    if status not in ("active", "draft", "pending"):
-        status = "active"
 
     # Listing limits (configurable by admin).
     if status != "draft":
@@ -1589,8 +1880,8 @@ def create_listing():
             contact_prefs, created_at, updated_at, expiry_at)
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)""",
         (u["id"], cat_id, title, slugify(title), price, 1 if body.get("negotiable") else 0,
-         body.get("condition") or "Good", body.get("description") or "", brand, model, year,
-         body.get("province") or "", body.get("district") or "", body.get("city") or "",
+         clean.get("condition") or "Good", clean.get("description") or "", brand, model, year,
+         clean.get("province") or "", clean.get("district") or "", clean.get("city") or "",
          json.dumps(images), status, json.dumps(specs), json.dumps(prefs), ts, ts,
          ts + expiry_days() * 86400))
     if status == "draft":
@@ -1618,50 +1909,41 @@ def update_listing(lid):
         sets.append(f"{col} = ?")
         params.append(val)
 
-    if "title" in body:
-        t = (body["title"] or "").strip()
-        if not t:
-            return err("Title is required")
-        setf("title", t)
-        setf("slug", slugify(t))
-    if "price" in body:
-        try:
-            p = int(body["price"])
-        except (TypeError, ValueError):
-            return err("Price must be a number")
-        if p < 0:
-            return err("Price must be a number")
-        setf("price", p)
+    # Partial update: only the fields present in the body are touched, but every
+    # field that *is* present must pass the same server-side rules as a create.
+    clean, verr = validate_listing_fields(body, require_complete=False)
+    if verr:
+        return err(verr)
+
+    if "title" in clean:
+        setf("title", clean["title"])
+        setf("slug", slugify(clean["title"]))
+    if "price" in clean:
+        setf("price", clean["price"])
     if "negotiable" in body:
         setf("negotiable", 1 if body["negotiable"] else 0)
-    if "condition" in body:
-        setf("condition", body["condition"])
-    if "description" in body:
-        setf("description", body["description"])
-    if "province" in body:
-        setf("province", body["province"])
-    if "district" in body:
-        setf("district", body["district"])
-    if "city" in body:
-        setf("city", body["city"])
-    if "category_id" in body:
-        c = query("SELECT id FROM categories WHERE id = ?", (body["category_id"],), one=True)
-        if not c:
-            return err("Invalid category")
-        setf("category_id", body["category_id"])
+    if "condition" in clean:
+        setf("condition", clean["condition"])
+    if "description" in clean:
+        setf("description", clean["description"])
+    for field in ("province", "district", "city"):
+        if field in clean:
+            setf(field, clean[field])
+    if "category_id" in clean:
+        setf("category_id", clean["category_id"])
     if "images" in body:
         imgs = body["images"] if isinstance(body["images"], list) else []
         imgs = [i for i in imgs if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
         setf("images", json.dumps(imgs))
-    if "specs" in body and isinstance(body["specs"], dict):
-        specs = body["specs"]
+    if "specs" in clean:
+        specs = clean["specs"]
         setf("specs", json.dumps(specs))
-        if specs.get("brand"):
-            setf("brand", specs["brand"])
-        if specs.get("model"):
-            setf("model", specs["model"])
+        if isinstance(specs.get("brand"), str) and specs["brand"]:
+            setf("brand", specs["brand"][:80])
+        if isinstance(specs.get("model"), str) and specs["model"]:
+            setf("model", specs["model"][:80])
         if specs.get("year"):
-            setf("year", specs["year"])
+            setf("year", str(specs["year"])[:10])
     if "contact_prefs" in body and isinstance(body["contact_prefs"], dict):
         setf("contact_prefs", json.dumps(body["contact_prefs"]))
     if "rejection_reason" in body:
@@ -1702,6 +1984,11 @@ def delete_listing(lid):
     if row["user_id"] != u["id"] and not u["is_admin"]:
         return err("Not allowed", 403)
     execute("DELETE FROM listings WHERE id = ?", (lid,))
+    # notifications.link is a hash route string, not a foreign key, so the rows
+    # that announced this listing ("Listing published", "Listing renewed",
+    # "Listing promoted") survive the cascade and would keep pointing the seller
+    # at an ad that no longer exists. Remove them with the listing.
+    execute("DELETE FROM notifications WHERE link = ?", (f"#/ads/{lid}",))
     return ok({"deleted": lid})
 
 
@@ -1771,7 +2058,7 @@ def list_favorites():
         "FROM favorites f JOIN listings l ON l.id = f.listing_id "
         "JOIN categories c ON c.id = l.category_id WHERE f.user_id = ? ORDER BY f.created_at DESC",
         (u["id"],))
-    return ok([serialize_listing(r) for r in rows])
+    return ok(serialize_listings(rows))
 
 
 @app.route("/api/favorites/ids")
@@ -2108,15 +2395,16 @@ def upload_avatar():
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     name = f"avatar_{uuid.uuid4().hex}.jpg"
     path = os.path.join(UPLOAD_DIR, name)
+    src = decode_image(data)
+    if src is None:
+        return err("That file is not a readable image. Upload a JPG, PNG, WEBP or GIF.")
     try:
         from PIL import Image, ImageOps
-        img = Image.open(__import__("io").BytesIO(data))
-        img = ImageOps.exif_transpose(img).convert("RGB")
+        img = ImageOps.exif_transpose(src).convert("RGB")
         img = ImageOps.fit(img, (256, 256), Image.Resampling.LANCZOS)
         img.save(path, "JPEG", quality=85)
     except Exception:
-        with open(path, "wb") as fh:
-            fh.write(data)
+        return err("Could not process that image. Try a different photo.")
     execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/uploads/{name}", u["id"]))
     return ok({"url": f"/uploads/{name}"})
 
@@ -2150,7 +2438,7 @@ def seller_profile(uid):
         "rating": seller_rating(uid),
         "ratings": ratings,
         "business": dict(biz) if biz else None,
-        "listings": [serialize_listing(r) for r in listings],
+        "listings": serialize_listings(listings),
     })
 
 
@@ -2159,7 +2447,7 @@ def my_listings():
     u = require_auth()
     expire_overdue()
     rows = query(listing_query_base() + " WHERE l.user_id = ? ORDER BY l.created_at DESC", (u["id"],))
-    return ok([serialize_listing(r) for r in rows])
+    return ok(serialize_listings(rows))
 
 
 # ---------------------------------------------------------------------------
@@ -2213,11 +2501,19 @@ def business_payload(b):
         hours = json.loads(hours)
     except Exception:
         hours = {}
+    if not isinstance(hours, dict):
+        hours = {}
+    # Defensive .get() reads: a database created before a column was added must
+    # not turn the whole shop list into a 500.
     return {
-        "id": b["id"], "name": b["name"], "slug": b["slug"], "logo": b["logo"],
-        "description": b["description"], "province": b["province"], "district": b["district"],
-        "city": b["city"], "area": b["area"], "phone": b["phone"], "whatsapp": b["whatsapp"],
-        "opening_hours": hours, "verified": bool(b["verified"]),
+        "id": b.get("id"), "name": b.get("name") or "Unnamed shop", "slug": b.get("slug") or "",
+        "logo": b.get("logo") or "",
+        "description": b.get("description") or "", "province": b.get("province") or "",
+        "district": b.get("district") or "",
+        "city": b.get("city") or "", "area": b.get("area") or "", "phone": b.get("phone") or "",
+        "whatsapp": b.get("whatsapp") or "",
+        "opening_hours": hours, "verified": bool(b.get("verified")),
+        "user_id": b.get("user_id"),
     }
 
 
@@ -2271,9 +2567,10 @@ def businesses_list():
     out = []
     for b in rows:
         item = business_payload(b)
+        uid = b.get("user_id")
         item["listing_count"] = query(
-            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'", (b["user_id"],), one=True)["n"]
-        item["rating"] = seller_rating(b["user_id"])
+            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'", (uid,), one=True)["n"] if uid else 0
+        item["rating"] = seller_rating(uid) if uid else {"count": 0, "avg": 0}
         out.append(item)
     return ok(out)
 
@@ -2289,7 +2586,7 @@ def business_page(slug):
         "business": business_payload(b),
         "owner": public_user(owner) if owner else None,
         "rating": seller_rating(b["user_id"]),
-        "listings": [serialize_listing(r) for r in listings],
+        "listings": serialize_listings(listings),
     })
 
 
@@ -2298,14 +2595,24 @@ def business_page(slug):
 # ---------------------------------------------------------------------------
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+# Used to keep the response time of a failed sign-in the same whether or not the
+# email exists (avoids leaking which addresses have accounts).
+_DUMMY_HASH = hash_password("lankalens-not-a-real-password")
+
 
 @app.route("/api/auth/signup", methods=["POST"])
 @rate_limit(10, 60)
 def signup():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     name = (body.get("name") or "").strip()
     email = (body.get("email") or "").strip().lower()
     password = body.get("password") or ""
+    missing = missing_fields_error({"name": name, "email": email, "password": password},
+                                   "name", "email", "password")
+    if missing:
+        return missing
     if len(name) < 2:
         return err("Please enter your name")
     if not EMAIL_RE.match(email):
@@ -2324,7 +2631,8 @@ def signup():
         (name, email, hash_password(password), (body.get("phone") or "").strip(),
          (body.get("whatsapp") or "").strip(), seller_type, now()))
     token = secrets.token_hex(32)
-    execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, uid, now()))
+    execute("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, uid, now(), now() + SESSION_TTL_DAYS * 86400))
     u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
 
     # Email verification: token emailed in production; exposed in `dev` for local testing.
@@ -2338,16 +2646,29 @@ def signup():
 @app.route("/api/auth/login", methods=["POST"])
 @rate_limit(20, 60)
 def login():
-    body = request.get_json(silent=True) or {}
-    email = (body.get("email") or "").strip().lower()
+    body, bad = json_body()
+    if bad:
+        return bad
+    email = (body.get("email") or body.get("username") or "").strip().lower()
     password = body.get("password") or ""
+    missing = missing_fields_error({"email": email, "password": password}, "email", "password")
+    if missing:
+        return missing
+
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
-    if not u or not verify_password(password, u["password_hash"]):
+    if not u:
+        verify_password(password, _DUMMY_HASH)  # constant-time: no account enumeration
+        return err("Invalid email or password", 401)
+    if not verify_password(password, u["password_hash"]):
         return err("Invalid email or password", 401)
     if u.get("status") == "banned":
         return err("This account has been banned", 403)
+    if u.get("status") == "suspended":
+        return err("This account has been suspended. Contact support.", 403)
+
     token = secrets.token_hex(32)
-    execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, u["id"], now()))
+    execute("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
+            (token, u["id"], now(), now() + SESSION_TTL_DAYS * 86400))
     return ok({"token": token, "user": user_payload(u)})
 
 
@@ -2362,8 +2683,13 @@ def logout():
 @app.route("/api/auth/forgot", methods=["POST"])
 @rate_limit(10, 300)
 def forgot_password():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     email = (body.get("email") or "").strip().lower()
+    missing = missing_fields_error({"email": email}, "email")
+    if missing:
+        return missing
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
     if not u:
         # Do not reveal whether the email exists.
@@ -2374,8 +2700,13 @@ def forgot_password():
 
 @app.route("/api/auth/reset", methods=["POST"])
 def reset_password():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     token = (body.get("token") or "").strip()
+    missing = missing_fields_error({"token": token, "password": body.get("password")}, "token", "password")
+    if missing:
+        return missing
     row = consume_token(token, "reset")
     if not row:
         return err("This reset link is invalid or has expired", 400)
@@ -2389,8 +2720,13 @@ def reset_password():
 
 @app.route("/api/auth/verify-email", methods=["POST"])
 def verify_email():
-    body = request.get_json(silent=True) or {}
+    body, bad = json_body()
+    if bad:
+        return bad
     token = (body.get("token") or "").strip()
+    missing = missing_fields_error({"token": token}, "token")
+    if missing:
+        return missing
     row = consume_token(token, "email")
     if not row:
         return err("This verification link is invalid or has expired", 400)
@@ -2438,22 +2774,13 @@ def verify_phone():
 
 
 # ---------------------------------------------------------------------------
-# Shops, posts, contact
+# Posts, contact
 # ---------------------------------------------------------------------------
-@app.route("/api/shops")
-def shops():
-    rows = query("SELECT * FROM shops ORDER BY verified DESC, name")
-    return ok(rows)
-
-
-@app.route("/api/shops/<int:sid>")
-def shop_detail(sid):
-    row = query("SELECT * FROM shops WHERE id = ?", (sid,), one=True)
-    if not row:
-        return err("Shop not found", 404)
-    return ok(row)
-
-
+# NOTE: the old /api/shops endpoints were removed. The camera-shop directory the
+# app actually renders (#/shops, #/shop/<slug>) is served by /api/businesses,
+# backed by the `businesses` table, whose rows are owned by real seller accounts.
+# The orphaned `shops` table duplicated three of those names and added three
+# phantom shops that nothing in the frontend, admin panel or API ever read.
 @app.route("/api/posts")
 def posts():
     rows = query("SELECT id, slug, title, category, excerpt, image, author, created_at FROM posts ORDER BY created_at DESC")
@@ -2485,16 +2812,38 @@ def contact():
 # ---------------------------------------------------------------------------
 # Upload (with compression + thumbnails)
 # ---------------------------------------------------------------------------
+def decode_image(data):
+    """Return a verified PIL image, or None when the bytes are not a real image.
+
+    The extension check alone is not enough: renaming anything to .jpg used to be
+    stored verbatim (the old code wrote the raw bytes when PIL failed), which put
+    arbitrary, unrenderable content in /uploads and a broken image in the UI.
+    """
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        img.verify()                       # rejects truncated / forged files
+        img = Image.open(io.BytesIO(data))  # verify() leaves the object unusable
+        img.load()
+        if img.width < 1 or img.height < 1:
+            return None
+        return img
+    except Exception:
+        return None
+
+
 def process_image(data, ext, max_dim=1600, thumb_dim=420):
-    """Return (main_filename, thumb_filename). Falls back to raw bytes on error."""
+    """Return (main_filename, thumb_filename) or (None, error_message)."""
     os.makedirs(UPLOAD_DIR, exist_ok=True)
+    img = decode_image(data)
+    if img is None:
+        return None, "That file is not a readable image. Upload a JPG, PNG, WEBP or GIF."
     name = uuid.uuid4().hex
     main_name = f"{name}.jpg"
     thumb_name = f"{name}_thumb.jpg"
     try:
-        import io
         from PIL import Image, ImageOps
-        img = Image.open(io.BytesIO(data))
         img = ImageOps.exif_transpose(img)
         if img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGBA")
@@ -2509,12 +2858,18 @@ def process_image(data, ext, max_dim=1600, thumb_dim=420):
         thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
         thumb.save(os.path.join(UPLOAD_DIR, thumb_name), "JPEG", quality=78, optimize=True)
         return main_name, thumb_name
-    except Exception:
-        ext = ext if ext in ALLOWED_IMG else "jpg"
-        main_name = f"{name}.{ext}"
-        with open(os.path.join(UPLOAD_DIR, main_name), "wb") as fh:
-            fh.write(data)
-        return main_name, None
+    except Exception as exc:
+        # The bytes decoded as an image but could not be re-encoded (e.g. an
+        # exotic mode). Store the original under a safe name rather than
+        # silently discarding the user's upload.
+        safe_ext = ext if ext in ALLOWED_IMG else "jpg"
+        main_name = f"{name}.{safe_ext}"
+        try:
+            with open(os.path.join(UPLOAD_DIR, main_name), "wb") as fh:
+                fh.write(data)
+            return main_name, None
+        except OSError:
+            return None, f"Could not save that image ({exc.__class__.__name__})."
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -2532,6 +2887,8 @@ def upload():
         if len(data) > MAX_IMG_BYTES:
             return err("Image too large (max 8MB)")
         main_name, thumb_name = process_image(data, ext)
+        if not main_name:
+            return err(thumb_name or "Could not process that image")
         item = {"url": f"/uploads/{main_name}"}
         if thumb_name:
             item["thumb"] = f"/uploads/{thumb_name}"
@@ -2801,7 +3158,7 @@ def admin_user_detail(uid):
     return ok({
         "user": admin_user_payload(u),
         "business": dict(biz) if biz else None,
-        "listings": [serialize_listing(r) for r in listings],
+        "listings": serialize_listings(listings),
         "activity": activity,
     })
 
@@ -3603,34 +3960,6 @@ def seed():
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?)""",
                 (l[0], l[1], l[2], slugify(l[2]), l[3], l[4], l[5], l[6], l[7], l[8],
                  l[9], l[10], l[11], l[12], l[13], l[14], l[15], ts, ts, ts + EXPIRY_DAYS * 86400))
-        conn.commit()
-
-    if conn.execute("SELECT COUNT(*) FROM shops").fetchone()[0] == 0:
-        shops = [
-            ("Colombo Camera House", "colombo-camera-house", "Colombo 04", "Colombo", "Colombo", "Western Province",
-             "+94 11 250 4400", "94112504400", "Authorised dealer for Sony, Canon and Fujifilm. Trade-ins welcome.",
-             "Cameras, Lenses, Trade-in", "/images/shops/shop-1.jpg", 1),
-            ("Kandy Photo Store", "kandy-photo-store", "Peradeniya Road", "Kandy", "Kandy", "Central Province",
-             "+94 81 223 5112", "94812235112", "Full-service camera store in Kandy. Repairs, rentals and sales.",
-             "Cameras, Repairs, Rentals", "/images/shops/shop-2.jpg", 1),
-            ("Galle Lens Center", "galle-lens-center", "Wakwella Road", "Galle", "Galle", "Southern Province",
-             "+94 91 222 7843", "94912227843", "Cameras and lenses for south coast photographers.",
-             "Cameras, Lenses", "/images/shops/shop-3.jpg", 0),
-            ("Negombo Camera Mart", "negombo-camera-mart", "Main Street", "Negombo", "Gampaha", "Western Province",
-             "+94 31 223 0912", "94312230912", "Action cameras and drone specialists near the coast.",
-             "Action Cameras, Drones", "/images/shops/shop-1.jpg", 0),
-            ("Jaffna Photo Works", "jaffna-photo-works", "Hospital Road", "Jaffna", "Jaffna", "Northern Province",
-             "+94 21 222 3315", "94212223315", "Everything for photographers in the Northern Province.",
-             "Cameras, Printing", "/images/shops/shop-2.jpg", 0),
-            ("Colombo Lens Exchange", "colombo-lens-exchange", "Union Place", "Colombo", "Colombo", "Western Province",
-             "+94 77 765 4321", "94777654321", "Second-hand lens specialists — buy, sell and exchange.",
-             "Lenses, Trade-in", "/images/shops/shop-3.jpg", 1),
-        ]
-        for name, slug, area, city, district, province, phone, wa, desc, spec, img, verified in shops:
-            conn.execute(
-                "INSERT INTO shops (name, slug, area, city, district, province, phone, whatsapp, description, specialties, image, verified, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, slug, area, city, district, province, phone, wa, desc, spec, img, verified, now()))
         conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0:
