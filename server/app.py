@@ -9,6 +9,7 @@ import os
 import re
 import json
 import time
+import logging
 import sqlite3
 import secrets
 import hashlib
@@ -36,6 +37,37 @@ B2_KEY_ID = os.environ.get("B2_KEY_ID", "").strip()
 B2_APPLICATION_KEY = os.environ.get("B2_APPLICATION_KEY", "").strip()
 _b2_client = None
 _b2_client_error_logged = False
+_b2_client_init_logged = False
+
+
+def _b2_redact(text):
+    """Scrub B2 credential *values* out of anything about to be logged.
+
+    Key names, bucket, endpoint host and region are not secrets and stay
+    readable for diagnostics; only the values of B2_KEY_ID and
+    B2_APPLICATION_KEY are replaced so a log line can never leak a credential.
+    """
+    if not text:
+        return text
+    if B2_KEY_ID:
+        text = text.replace(B2_KEY_ID, "[REDACTED]")
+    if B2_APPLICATION_KEY:
+        text = text.replace(B2_APPLICATION_KEY, "[REDACTED]")
+    return text
+
+
+def b2_missing_env():
+    """Names (never values) of the required B2 env vars that are empty/missing."""
+    values = {
+        "B2_BUCKET": B2_BUCKET,
+        "B2_ENDPOINT": B2_ENDPOINT,
+        "B2_REGION": B2_REGION,
+        "B2_KEY_ID": B2_KEY_ID,
+        "B2_APPLICATION_KEY": B2_APPLICATION_KEY,
+    }
+    return [name for name, val in values.items() if not val]
+
+
 EXPIRY_DAYS = 30
 # Auth tokens used to live forever: the sessions table had no expiry column, so
 # a leaked token stayed valid until someone logged out or an admin banned the
@@ -709,7 +741,14 @@ def b2_enabled():
     return all([B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_KEY_ID, B2_APPLICATION_KEY])
 
 def get_b2_client():
-    global _b2_client, _b2_client_error_logged
+    """Lazily create (and cache) the boto3 S3 client for Backblaze B2.
+
+    Logs once per process: on success the endpoint host, bucket and region
+    (all non-secret); on failure the exception type and message with any
+    credential values redacted. B2_KEY_ID / B2_APPLICATION_KEY are never
+    written to the log.
+    """
+    global _b2_client, _b2_client_error_logged, _b2_client_init_logged
     if _b2_client is not None:
         return _b2_client
     if not b2_enabled():
@@ -728,13 +767,16 @@ def get_b2_client():
             aws_secret_access_key=B2_APPLICATION_KEY,
             config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
         )
+        if not _b2_client_init_logged:
+            host = endpoint.split("://", 1)[-1].split("/", 1)[0]
+            app.logger.info("B2 client initialized (bucket=%s, endpoint=%s, region=%s)",
+                            B2_BUCKET, host, B2_REGION)
+            _b2_client_init_logged = True
         return _b2_client
     except Exception as e:
         if not _b2_client_error_logged:
-            try:
-                app.logger.warning("B2 client init failed: %s", e.__class__.__name__)
-            except Exception:
-                pass
+            app.logger.error("B2 client init failed: %s: %s",
+                             e.__class__.__name__, _b2_redact(str(e)))
             _b2_client_error_logged = True
         return None
 
@@ -752,10 +794,8 @@ def b2_presigned_url(key, expires_in=3600):
             ExpiresIn=expires_in,
         )
     except Exception as e:
-        try:
-            app.logger.warning("B2 presign failed for %s: %s", key[:40], e.__class__.__name__)
-        except Exception:
-            pass
+        app.logger.warning("B2 presign failed for %s: %s: %s",
+                           key[:40], e.__class__.__name__, _b2_redact(str(e)))
         return None
 
 def b2_upload_bytes(key, data, content_type="image/jpeg"):
@@ -763,15 +803,24 @@ def b2_upload_bytes(key, data, content_type="image/jpeg"):
         return False, "B2 not configured"
     client = get_b2_client()
     if not client:
-        return False, "B2 client unavailable"
+        # get_b2_client() has already logged why the client is unavailable.
+        app.logger.warning("B2 upload not attempted for key=%s: B2 client unavailable", key)
+        return False, "Could not upload image. Please try again."
+    k = key.lstrip("/")
+    started = time.time()
+    app.logger.info("B2 upload started (key=%s, %d bytes)", k, len(data))
     try:
-        client.put_object(Bucket=B2_BUCKET, Key=key.lstrip("/"), Body=data, ContentType=content_type)
+        client.put_object(Bucket=B2_BUCKET, Key=k, Body=data, ContentType=content_type)
+        app.logger.info("B2 upload succeeded (key=%s, %d bytes, %.2fs)",
+                        k, len(data), time.time() - started)
         return True, None
     except Exception as e:
-        try:
-            app.logger.warning("B2 upload failed for %s: %s", key[:40], e.__class__.__name__)
-        except Exception:
-            pass
+        # Never swallow: log the exception type, message and traceback so the
+        # failure is diagnosable from the Railway logs. The message is scrubbed
+        # of any credential values; the client only ever sees a generic error.
+        app.logger.error("B2 upload failed (key=%s, %d bytes): %s: %s",
+                         k, len(data), e.__class__.__name__, _b2_redact(str(e)),
+                         exc_info=True)
         return False, "Could not upload image. Please try again."
 
 def b2_delete_key(key):
@@ -784,10 +833,8 @@ def b2_delete_key(key):
         client.delete_object(Bucket=B2_BUCKET, Key=key.lstrip("/"))
         return True
     except Exception as e:
-        try:
-            app.logger.warning("B2 delete failed for %s: %s", key[:40], e.__class__.__name__)
-        except Exception:
-            pass
+        app.logger.warning("B2 delete failed for %s: %s: %s",
+                           key[:40], e.__class__.__name__, _b2_redact(str(e)))
         return False
 
 def _is_b2_key(val):
@@ -1426,6 +1473,55 @@ def user_payload(u):
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
+
+
+def _log_b2_startup_status():
+    """Log once per process where photo uploads are going: B2 or local disk.
+
+    This is the line to look for in the Railway logs when an upload
+    "succeeds" but no object appears in the bucket. Only non-secret values
+    are written (bucket, endpoint host, region, boto3 version); the values
+    of B2_KEY_ID and B2_APPLICATION_KEY are never logged.
+    """
+    logger = app.logger
+    logger.setLevel(logging.INFO)
+    # Flask's default app logger only ships WARNING+ to stderr via the
+    # last-resort handler; attach an explicit INFO handler so the B2
+    # diagnostics below are visible in the Railway logs.
+    logger.handlers = [h for h in logger.handlers if not isinstance(h, logging.StreamHandler)]
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logger.addHandler(handler)
+
+    logger.info("Lanka Lens started — local upload dir: %s", UPLOAD_DIR)
+    if not b2_enabled():
+        logger.warning(
+            "B2 storage DISABLED — missing/empty env vars: %s. Photo uploads will be "
+            "saved to the local filesystem (uploads/) instead of the Backblaze B2 "
+            "bucket. Set B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_KEY_ID and "
+            "B2_APPLICATION_KEY on the Railway service to enable B2.",
+            ", ".join(b2_missing_env()) or "(none — check env var names)")
+        return
+    try:
+        import boto3
+    except ImportError:
+        logger.error("B2 storage is configured but boto3 is NOT installed in this "
+                     "environment — B2 uploads will fail. boto3 is listed in "
+                     "server/requirements.txt; rebuild the Railway image.")
+        return
+    endpoint = B2_ENDPOINT if B2_ENDPOINT.startswith("http") else "https://" + B2_ENDPOINT
+    host = endpoint.split("://", 1)[-1].split("/", 1)[0]
+    logger.info("B2 storage enabled (bucket=%s, endpoint=%s, region=%s, boto3=%s)",
+                B2_BUCKET, endpoint.rstrip("/"), B2_REGION, getattr(boto3, "__version__", "unknown"))
+    low = host.lower()
+    if "backblazeb2.com" in low and not low.startswith("s3."):
+        logger.warning(
+            "B2_ENDPOINT %r does not look like a B2 *S3-compatible* endpoint (expected "
+            "s3.<region>.backblazeb2.com, e.g. https://s3.us-west-004.backblazeb2.com). "
+            "The b2api host (s<region>.backblazeb2.com) rejects S3 API requests.", host)
+
+
+_log_b2_startup_status()
 
 
 @app.teardown_appcontext
@@ -2771,15 +2867,14 @@ def upload_avatar():
                 except Exception:
                     pass
             execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/uploads/{name}", u["id"]))
+            app.logger.info("Avatar saved to local disk uploads/%s — B2 storage is disabled", name)
             return ok({"url": f"/uploads/{name}"})
     except Exception as e:
         # If the exception came from our own err return, it's already handled above; this is unexpected
         if isinstance(e, Exception) and "Could not upload" in str(e):
             raise
-        try:
-            app.logger.warning("Avatar processing failed: %s", e.__class__.__name__)
-        except Exception:
-            pass
+        app.logger.warning("Avatar processing failed: %s: %s",
+                           e.__class__.__name__, _b2_redact(str(e)))
         return err("Could not process that image. Try a different photo.")
 
 
@@ -3286,8 +3381,12 @@ def process_image(data, ext, max_dim=1600, thumb_dim=420):
             thumb = img.copy()
             thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
             thumb.save(os.path.join(UPLOAD_DIR, thumb_name), "JPEG", quality=78, optimize=True)
+            app.logger.info("Image saved to local disk uploads/%s (+ thumbnail) — B2 storage is disabled",
+                            main_name)
             return main_name, thumb_name
     except Exception as exc:
+        app.logger.warning("Image re-encoding failed, storing original bytes instead: %s: %s",
+                           exc.__class__.__name__, _b2_redact(str(exc)))
         # The bytes decoded as an image but could not be re-encoded (e.g. an
         # exotic mode). Store the original under a safe name rather than
         # silently discarding the user's upload.
@@ -3315,6 +3414,10 @@ def upload():
     files = request.files.getlist("files") or ([request.files["file"]] if "file" in request.files else [])
     if not files:
         return err("No file uploaded")
+    # Which backend will actually receive the bytes — this line is the first
+    # thing to check in the logs when photos appear to "disappear" from B2.
+    backend = "Backblaze B2" if b2_enabled() else "LOCAL DISK (uploads/)"
+    app.logger.info("Upload route reached: %d file(s) (storage=%s)", len(files), backend)
     items = []
     for f in files:
         ext = (f.filename or "").rsplit(".", 1)[-1].lower() if "." in (f.filename or "") else ""
@@ -3322,9 +3425,13 @@ def upload():
             return err(f"Unsupported image type: {ext or 'unknown'}")
         data = f.read()
         if len(data) > MAX_IMG_BYTES:
+            app.logger.warning("Upload rejected: %s is %d bytes (max 1MB per photo)",
+                               (f.filename or "")[:80], len(data))
             return err("Image too large (max 1MB)")
         main_key, thumb_key = process_image(data, ext)
         if not main_key:
+            app.logger.warning("Upload failed for %s: %s",
+                               (f.filename or "")[:80], thumb_key or "could not process image")
             return err(thumb_key or "Could not process that image")
         # When B2 is enabled, process_image returns B2 keys (uploads/xxx.jpg).
         # Return a presigned URL for immediate preview while the canonical key
@@ -3344,6 +3451,7 @@ def upload():
             if thumb_key:
                 item["thumb"] = f"/uploads/{thumb_key}"
         items.append(item)
+    app.logger.info("Upload complete: %d image(s) stored in %s", len(items), backend)
     return ok({"items": items})
 
 
