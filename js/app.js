@@ -64,7 +64,8 @@
     draft: { label: 'Draft', color: '#74817C' },
     sold: { label: 'Sold', color: '#3A6FB0' },
     expired: { label: 'Expired', color: '#B04A3A' },
-    paused: { label: 'Paused', color: '#9C4F96' }
+    paused: { label: 'Paused', color: '#9C4F96' },
+    rejected: { label: 'Rejected', color: '#E5484D' }
   };
   function statusChip(status) {
     var m = STATUS_META[status] || { label: status || '', color: '#74817C' };
@@ -192,6 +193,52 @@
     });
   }
 
+  /* ---------- SEO (dynamic title / description / canonical) ---------- */
+  function siteName() {
+    return (state.meta && state.meta.settings && state.meta.settings.site_name) || 'Lanka Lens';
+  }
+  function siteTagline() {
+    return (state.meta && state.meta.settings && state.meta.settings.tagline) || 'Buy & Sell Cameras in Sri Lanka';
+  }
+  function setMeta(title, desc, canonical) {
+    document.title = title;
+    var d = document.querySelector('meta[name="description"]');
+    if (d) d.setAttribute('content', desc || '');
+    var canon = document.querySelector('link[rel="canonical"]');
+    var url = canonical || (location.origin + location.pathname);
+    if (canon) canon.setAttribute('href', url);
+    else {
+      canon = document.createElement('link');
+      canon.setAttribute('rel', 'canonical');
+      canon.setAttribute('href', url);
+      document.head.appendChild(canon);
+    }
+  }
+  function defaultMeta(path) {
+    var s = siteName();
+    var map = {
+      '/': s + ' — ' + siteTagline(),
+      '/categories': 'All Categories — ' + s,
+      '/browse': 'Browse Listings — ' + s,
+      '/search': 'Search — ' + s,
+      '/sell': 'Sell Your Camera — ' + s,
+      '/favorites': 'Favorites — ' + s,
+      '/chat': 'Messages — ' + s,
+      '/profile': 'My Profile — ' + s,
+      '/settings': 'Settings — ' + s,
+      '/my-ads': 'My Ads — ' + s,
+      '/my-offers': 'My Offers — ' + s,
+      '/analytics': 'Seller Analytics — ' + s,
+      '/shops': 'Camera Shops in Sri Lanka — ' + s,
+      '/blog': 'Camera Buying Guides — ' + s,
+      '/safety': 'Buy & Sell Safely — ' + s,
+      '/buying-guide': 'Camera Buying Guide — ' + s,
+      '/admin': 'Admin Panel — ' + s
+    };
+    if (path.indexOf('/admin') === 0) return 'Admin Panel — ' + s;
+    return map[path] || s + ' — ' + siteTagline();
+  }
+
   /* ---------- ui primitives ---------- */
   var toastTimer = null;
   function toast(msg, type) {
@@ -268,6 +315,7 @@
       '<div class="thumb">' + img +
       (l.condition ? '<span class="cond-chip">' + esc(l.condition) + '</span>' : '') +
       (l.featured ? '<span class="featured-flag">Featured</span>' : '') +
+      (l.urgent ? '<span class="urgent-flag">URGENT</span>' : '') +
       '<button class="fav' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '" aria-label="Favorite">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '</div><div class="body">' +
       '<div class="title">' + esc(l.title) + '</div>' +
@@ -363,7 +411,7 @@
           if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('time-outline') + 'Latest Listings</h2><a class="more" data-nav="#/browse">View all</a></div>' +
             '<div class="hscroll">' + (d.items || []).slice(0, 8).map(lcard).join('') + '</div>';
         }).catch(function () {});
-        api.get('/shops').then(function (shops) {
+        api.get('/businesses').then(function (shops) {
           var el = $('#home-shops');
           if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('cart-outline') + 'Camera Shops</h2><a class="more" data-nav="#/shops">View all</a></div>' +
             '<div class="hscroll">' + (shops || []).slice(0, 5).map(shopCardSmall).join('') + '</div>';
@@ -383,8 +431,8 @@
   };
 
   function shopCardSmall(s) {
-    return '<div class="lcard card-sm" data-nav="#/shops">' +
-      '<div class="thumb">' + (s.image ? '<img src="' + esc(s.image) + '" alt="">' : '<span class="ph">' + icon('cart-outline') + '</span>') + '</div>' +
+    return '<div class="lcard card-sm" data-nav="#/shop/' + esc(s.slug) + '">' +
+      '<div class="thumb">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '<span class="ph">' + icon('cart-outline') + '</span>') + '</div>' +
       '<div class="body"><div class="title" style="min-height:auto">' + esc(s.name) + (s.verified ? ' ' + icon('shield-checkmark') : '') + '</div>' +
       '<div class="meta"><span>' + icon('location-outline') + esc(s.city || s.area) + '</span></div></div></div>';
   }
@@ -730,7 +778,15 @@
   function renderDetail(l) {
     var imgs = l.images && l.images.length ? l.images : [];
     var favOn = isFav(l.id);
-    var ghtml = '<div class="gallery">' +
+    setMeta((l.title || 'Listing') + ' — ' + siteName(),
+      (l.description || (l.title + ' — ' + fmtLKR(l.price))).slice(0, 160),
+      location.origin + '/listing/' + (l.slug || slugify(l.title || '')) + '-' + l.id);
+    var crumbs = '<nav class="breadcrumbs" aria-label="Breadcrumb">' +
+      '<a data-nav="#/">Home</a><span>/</span>' +
+      (l.top_category ? '<a data-nav="#/category/' + esc(l.top_category.slug) + '">' + esc(l.top_category.name) + '</a><span>/</span>' : '') +
+      (l.category ? '<a data-nav="#/category/' + esc(l.category.slug) + '">' + esc(l.category.name) + '</a><span>/</span>' : '') +
+      '<span class="current">' + esc(l.title) + '</span></nav>';
+    var ghtml = crumbs + '<div class="gallery">' +
       '<button class="back" data-back>' + icon('chevron-back-outline') + '</button>' +
       '<button class="favbig' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '<div class="main">' + (imgs.length ? imgs.map(function (src) {
@@ -744,7 +800,9 @@
     var cond = l.condition || '—';
     var catName = l.category_name || '';
     var meta = '<div class="detail-wrap">' +
-      (l.featured ? '<div style="margin-bottom:8px"><span class="vbadge" style="background:var(--accent-light);color:var(--accent-dark)">' + icon('flash-outline') + ' Featured</span></div>' : '') +
+      (l.featured || l.urgent ? '<div style="margin-bottom:8px">' +
+        (l.featured ? '<span class="vbadge" style="background:var(--accent-light);color:var(--accent-dark);margin-right:6px">' + icon('flash-outline') + ' Featured</span>' : '') +
+        (l.urgent ? '<span class="vbadge" style="background:#FDE8E8;color:#C62828">' + icon('flame-outline') + ' Urgent</span>' : '') + '</div>' : '') +
       '<div class="detail-price-row"><div><div class="detail-price">' + fmtLKR(l.price) + (l.negotiable ? ' <small>negotiable</small>' : '') + '</div></div>' +
       '<span class="vbadge">' + icon('pricetag-outline') + esc(catName) + '</span></div>' +
       '<h1 class="detail-title">' + esc(l.title) + '</h1>' +
@@ -1319,7 +1377,7 @@
     if (!requireAuth()) return { html: '' };
     var html = header('My Ads', { right: '<a class="icon-btn" data-nav="#/analytics" aria-label="Analytics">' + icon('bar-chart-outline') + '</a>' });
     html += '<div class="subcats" style="padding-top:12px" id="myads-tabs">' +
-      ['All', 'Active', 'Pending', 'Draft', 'Sold', 'Expired', 'Paused'].map(function (s, i) {
+      ['All', 'Active', 'Pending', 'Draft', 'Sold', 'Expired', 'Paused', 'Rejected'].map(function (s, i) {
         return '<a class="chip' + (i === 0 ? ' active' : '') + '" data-adtab="' + s.toLowerCase() + '">' + s + '</a>';
       }).join('') + '</div>';
     html += '<div class="stat-strip"><div class="stat-box"><b id="st-active">–</b><span>Active</span></div>' +
@@ -1369,14 +1427,18 @@
     var expiring = l.status === 'active' && l.expiry_at && (l.expiry_at - Math.floor(Date.now() / 1000)) < 3 * 86400;
     var expiryLine = l.expiry_at ? (l.status === 'active'
       ? 'Expires ' + fmtDate(l.expiry_at) : 'Expired ' + fmtDate(l.expiry_at)) : '';
+    var rejectLine = l.status === 'rejected' && l.rejection_reason
+      ? '<span class="status-chip" style="color:#C62828;background:#FDE8E8">' + icon('alert-circle-outline') + ' ' + esc(l.rejection_reason) + '</span>' : '';
     return '<div class="ad-row">' +
       '<div class="ad-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
       '<div class="ad-main">' +
       '<div class="ad-title" data-nav="#/ads/' + l.id + '">' + esc(l.title) + '</div>' +
       '<div class="ad-sub">' + fmtLKR(l.price) + (l.negotiable ? ' · negotiable' : '') + ' · ' + l.views + ' views</div>' +
       '<div class="ad-meta">' + statusChip(l.status) +
+      (l.urgent ? '<span class="status-chip" style="color:#C62828;background:#FDE8E8">' + icon('flame-outline') + ' Urgent</span>' : '') +
       (expiring ? '<span class="status-chip" style="color:#C77D23;background:#C77D231a">Expiring soon</span>' : '') +
       (expiryLine ? '<span class="muted fs12">' + esc(expiryLine) + '</span>' : '') + '</div>' +
+      (rejectLine ? '<div class="ad-meta" style="margin-top:4px">' + rejectLine + '</div>' : '') +
       '</div>' +
       '<div class="ad-actions">' +
       '<button class="btn btn-outline btn-sm" data-ad-act="edit" data-id="' + l.id + '">' + icon('create-outline') + 'Edit</button>' +
@@ -1390,6 +1452,8 @@
         ? '<button class="btn btn-outline btn-sm" data-ad-act="renew" data-id="' + l.id + '">' + icon('refresh-outline') + 'Renew</button>' : '') +
       (l.status === 'draft'
         ? '<button class="btn btn-primary btn-sm" data-ad-act="publish" data-id="' + l.id + '">' + icon('checkmark-circle-outline') + 'Publish</button>' : '') +
+      (l.status === 'rejected'
+        ? '<button class="btn btn-primary btn-sm" data-ad-act="resubmit" data-id="' + l.id + '">' + icon('refresh-outline') + 'Resubmit</button>' : '') +
       (l.status === 'active' && !l.featured
         ? '<button class="btn btn-accent btn-sm" data-ad-act="promote" data-id="' + l.id + '">' + icon('flash-outline') + 'Promote</button>' : '') +
       '<button class="btn btn-danger btn-sm" data-ad-act="delete" data-id="' + l.id + '">' + icon('trash-outline') + '</button>' +
@@ -1408,28 +1472,47 @@
           });
           return;
         }
-        var statusMap = { pause: 'paused', resume: 'active', sold: 'sold', publish: 'active' };
+        var statusMap = { pause: 'paused', resume: 'active', sold: 'sold', publish: 'active', resubmit: 'pending' };
         if (statusMap[act]) {
           api.patch('/listings/' + id, { status: statusMap[act] }).then(function () {
-            toast('Listing ' + (act === 'sold' ? 'marked as sold' : act + 'd'), 'success');
+            toast(act === 'sold' ? 'Listing marked as sold' : (act === 'resubmit' ? 'Listing resubmitted for review' : 'Listing ' + act + 'd'), 'success');
             views.myAdsRemount();
           }).catch(function (e) { toast(e.message, 'error'); });
           return;
         }
         if (act === 'renew') {
-          api.post('/listings/' + id + '/renew').then(function () { toast('Listing renewed for 30 days', 'success'); views.myAdsRemount(); });
+          api.post('/listings/' + id + '/renew').then(function () { toast('Listing renewed', 'success'); views.myAdsRemount(); });
           return;
         }
         if (act === 'promote') {
-          openDialog('Promote listing', '<p>Promote this listing to the featured section on the homepage for more visibility.</p>', 'Promote', false, function () {
-            api.post('/listings/' + id + '/promote').then(function () { closeDialog(); toast('Listing promoted', 'success'); views.myAdsRemount(); });
-          });
+          openPromoteSheet(id);
           return;
         }
       });
     });
   }
   views.myAdsRemount = function () { var v = views.myAds(); if (v.mount) v.mount(); };
+
+  function openPromoteSheet(id) {
+    api.get('/promotions').then(function (pkgs) {
+      if (!pkgs || !pkgs.length) return toast('Promotions are not available yet', 'error');
+      openSheet('Promote this listing', pkgs.map(function (p) {
+        var ic = { featured: 'flash-outline', boost: 'trending-up-outline', homepage: 'home-outline', urgent: 'flame-outline' }[p.type] || 'flash-outline';
+        return {
+          icon: ic,
+          label: p.name + ' — ' + fmtLKR(p.price) + ' · ' + p.duration_days + ' days',
+          onClick: function () {
+            api.post('/promotions/purchase', { listing_id: id, type: p.type }).then(function (r) {
+              return api.post('/payments/' + r.payment_id + '/simulate').then(function () {
+                toast(p.name + ' activated!', 'success');
+                views.myAdsRemount();
+              });
+            }).catch(function (e) { toast(e.message, 'error'); });
+          }
+        };
+      }));
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
 
   views.favorites = function () {
     if (!requireAuth()) return { html: '' };
@@ -1596,6 +1679,10 @@
     html += '<div class="stat-strip" style="padding:14px 16px"><div class="stat-box"><b id="p-l">–</b><span>Listings</span></div>' +
       '<div class="stat-box"><b id="p-f">–</b><span>Favorites</span></div>' +
       '<div class="stat-box"><b id="p-r">–</b><span>Offers</span></div></div>';
+    if (u.is_admin) {
+      html += '<div class="divider-label">Administration</div>';
+      html += menuRow('speedometer-outline', '#5B6BB0', 'Admin Panel', 'Manage users, listings & settings', '#/admin');
+    }
     html += '<div class="divider-label">Account</div>';
     html += menuRow('duplicate-outline', '#0E7C66', 'My Ads', 'Manage your listings', '#/my-ads');
     html += menuRow('heart-outline', '#E5484D', 'Favorites', 'Saved listings', '#/favorites');
@@ -2032,6 +2119,8 @@
       html: html,
       mount: function () {
         api.get('/posts/' + params.slug).then(function (p) {
+          setMeta(p.title + ' — ' + siteName() + ' Buying Guide', (p.excerpt || p.title).slice(0, 160),
+            location.origin + '/guide/' + p.slug);
           $('#post-root').innerHTML = header('Guide', {}) +
             (p.image ? '<img src="' + esc(p.image) + '" style="width:100%;height:210px;object-fit:cover" alt="">' : '') +
             '<div class="detail-wrap"><span class="vbadge">' + esc(p.category || 'Guide') + '</span>' +
@@ -2052,16 +2141,17 @@
     return {
       html: html,
       mount: function () {
-        api.get('/shops').then(function (shops) {
+        api.get('/businesses').then(function (shops) {
           var el = $('#shops-list');
           if (!shops.length) { el.innerHTML = '<div class="empty"><p>No shops listed yet.</p></div>'; return; }
           el.innerHTML = '<div class="detail-wrap" style="display:grid;gap:14px">' + shops.map(function (s) {
-            return '<div class="shop-card">' +
-              '<div class="cover">' + (s.image ? '<img src="' + esc(s.image) + '" alt="">' : '') + '</div>' +
+            return '<div class="shop-card" data-nav="#/shop/' + esc(s.slug) + '">' +
+              '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '') + '</div>' +
               '<div class="body"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
               '<div class="area">' + icon('location-outline') + esc([s.area, s.city, s.province].filter(Boolean).join(', ')) + '</div>' +
               '<p class="fs13 muted" style="margin-top:8px;line-height:1.5">' + esc(s.description) + '</p>' +
-              '<div class="specs">' + (s.specialties || '').split(',').map(function (x) { return '<span class="chip">' + esc(x.trim()) + '</span>'; }).join('') + '</div>' +
+              '<div class="specs">' + (s.listing_count ? '<span class="chip">' + s.listing_count + ' listings</span>' : '') +
+              (s.rating && s.rating.count ? '<span class="chip">' + s.rating.avg + ' ★ (' + s.rating.count + ')</span>' : '') + '</div>' +
               '<div class="flex gap8" style="margin-top:12px">' +
               '<button class="btn btn-primary btn-sm" data-call-shop="' + esc(s.phone) + '">' + icon('call-outline') + 'Call</button>' +
               '<button class="btn btn-wa btn-sm" data-wa-shop="' + esc(s.whatsapp || s.phone) + '">' + icon('logo-whatsapp') + 'WhatsApp</button></div></div></div>';
@@ -2382,6 +2472,8 @@
       mount: function () {
         api.get('/business/' + params.slug).then(function (d) {
           var b = d.business;
+          setMeta(b.name + ' — Camera Shop on ' + siteName(), (b.description || b.name).slice(0, 160),
+            location.origin + '/shop/' + b.slug);
           var days = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
           var hoursHtml = days.map(function (dd) {
             return '<div class="spec-row"><span class="k">' + dd[1] + '</span><span class="v">' + esc((b.opening_hours || {})[dd[0]] || '—') + '</span></div>';
@@ -2410,6 +2502,875 @@
         }).catch(function (e) {
           $('#shop-page').innerHTML = header('Shop', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
         });
+      }
+    };
+  };
+
+  /* ============================================================
+     Admin panel (Part 3)
+     ============================================================ */
+  var ADMIN_SECTIONS = [
+    ['dashboard', 'Dashboard', 'speedometer-outline'],
+    ['users', 'Users', 'people-outline'],
+    ['listings', 'Listings', 'albums-outline'],
+    ['reports', 'Reports', 'flag-outline'],
+    ['categories', 'Categories', 'layers-outline'],
+    ['brands', 'Brands & Models', 'pricetag-outline'],
+    ['locations', 'Locations', 'location-outline'],
+    ['promotions', 'Promotions', 'flash-outline'],
+    ['payments', 'Payments', 'card-outline'],
+    ['posts', 'Blog Posts', 'reader-outline'],
+    ['settings', 'Settings', 'settings-outline'],
+    ['audit', 'Audit Log', 'clipboard-outline']
+  ];
+
+  function adminGuard() {
+    if (!requireAuth()) return null;
+    if (!state.user.is_admin) return null;
+    return true;
+  }
+
+  function adminTabsInner(active) {
+    return ADMIN_SECTIONS.map(function (s) {
+      return '<a class="atab' + (s[0] === active ? ' active' : '') + '" data-atab="' + s[0] + '">' + icon(s[2]) + '<span>' + s[1] + '</span></a>';
+    }).join('');
+  }
+
+  function adminTabsHtml(active) {
+    return '<div class="admin-tabs">' + adminTabsInner(active) + '</div>';
+  }
+
+  function adminBody(html) {
+    // Section views return inner content only; loadAdminSection() injects it
+    // into the single #admin-body and refreshes the .admin-tabs bar.
+    return html;
+  }
+
+  function bindAdminTabs() {
+    $$('.admin-tabs .atab').forEach(function (a) {
+      a.addEventListener('click', function () {
+        $$('.admin-tabs .atab').forEach(function (x) { x.classList.remove('active'); });
+        a.classList.add('active');
+        var section = a.getAttribute('data-atab');
+        var target = section === 'dashboard' ? '#/admin' : '#/admin/' + section;
+        if (location.hash !== target) history.replaceState(null, '', target);
+        loadAdminSection(section);
+        window.scrollTo(0, 0);
+      });
+    });
+  }
+
+  function adminStatCards(cards) {
+    return '<div class="admin-stats">' + cards.map(function (c) {
+      return '<div class="astat"><div class="ico" style="color:' + c[2] + ';background:' + c[2] + '1a">' + icon(c[0]) + '</div>' +
+        '<div><b>' + c[1] + '</b><span>' + esc(c[3]) + '</span></div></div>';
+    }).join('') + '</div>';
+  }
+
+  function adminActionBar(leftHtml, rightHtml) {
+    return '<div class="a-bar">' + (leftHtml || '') + (rightHtml || '') + '</div>';
+  }
+
+  function adminTable(headers, rowsHtml) {
+    return '<div class="a-table-wrap"><table class="a-table"><thead><tr>' +
+      headers.map(function (h) { return '<th>' + esc(h) + '</th>'; }).join('') +
+      '</tr></thead><tbody>' + (rowsHtml || '') + '</tbody></table></div>';
+  }
+
+  function aChip(status, color) {
+    return '<span class="status-chip" style="color:' + (color || '#74817C') + ';background:' + (color || '#74817C') + '1a">' + esc(status) + '</span>';
+  }
+
+  var ADMIN_VIEWS = {};
+
+  /* ----- Dashboard ----- */
+  ADMIN_VIEWS.dashboard = function () {
+    return {
+      html: '<div class="spinner"></div>',
+      mount: function () {
+        api.get('/admin/dashboard').then(function (d) {
+          var c = d.counts;
+          var h = adminStatCards([
+            ['people-outline', c.users, '#0E7C66', 'Total users'],
+            ['albums-outline', c.active_listings, '#3A6FB0', 'Active listings'],
+            ['hourglass-outline', c.pending_listings, '#C77D23', 'Pending review'],
+            ['checkmark-circle-outline', c.sold_listings, '#0E7C66', 'Sold'],
+            ['storefront-outline', c.shops, '#9C4F96', 'Camera shops'],
+            ['flag-outline', c.reports_open, '#E5484D', 'Open reports'],
+            ['cash-outline', fmtLKR(c.revenue), '#F0A500', 'Revenue'],
+            ['chatbubble-ellipses-outline', c.messages, '#5B6BB0', 'Messages']
+          ]);
+          h += '<div class="a-sec-head"><h3>' + icon('hourglass-outline') + 'Pending approval</h3></div>';
+          var pend = d.pending || [];
+          h += pend.length ? pend.map(function (l) {
+            return '<div class="a-row">' +
+              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+              '<div class="a-main"><b>' + esc(l.title) + '</b><span>' + fmtLKR(l.price) + ' · ' + esc(l.category_name || '') + ' · ' + timeAgo(l.created_at) + '</span></div>' +
+              '<div class="a-actions">' +
+              '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Approve</button>' +
+              '<button class="btn btn-outline btn-sm" data-mod="reject" data-lid="' + l.id + '">Reject</button></div></div>';
+          }).join('') : '<p class="muted fs12 pad16">No listings waiting for review.</p>';
+          h += '<div class="a-sec-head"><h3>' + icon('people-outline') + 'Newest users</h3></div>';
+          h += adminTable(['Name', 'Email', 'Status', 'Joined'], (d.recent_users || []).map(function (u) {
+            return '<tr><td>' + esc(u.name) + '</td><td>' + esc(u.email) + '</td><td>' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</td><td>' + fmtDate(u.created_at) + '</td></tr>';
+          }).join(''));
+          h += '<div class="a-sec-head"><h3>' + icon('flag-outline') + 'Recent reports</h3></div>';
+          h += (d.recent_reports || []).length ? adminTable(['Listing', 'Reason', 'Status'], d.recent_reports.map(function (r) {
+            return '<tr><td>' + esc(r.listing_title || '—') + '</td><td>' + esc(r.reason) + '</td><td>' + aChip(r.status, r.status === 'open' ? '#C77D23' : '#0E7C66') + '</td></tr>';
+          }).join('')) : '<p class="muted fs12 pad16">No reports.</p>';
+          var body = $('#admin-body');
+          if (body) {
+            body.innerHTML = h;
+            bindModeration(body);
+            var tabs = $('.admin-tabs'); if (tabs) tabs.innerHTML = adminTabsInner('dashboard');
+            bindAdminTabs();
+          }
+        }).catch(function (e) { $('#admin-body').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Users ----- */
+  ADMIN_VIEWS.users = function () {
+    var html = adminActionBar(
+      '<form class="a-search" id="au-search"><span>' + icon('search-outline') + '</span><input placeholder="Search name, email, phone…"></form>',
+      '<select class="select" id="au-status" style="width:auto">' +
+      ['all', 'active', 'suspended', 'banned'].map(function (s) { return '<option value="' + s + '">' + (s === 'all' ? 'All statuses' : s) + '</option>'; }).join('') + '</select>');
+    html += '<div id="au-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          var q = $('#au-search input').value.trim();
+          var st = $('#au-status').value;
+          api.get('/admin/users?q=' + encodeURIComponent(q) + '&status=' + st).then(function (users) {
+            var el = $('#au-list');
+            el.innerHTML = users.map(function (u) {
+              return '<div class="a-row" data-nav="#/admin/users/' + u.id + '">' +
+                avatarHtml(u, 'sm') +
+                '<div class="a-main"><b>' + esc(u.name) + (u.is_admin ? ' <span class="vbadge">admin</span>' : '') + (u.verified ? ' ' + icon('shield-checkmark') : '') + '</b>' +
+                '<span>' + esc(u.email) + ' · ' + u.listing_count + ' listings · joined ' + fmtDate(u.created_at) + '</span></div>' +
+                aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') +
+                '<span class="chev">' + icon('chevron-forward-outline') + '</span></div>';
+            }).join('') || '<div class="empty"><p>No users found.</p></div>';
+          }).catch(function (e) { $('#au-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+        $('#au-search').addEventListener('submit', function (e) { e.preventDefault(); load(); });
+        $('#au-status').addEventListener('change', load);
+      }
+    };
+  };
+
+  ADMIN_VIEWS.userDetail = function (params) {
+    var id = params.id;
+    var html = '<div id="aud-root"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/admin/users/' + id).then(function (d) {
+          var u = d.user, act = d.activity, biz = d.business;
+          var h = '<div class="a-sec-head"><h3>' + avatarHtml(u, 'lg') + ' <span style="margin-left:8px">' + esc(u.name) + '</span></h3></div>';
+          h += '<div class="info-card">' +
+            '<div class="spec-row"><span class="k">Email</span><span class="v">' + esc(u.email) + '</span></div>' +
+            '<div class="spec-row"><span class="k">Phone</span><span class="v">' + esc(u.phone || '—') + '</span></div>' +
+            '<div class="spec-row"><span class="k">WhatsApp</span><span class="v">' + esc(u.whatsapp || '—') + '</span></div>' +
+            '<div class="spec-row"><span class="k">Location</span><span class="v">' + esc([u.city, u.district, u.province].filter(Boolean).join(', ') || '—') + '</span></div>' +
+            '<div class="spec-row"><span class="k">Account type</span><span class="v">' + esc(u.seller_type || 'individual') + (biz ? ' — ' + esc(biz.name) : '') + '</span></div>' +
+            '<div class="spec-row"><span class="k">Status</span><span class="v">' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</span></div>' +
+            '<div class="spec-row"><span class="k">Verified</span><span class="v">' + (u.verified ? 'Yes' : 'No') + ' · Email ' + (u.email_verified ? '✓' : '✗') + ' · Phone ' + (u.phone_verified ? '✓' : '✗') + '</span></div>' +
+            '<div class="spec-row"><span class="k">Joined</span><span class="v">' + fmtDate(u.created_at) + '</span></div></div>';
+
+          var acts = [['camera-outline', act.listings, 'Listings'], ['heart-outline', act.favorites, 'Favorites'], ['cash-outline', act.offers_made, 'Offers made'], ['chatbubble-ellipses-outline', act.messages_sent, 'Msgs sent'], ['flag-outline', act.reports_against, 'Reports against'], ['card-outline', act.payments, 'Payments']];
+          h += '<div class="a-sec-head"><h3>' + icon('bar-chart-outline') + 'Activity</h3></div>' +
+            '<div class="admin-stats">' + acts.map(function (c) { return '<div class="astat"><b>' + c[1] + '</b><span>' + esc(c[2]) + '</span></div>'; }).join('') + '</div>';
+
+          h += '<div class="a-sec-head"><h3>' + icon('construct-outline') + 'Actions</h3></div>';
+          h += '<div class="chips" style="padding:4px 16px 8px">';
+          h += (u.verified ? '' : '<button class="btn btn-outline btn-sm" data-uact="verify">' + icon('shield-checkmark') + 'Verify</button>');
+          h += (u.verified ? '<button class="btn btn-outline btn-sm" data-uact="unverify">Unverify</button>' : '');
+          if (u.status !== 'suspended') h += '<button class="btn btn-outline btn-sm" data-uact="suspend">' + icon('pause-outline') + 'Suspend</button>';
+          if (u.status !== 'banned' && !u.is_admin) h += '<button class="btn btn-danger btn-sm" data-uact="ban">' + icon('ban-outline') + 'Ban</button>';
+          if (u.status !== 'active') h += '<button class="btn btn-primary btn-sm" data-uact="activate">' + icon('play-outline') + 'Activate</button>';
+          if (!u.is_admin) h += '<button class="btn btn-danger btn-sm" data-uact="delete">' + icon('trash-outline') + 'Delete</button>';
+          h += '</div>';
+
+          h += '<div class="a-sec-head"><h3>' + icon('albums-outline') + 'Listings (' + (d.listings || []).length + ')</h3></div>';
+          h += (d.listings || []).length ? d.listings.map(function (l) {
+            return '<div class="a-row" data-nav="#/ads/' + l.id + '">' +
+              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+              '<div class="a-main"><b>' + esc(l.title) + '</b><span>' + fmtLKR(l.price) + ' · ' + l.views + ' views</span></div>' +
+              statusChip(l.status) + '<span class="chev">' + icon('chevron-forward-outline') + '</span></div>';
+          }).join('') : '<p class="muted fs12 pad16">No listings.</p>';
+
+          $('#aud-root').innerHTML = h + '<div style="height:12px"></div>';
+          $$('#aud-root [data-uact]').forEach(function (b) {
+            b.addEventListener('click', function () {
+              var act2 = b.getAttribute('data-uact');
+              if (act2 === 'delete') {
+                openDialog('Delete user', '<p>This permanently removes <b>' + esc(u.name) + '</b> and all their data. This cannot be undone.</p>', 'Delete', true, function () {
+                  api.del('/admin/users/' + id).then(function () { closeDialog(); toast('User deleted', 'success'); location.hash = '#/admin/users'; });
+                });
+                return;
+              }
+              if (act2 === 'ban') {
+                openDialog('Ban user', '<p>Ban <b>' + esc(u.name) + '</b>? Their listings will be paused and their email blocked from registering.</p>', 'Ban', true, function () {
+                  api.patch('/admin/users/' + id, { action: 'ban' }).then(function () { closeDialog(); toast('User banned', 'success'); ADMIN_VIEWS.userDetail(params).mount(); });
+                });
+                return;
+              }
+              api.patch('/admin/users/' + id, { action: act2 }).then(function () {
+                toast('User updated', 'success');
+                ADMIN_VIEWS.userDetail(params).mount();
+              }).catch(function (e) { toast(e.message, 'error'); });
+            });
+          });
+        }).catch(function (e) { $('#aud-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Listings moderation ----- */
+  function bindModeration(root) {
+    $$('[data-mod]', root).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var lid = b.getAttribute('data-lid');
+        var act = b.getAttribute('data-mod');
+        if (act === 'reject') {
+          openDialog('Reject listing', '<p>Send the seller a reason for the rejection.</p><div class="form-group mt16"><label>Reason</label>' +
+            '<textarea class="textarea" id="reject-reason" style="min-height:70px" placeholder="e.g. Missing photos / not enough details"></textarea></div>',
+            'Reject', true, function () {
+              api.post('/admin/listings/' + lid + '/moderate', { action: 'reject', reason: $('#reject-reason').value }).then(function () {
+                closeDialog(); toast('Listing rejected', 'success'); loadAdminSection('listings');
+              }).catch(function (e) { toast(e.message, 'error'); });
+            });
+          return;
+        }
+        api.post('/admin/listings/' + lid + '/moderate', { action: act }).then(function () {
+          toast('Listing ' + act.replace('_', ' '), 'success');
+          loadAdminSection('listings');
+        }).catch(function (e) { toast(e.message, 'error'); });
+      });
+    });
+  }
+
+  ADMIN_VIEWS.listings = function () {
+    var html = adminActionBar(
+      '<form class="a-search" id="al-search"><span>' + icon('search-outline') + '</span><input placeholder="Search title, brand, model…"></form>',
+      '<select class="select" id="al-status" style="width:auto">' +
+      ['all', 'pending', 'active', 'rejected', 'paused', 'sold', 'expired', 'draft'].map(function (s) {
+        return '<option value="' + s + '">' + (s === 'all' ? 'All statuses' : s) + '</option>';
+      }).join('') + '</select>');
+    html += '<div id="al-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          var q = $('#al-search input').value.trim();
+          var st = $('#al-status').value;
+          api.get('/admin/listings?q=' + encodeURIComponent(q) + '&status=' + st).then(function (items) {
+            var el = $('#al-list');
+            el.innerHTML = items.map(function (l) {
+              var actions = '';
+              if (l.status === 'pending') {
+                actions += '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Approve</button>' +
+                  '<button class="btn btn-outline btn-sm" data-mod="reject" data-lid="' + l.id + '">Reject</button>';
+              }
+              if (l.status === 'active') {
+                actions += '<button class="btn btn-outline btn-sm" data-mod="suspend" data-lid="' + l.id + '">Suspend</button>' +
+                  '<button class="btn btn-outline btn-sm" data-mod="mark_sold" data-lid="' + l.id + '">Sold</button>' +
+                  (l.featured ? '<button class="btn btn-outline btn-sm" data-mod="unfeature" data-lid="' + l.id + '">Unfeature</button>'
+                    : '<button class="btn btn-accent btn-sm" data-mod="feature" data-lid="' + l.id + '">Feature</button>');
+              }
+              if (l.status === 'paused') {
+                actions += '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Activate</button>';
+              }
+              actions += '<button class="btn btn-outline btn-sm" data-nav="#/ads/' + l.id + '">View</button>';
+              return '<div class="a-row">' +
+                '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+                '<div class="a-main"><b>' + esc(l.title) + '</b>' +
+                '<span>' + fmtLKR(l.price) + ' · ' + esc((l.seller && l.seller.name) || '') + ' · ' + l.views + ' views</span>' +
+                (l.rejection_reason ? '<span class="muted fs12" style="color:#C62828">' + icon('alert-circle-outline') + ' ' + esc(l.rejection_reason) + '</span>' : '') + '</div>' +
+                statusChip(l.status) +
+                '<div class="a-actions" style="flex-wrap:wrap;justify-content:flex-end">' + actions + '</div></div>';
+            }).join('') || '<div class="empty"><p>No listings found.</p></div>';
+            bindModeration(el);
+          }).catch(function (e) { $('#al-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+        $('#al-search').addEventListener('submit', function (e) { e.preventDefault(); load(); });
+        $('#al-status').addEventListener('change', load);
+      }
+    };
+  };
+
+  /* ----- Reports ----- */
+  ADMIN_VIEWS.reports = function () {
+    var html = adminActionBar('',
+      '<select class="select" id="ar-status" style="width:auto">' +
+      '<option value="all">All statuses</option><option value="open">Open</option><option value="resolved">Resolved</option></select>');
+    html += '<div id="ar-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          api.get('/admin/reports?status=' + $('#ar-status').value).then(function (rows) {
+            var el = $('#ar-list');
+            el.innerHTML = rows.map(function (r) {
+              return '<div class="a-row">' +
+                '<div class="a-main"><b>' + esc(r.reason || 'Report') + '</b>' +
+                '<span>Listing: ' + esc(r.listing_title || '(removed)') + ' · by ' + esc(r.reporter_name || 'anonymous') + ' · ' + timeAgo(r.created_at) + '</span>' +
+                (r.resolution ? '<span class="muted fs12">Resolution: ' + esc(r.resolution) + '</span>' : '') + '</div>' +
+                aChip(r.status, r.status === 'open' ? '#C77D23' : '#0E7C66') +
+                (r.status === 'open' ? '<button class="btn btn-primary btn-sm" data-resolve="' + r.id + '">Resolve</button>' : '') +
+                '</div>';
+            }).join('') || '<div class="empty"><p>No reports.</p></div>';
+            $$('#ar-list [data-resolve]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var rid = b.getAttribute('data-resolve');
+                openDialog('Resolve report', '<div class="form-group"><label>Resolution note</label>' +
+                  '<textarea class="textarea" id="res-note" style="min-height:60px" placeholder="e.g. Reviewed and removed the listing"></textarea></div>' +
+                  '<div class="form-group"><label>Action</label><select class="select" id="res-action">' +
+                  '<option value="none">No further action</option>' +
+                  '<option value="remove_listing">Remove the listing</option>' +
+                  '<option value="suspend_seller">Suspend the seller</option></select></div>',
+                  'Resolve', false, function () {
+                    api.post('/admin/reports/' + rid + '/resolve', { resolution: $('#res-note').value, action: $('#res-action').value }).then(function () {
+                      closeDialog(); toast('Report resolved', 'success'); load();
+                    }).catch(function (e) { toast(e.message, 'error'); });
+                  });
+              });
+            });
+          }).catch(function (e) { $('#ar-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+        $('#ar-status').addEventListener('change', load);
+      }
+    };
+  };
+
+  /* ----- Categories ----- */
+  function fieldRowHtml(f, i) {
+    return '<div class="field-row" data-fidx="' + i + '">' +
+      '<input class="input" data-f="name" placeholder="field_key" value="' + esc(f.name || '') + '">' +
+      '<input class="input" data-f="label" placeholder="Label" value="' + esc(f.label || '') + '">' +
+      '<select class="select" data-f="type">' + ['text', 'select', 'number', 'textarea'].map(function (t) {
+        return '<option value="' + t + '"' + ((f.type || 'text') === t ? ' selected' : '') + '>' + t + '</option>';
+      }).join('') + '</select>' +
+      '<label class="switch" style="margin:0"><input type="checkbox" data-f="required"' + (f.required ? ' checked' : '') + '><span class="slider"></span></label>' +
+      (f.type === 'select' ? '<input class="input" data-f="options" placeholder="opt1, opt2" value="' + esc((f.options || []).join(', ')) + '">' : '') +
+      '<button class="btn btn-danger btn-sm" data-field-del="' + i + '">' + icon('trash-outline') + '</button></div>';
+  }
+
+  function openCategoryFields(cat) {
+    var fields = (cat.fields || []).slice();
+    function render() {
+      var list = $('#cf-list');
+      list.innerHTML = fields.map(fieldRowHtml).join('') || '<p class="muted fs12">No fields yet.</p>';
+      $$('#cf-list [data-field-del]').forEach(function (b) {
+        b.addEventListener('click', function () { fields.splice(parseInt(b.getAttribute('data-field-del'), 10), 1); render(); });
+      });
+      $$('#cf-list [data-f="type"]').forEach(function (s) {
+        s.addEventListener('change', function () {
+          var row = s.closest('.field-row');
+          var idx = parseInt(row.getAttribute('data-fidx'), 10);
+          fields[idx].type = s.value;
+          render();
+        });
+      });
+    }
+    openDialog('Edit fields — ' + cat.name,
+      '<p class="form-hint">Fields drive the listing form for this category. Use select + options for dropdowns.</p>' +
+      '<div class="form-group"><label>Fields</label><div id="cf-list"></div>' +
+      '<button class="btn btn-outline btn-sm" id="cf-add" type="button" style="margin-top:8px">' + icon('add-outline') + 'Add field</button></div>',
+      'Save fields', false, function () {
+        var out = [];
+        $$('#cf-list .field-row').forEach(function (row) {
+          var f = {};
+          var n = row.querySelector('[data-f="name"]').value.trim();
+          var lb = row.querySelector('[data-f="label"]').value.trim();
+          if (!n && !lb) return;
+          f.name = n || slugify(lb); f.label = lb || n;
+          f.type = row.querySelector('[data-f="type"]').value;
+          f.required = row.querySelector('[data-f="required"]').checked;
+          var opt = row.querySelector('[data-f="options"]');
+          if (f.type === 'select' && opt) f.options = opt.value.split(',').map(function (x) { return x.trim(); }).filter(Boolean);
+          out.push(f);
+        });
+        api.patch('/admin/categories/' + cat.id, { fields: out }).then(function () {
+          closeDialog(); toast('Fields saved', 'success'); refreshMeta();
+        }).catch(function (e) { toast(e.message, 'error'); });
+      });
+    render();
+    $('#cf-add').addEventListener('click', function () { fields.push({ name: '', label: '', type: 'text', required: false, options: [] }); render(); });
+  }
+
+  function refreshMeta() {
+    api.get('/meta').then(function (d) { state.meta = d; }).catch(function () {});
+  }
+
+  ADMIN_VIEWS.categories = function () {
+    var html = '<div id="ac-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          api.get('/meta').then(function (meta) {
+            var cats = meta.categories;
+            var el = $('#ac-list');
+            var h = adminActionBar('',
+              '<button class="btn btn-primary btn-sm" id="ac-add-top">' + icon('add-outline') + 'Add category</button>');
+            cats.forEach(function (c) {
+              h += '<div class="a-cat">' +
+                '<div class="a-cat-head"><span class="ri-icon" style="background:#0E7C661a;color:#0E7C66">' + icon(c.icon || 'layers-outline') + '</span>' +
+                '<div class="a-main"><b>' + esc(c.name) + '</b><span>' + (c.children || []).length + ' subcategories</span></div>' +
+                '<button class="btn btn-outline btn-sm" data-cat-edit="' + c.id + '" data-cat-name="' + esc(c.name) + '">' + icon('create-outline') + '</button>' +
+                '<button class="btn btn-outline btn-sm" data-cat-fields="' + c.id + '" data-cat-name="' + esc(c.name) + '" data-cat-fieldsjson=\'' + esc(JSON.stringify(c.fields || [])) + '\'>' + icon('list-outline') + '</button>' +
+                '<button class="btn btn-outline btn-sm" data-cat-addchild="' + c.id + '" data-cat-name="' + esc(c.name) + '">' + icon('add-outline') + '</button>' +
+                '<button class="btn btn-danger btn-sm" data-cat-del="' + c.id + '">' + icon('trash-outline') + '</button></div>';
+              (c.children || []).forEach(function (s) {
+                h += '<div class="a-sub">' + icon('chevron-forward-outline') + esc(s.name) +
+                  '<span class="spacer"></span>' +
+                  '<button class="btn btn-outline btn-sm" data-cat-edit="' + s.id + '" data-cat-name="' + esc(s.name) + '">' + icon('create-outline') + '</button>' +
+                  '<button class="btn btn-outline btn-sm" data-cat-fields="' + s.id + '" data-cat-name="' + esc(s.name) + '" data-cat-fieldsjson=\'' + esc(JSON.stringify(s.fields || [])) + '\'>' + icon('list-outline') + '</button>' +
+                  '<button class="btn btn-danger btn-sm" data-cat-del="' + s.id + '">' + icon('trash-outline') + '</button></div>';
+              });
+              h += '</div>';
+            });
+            el.innerHTML = h;
+            $('#ac-add-top').addEventListener('click', function () {
+              openDialog('Add category', '<div class="form-group"><label>Name</label><input class="input" id="ac-name" placeholder="e.g. Film Cameras"></div>' +
+                '<div class="form-group"><label>Icon (ionicon name)</label><input class="input" id="ac-icon" value="layers-outline"></div>',
+                'Add', false, function () {
+                  api.post('/admin/categories', { name: $('#ac-name').value, icon: $('#ac-icon').value }).then(function () {
+                    closeDialog(); toast('Category added', 'success'); refreshMeta(); load();
+                  }).catch(function (e) { toast(e.message, 'error'); });
+                });
+            });
+            $$('#ac-list [data-cat-addchild]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var pid = b.getAttribute('data-cat-addchild');
+                var pname = b.getAttribute('data-cat-name');
+                openDialog('Add subcategory to ' + pname, '<div class="form-group"><label>Name</label><input class="input" id="ac-name" placeholder="e.g. Medium Format"></div>',
+                  'Add', false, function () {
+                    api.post('/admin/categories', { name: $('#ac-name').value, parent_id: parseInt(pid, 10) }).then(function () {
+                      closeDialog(); toast('Subcategory added', 'success'); refreshMeta(); load();
+                    }).catch(function (e) { toast(e.message, 'error'); });
+                  });
+              });
+            });
+            $$('#ac-list [data-cat-edit]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var cid = b.getAttribute('data-cat-edit');
+                var cname = b.getAttribute('data-cat-name');
+                openDialog('Rename category', '<div class="form-group"><label>Name</label><input class="input" id="ac-name" value="' + esc(cname) + '"></div>',
+                  'Save', false, function () {
+                    api.patch('/admin/categories/' + cid, { name: $('#ac-name').value }).then(function () {
+                      closeDialog(); toast('Category updated', 'success'); refreshMeta(); load();
+                    }).catch(function (e) { toast(e.message, 'error'); });
+                  });
+              });
+            });
+            $$('#ac-list [data-cat-fields]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                openCategoryFields({
+                  id: parseInt(b.getAttribute('data-cat-fields'), 10),
+                  name: b.getAttribute('data-cat-name'),
+                  fields: JSON.parse(b.getAttribute('data-cat-fieldsjson'))
+                });
+              });
+            });
+            $$('#ac-list [data-cat-del]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var cid = b.getAttribute('data-cat-del');
+                openDialog('Delete category', '<p>This removes the category and its subcategories. Listings are also removed.</p>', 'Delete', true, function () {
+                  api.del('/admin/categories/' + cid).then(function () { closeDialog(); toast('Category deleted', 'success'); refreshMeta(); load(); })
+                    .catch(function (e) { toast(e.message, 'error'); });
+                });
+              });
+            });
+          }).catch(function (e) { $('#ac-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+      }
+    };
+  };
+
+  /* ----- Brands & models ----- */
+  ADMIN_VIEWS.brands = function () {
+    var html = adminActionBar('',
+      '<button class="btn btn-primary btn-sm" id="ab-add">' + icon('add-outline') + 'Add brand</button>');
+    html += '<div id="ab-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          api.get('/admin/brands').then(function (brands) {
+            var el = $('#ab-list');
+            el.innerHTML = brands.map(function (b) {
+              var models = (b.models || []).map(function (m) {
+                return '<span class="chip">' + esc(m.name) + ' <a data-model-del="' + m.id + '">' + icon('close-outline') + '</a></span>';
+              }).join('');
+              return '<div class="a-cat"><div class="a-cat-head">' +
+                '<div class="a-main"><b>' + esc(b.name) + '</b><span>' + esc(b.category || '') + ' · ' + (b.models || []).length + ' models</span></div>' +
+                '<button class="btn btn-outline btn-sm" data-brand-del="' + b.id + '">' + icon('trash-outline') + '</button></div>' +
+                '<div class="chips" style="padding:6px 16px 10px">' + (models || '<span class="muted fs12">No models</span>') + '</div>' +
+                '<div class="flex gap8" style="padding:0 16px 12px">' +
+                '<input class="input" data-model-name="' + b.id + '" placeholder="Add model…">' +
+                '<button class="btn btn-outline btn-sm" data-model-add="' + b.id + '">Add</button></div></div>';
+            }).join('') || '<div class="empty"><p>No brands yet.</p></div>';
+            $('#ab-add').addEventListener('click', function () {
+              openDialog('Add brand', '<div class="form-group"><label>Name</label><input class="input" id="ab-name"></div>' +
+                '<div class="form-group"><label>Category</label><input class="input" id="ab-cat" placeholder="e.g. Cameras"></div>',
+                'Add', false, function () {
+                  api.post('/admin/brands', { name: $('#ab-name').value, category: $('#ab-cat').value }).then(function () {
+                    closeDialog(); toast('Brand added', 'success'); refreshMeta(); load();
+                  }).catch(function (e) { toast(e.message, 'error'); });
+                });
+            });
+            $$('#ab-list [data-brand-del]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                api.del('/admin/brands/' + b.getAttribute('data-brand-del')).then(function () { toast('Brand deleted', 'success'); refreshMeta(); load(); });
+              });
+            });
+            $$('#ab-list [data-model-add]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var bid = b.getAttribute('data-model-add');
+                var inp = document.querySelector('[data-model-name="' + bid + '"]');
+                var name = inp.value.trim();
+                if (!name) return toast('Enter a model name', 'error');
+                api.post('/admin/models', { brand_id: parseInt(bid, 10), name: name }).then(function () { toast('Model added', 'success'); load(); });
+              });
+            });
+            $$('#ab-list [data-model-del]').forEach(function (a) {
+              a.addEventListener('click', function (e) {
+                e.preventDefault(); e.stopPropagation();
+                api.del('/admin/models/' + a.getAttribute('data-model-del')).then(function () { toast('Model deleted', 'success'); load(); });
+              });
+            });
+          }).catch(function (e) { $('#ab-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+      }
+    };
+  };
+
+  /* ----- Locations ----- */
+  ADMIN_VIEWS.locations = function () {
+    var html = '<div id="aloc-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/locations').then(function (provs) {
+          var el = $('#aloc-list');
+          var h = '<div class="form-card" style="margin:16px">' +
+            '<div class="section-head"><h3>' + icon('add-circle-outline') + 'Add location data</h3></div>' +
+            '<div class="form-group"><label>Province</label><input class="input" id="loc-prov" placeholder="e.g. Western Province"></div>' +
+            '<div class="form-group"><label>District (choose province)</label><div class="flex gap8">' +
+            '<select class="select" id="loc-prov-sel">' + provs.map(function (p) { return '<option value="' + p.id + '">' + esc(p.name) + '</option>'; }).join('') + '</select>' +
+            '<input class="input" id="loc-dist" placeholder="District name"></div></div>' +
+            '<div class="form-group"><label>City (choose district)</label><div class="flex gap8">' +
+            '<select class="select" id="loc-dist-sel"><option value="">—</option></select>' +
+            '<input class="input" id="loc-city" placeholder="City name"></div></div>' +
+            '<div class="flex gap8">' +
+            '<button class="btn btn-primary btn-sm" id="loc-add-prov">Add province</button>' +
+            '<button class="btn btn-outline btn-sm" id="loc-add-dist">Add district</button>' +
+            '<button class="btn btn-outline btn-sm" id="loc-add-city">Add city</button></div></div>';
+          provs.forEach(function (p) {
+            h += '<div class="a-cat"><div class="a-cat-head">' +
+              '<div class="a-main"><b>' + esc(p.name) + '</b><span>' + p.districts.length + ' districts</span></div>' +
+              '<button class="btn btn-danger btn-sm" data-prov-del="' + p.id + '">' + icon('trash-outline') + '</button></div>';
+            p.districts.forEach(function (d) {
+              h += '<div class="a-sub">' + icon('chevron-forward-outline') + '<b>' + esc(d.name) + '</b>' +
+                '<span class="muted fs12" style="margin-left:6px">' + d.cities.map(function (c) { return esc(c.name); }).join(', ') + '</span>' +
+                '<span class="spacer"></span>' +
+                '<button class="btn btn-outline btn-sm" data-dist-del="' + d.id + '">' + icon('trash-outline') + '</button></div>';
+            });
+            h += '</div>';
+          });
+          el.innerHTML = h;
+          function fillDistricts() {
+            var pid = $('#loc-prov-sel').value;
+            var p = provs.find(function (x) { return String(x.id) === String(pid); });
+            $('#loc-dist-sel').innerHTML = (p ? p.districts : []).map(function (d) {
+              return '<option value="' + d.id + '">' + esc(d.name) + '</option>';
+            }).join('');
+          }
+          $('#loc-prov-sel').addEventListener('change', fillDistricts);
+          fillDistricts();
+          $('#loc-add-prov').addEventListener('click', function () {
+            api.post('/admin/provinces', { name: $('#loc-prov').value }).then(function () { toast('Province added', 'success'); ADMIN_VIEWS.locations().mount(); });
+          });
+          $('#loc-add-dist').addEventListener('click', function () {
+            api.post('/admin/districts', { province_id: parseInt($('#loc-prov-sel').value, 10), name: $('#loc-dist').value }).then(function () { toast('District added', 'success'); ADMIN_VIEWS.locations().mount(); });
+          });
+          $('#loc-add-city').addEventListener('click', function () {
+            var did = $('#loc-dist-sel').value;
+            if (!did) return toast('Choose a district first', 'error');
+            api.post('/admin/cities', { district_id: parseInt(did, 10), name: $('#loc-city').value }).then(function () { toast('City added', 'success'); ADMIN_VIEWS.locations().mount(); });
+          });
+          $$('#aloc-list [data-prov-del]').forEach(function (b) {
+            b.addEventListener('click', function () {
+              api.del('/admin/provinces/' + b.getAttribute('data-prov-del')).then(function () { toast('Province deleted', 'success'); ADMIN_VIEWS.locations().mount(); });
+            });
+          });
+          $$('#aloc-list [data-dist-del]').forEach(function (b) {
+            b.addEventListener('click', function () {
+              api.del('/admin/districts/' + b.getAttribute('data-dist-del')).then(function () { toast('District deleted', 'success'); ADMIN_VIEWS.locations().mount(); });
+            });
+          });
+        }).catch(function (e) { $('#aloc-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Promotions ----- */
+  ADMIN_VIEWS.promotions = function () {
+    var html = '<div id="apromo"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/admin/settings').then(function (d) {
+          var pkgs = d.promotions;
+          var h = '<div class="a-sec-head"><h3>' + icon('flash-outline') + 'Promotion packages</h3></div>' +
+            '<p class="muted fs12 pad16">Prices and durations are configurable in Settings.</p>' +
+            adminTable(['Package', 'Price', 'Duration'], pkgs.map(function (p) {
+              return '<tr><td><b>' + esc(p.name) + '</b><br><span class="muted fs12">' + esc(p.description) + '</span></td><td>' + fmtLKR(p.price) + '</td><td>' + p.duration_days + ' days</td></tr>';
+            }).join(''));
+          h += '<div class="a-sec-head"><h3>' + icon('trending-up-outline') + 'Active promotions</h3></div>';
+          var body = $('#apromo');
+          body.innerHTML = h;
+          api.get('/admin/promotions').then(function (rows) {
+            var el = $('#apromo');
+            el.innerHTML = h + (rows.length ? adminTable(['Listing', 'User', 'Type', 'Paid', 'Expires'], rows.map(function (r) {
+              return '<tr><td>' + esc(r.listing_title || '—') + '</td><td>' + esc(r.user_name || '') + '</td><td>' + aChip(r.ptype, '#F0A500') + '</td><td>' + fmtLKR(r.price) + '</td><td>' + (r.ends_at ? fmtDate(r.ends_at) : '—') + '</td></tr>';
+            }).join('')) : '<p class="muted fs12 pad16">No promotions purchased yet.</p>');
+          });
+        }).catch(function (e) { $('#apromo').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Payments ----- */
+  ADMIN_VIEWS.payments = function () {
+    var html = '<div id="apay"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/admin/payments').then(function (rows) {
+          var el = $('#apay');
+          var statusColor = { pending: '#C77D23', processing: '#3A6FB0', successful: '#0E7C66', failed: '#E5484D', cancelled: '#74817C', refunded: '#9C4F96' };
+          el.innerHTML = rows.length ? adminTable(['Transaction', 'User', 'Package', 'Amount', 'Status', 'Date'], rows.map(function (r) {
+            return '<tr><td>' + esc(r.transaction_id) + '</td><td>' + esc(r.user_name || r.user_email || '') + '</td><td>' + esc(r.package_name || r.package) + '</td><td>' + fmtLKR(r.amount) + ' ' + esc(r.currency) + '</td>' +
+              '<td>' + aChip(r.status, statusColor[r.status]) + '</td><td>' + fmtDate(r.created_at) + '</td></tr>';
+          }).join('')) : '<div class="empty"><p>No payments yet.</p></div>';
+        }).catch(function (e) { $('#apay').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Blog posts ----- */
+  ADMIN_VIEWS.posts = function () {
+    var html = adminActionBar('',
+      '<button class="btn btn-primary btn-sm" id="ap-add">' + icon('add-outline') + 'New post</button>');
+    html += '<div id="ap-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function load() {
+          api.get('/posts').then(function (posts) {
+            var el = $('#ap-list');
+            el.innerHTML = posts.map(function (p) {
+              return '<div class="a-row">' +
+                '<div class="a-thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="">' : icon('reader-outline')) + '</div>' +
+                '<div class="a-main"><b>' + esc(p.title) + '</b><span>' + esc(p.category || 'Guide') + ' · ' + fmtDate(p.created_at) + '</span></div>' +
+                '<button class="btn btn-outline btn-sm" data-post-edit="' + p.id + '" data-post-slug="' + esc(p.slug) + '">' + icon('create-outline') + '</button>' +
+                '<button class="btn btn-danger btn-sm" data-post-del="' + p.id + '">' + icon('trash-outline') + '</button></div>';
+            }).join('') || '<div class="empty"><p>No posts yet.</p></div>';
+            $('#ap-add').addEventListener('click', function () { openPostEditor(null); });
+            $$('#ap-list [data-post-edit]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                api.get('/posts/' + b.getAttribute('data-post-slug')).then(function (p) { openPostEditor(p); });
+              });
+            });
+            $$('#ap-list [data-post-del]').forEach(function (b) {
+              b.addEventListener('click', function () {
+                var pid = b.getAttribute('data-post-del');
+                openDialog('Delete post', '<p>This permanently removes the post.</p>', 'Delete', true, function () {
+                  api.del('/admin/posts/' + pid).then(function () { closeDialog(); toast('Post deleted', 'success'); load(); });
+                });
+              });
+            });
+          });
+        }
+        load();
+      }
+    };
+  };
+
+  function openPostEditor(p) {
+    p = p || {};
+    openDialog(p.id ? 'Edit post' : 'New post',
+      '<div class="form-group"><label>Title</label><input class="input" id="pe-title" value="' + esc(p.title || '') + '"></div>' +
+      '<div class="form-group"><label>Category</label><input class="input" id="pe-cat" value="' + esc(p.category || 'Guide') + '"></div>' +
+      '<div class="form-group"><label>Excerpt</label><textarea class="textarea" id="pe-excerpt" style="min-height:50px">' + esc(p.excerpt || '') + '</textarea></div>' +
+      '<div class="form-group"><label>Body (HTML)</label><textarea class="textarea" id="pe-body" style="min-height:140px">' + esc(p.body || '') + '</textarea></div>' +
+      '<div class="form-group"><label>Image URL</label><input class="input" id="pe-img" value="' + esc(p.image || '') + '"></div>' +
+      '<div class="form-group"><label>Author</label><input class="input" id="pe-author" value="' + esc(p.author || 'Lanka Lens') + '"></div>',
+      'Save', false, function () {
+        var payload = {
+          title: $('#pe-title').value, category: $('#pe-cat').value, excerpt: $('#pe-excerpt').value,
+          body: $('#pe-body').value, image: $('#pe-img').value, author: $('#pe-author').value
+        };
+        var req = p.id ? api.patch('/admin/posts/' + p.id, payload) : api.post('/admin/posts', payload);
+        req.then(function () { closeDialog(); toast('Post saved', 'success'); loadAdminSection('posts'); })
+          .catch(function (e) { toast(e.message, 'error'); });
+      });
+  }
+
+  /* ----- Settings ----- */
+  ADMIN_VIEWS.settings = function () {
+    var html = '<div id="as-root"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/admin/settings').then(function (d) {
+          var s = d.settings;
+          var toggles = [
+            ['require_approval', 'Require admin approval for new listings'],
+            ['verification_required_to_sell', 'Require verified account to sell']
+          ];
+          function tg(name, label, val) {
+            return '<div class="switch-row"><div><label style="margin:0">' + esc(label) + '</label></div>' +
+              '<label class="switch"><input type="checkbox" id="st-' + name + '"' + (val === '1' || val === 'true' ? ' checked' : '') + '><span class="slider"></span></label></div>';
+          }
+          var h = '<form id="as-form"><div class="form-card" style="margin:16px">' +
+            '<div class="section-head"><h3>' + icon('globe-outline') + 'Branding</h3></div>' +
+            '<div class="form-group"><label>Site name</label><input class="input" name="site_name" value="' + esc(s.site_name) + '"></div>' +
+            '<div class="form-group"><label>Tagline</label><input class="input" name="tagline" value="' + esc(s.tagline) + '"></div>' +
+            '<div class="form-group"><label>Logo URL</label><input class="input" name="logo" value="' + esc(s.logo) + '"></div>' +
+            '<div class="form-group"><label>Footer text</label><input class="input" name="footer_text" value="' + esc(s.footer_text) + '"></div>' +
+            '<div class="section-head" style="margin-top:14px"><h3>' + icon('call-outline') + 'Contact</h3></div>' +
+            '<div class="form-group"><label>Email</label><input class="input" name="contact_email" value="' + esc(s.contact_email) + '"></div>' +
+            '<div class="form-group"><label>Phone</label><input class="input" name="contact_phone" value="' + esc(s.contact_phone) + '"></div>' +
+            '<div class="form-group"><label>Address</label><input class="input" name="contact_address" value="' + esc(s.contact_address) + '"></div>' +
+            '<div class="section-head" style="margin-top:14px"><h3>' + icon('settings-outline') + 'Listing limits</h3></div>' +
+            '<div class="form-group"><label>Max listings per user</label><input class="input" type="number" name="max_listings_per_user" value="' + esc(s.max_listings_per_user) + '"></div>' +
+            '<div class="form-group"><label>Max images per listing</label><input class="input" type="number" name="max_images_per_listing" value="' + esc(s.max_images_per_listing) + '"></div>' +
+            '<div class="form-group"><label>Listing expiry (days)</label><input class="input" type="number" name="listing_expiry_days" value="' + esc(s.listing_expiry_days) + '"></div>' +
+            toggles.map(function (t) { return tg(t[0], t[1], s[t[0]]); }).join('') +
+            '<div class="section-head" style="margin-top:14px"><h3>' + icon('flash-outline') + 'Promotion pricing</h3></div>';
+          [['featured', 'Featured Listing'], ['boost', 'Boost'], ['homepage', 'Homepage Featured'], ['urgent', 'Urgent Badge']].forEach(function (p) {
+            h += '<div class="form-group"><label>' + esc(p[1]) + ' — price (LKR) / days</label><div class="flex gap8">' +
+              '<input class="input" type="number" name="promo_' + p[0] + '_price" value="' + esc(s['promo_' + p[0] + '_price']) + '">' +
+              '<input class="input" type="number" name="promo_' + p[0] + '_days" value="' + esc(s['promo_' + p[0] + '_days']) + '"></div></div>';
+          });
+          h += '<div class="section-head" style="margin-top:14px"><h3>' + icon('card-outline') + 'Payments</h3></div>' +
+            '<div class="form-group"><label>Webhook secret (backend only — never shown to users)</label><input class="input" name="payment_webhook_secret" value="' + esc(s.payment_webhook_secret) + '" placeholder="Set to enable provider webhooks"></div>' +
+            '<div class="section-head" style="margin-top:14px"><h3>' + icon('image-outline') + 'Homepage banners (JSON)</h3></div>' +
+            '<div class="form-group"><textarea class="textarea" name="homepage_banners" style="min-height:70px">' + esc(s.homepage_banners) + '</textarea></div>' +
+            '<div class="section-head" style="margin-top:14px"><h3>' + icon('share-social-outline') + 'Social links</h3></div>' +
+            '<div class="form-group"><label>Facebook</label><input class="input" name="social_facebook" value="' + esc(s.social_facebook) + '"></div>' +
+            '<div class="form-group"><label>Instagram</label><input class="input" name="social_instagram" value="' + esc(s.social_instagram) + '"></div>' +
+            '<div class="form-group"><label>YouTube</label><input class="input" name="social_youtube" value="' + esc(s.social_youtube) + '"></div>' +
+            '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save settings</button>' +
+            '</div></form>';
+          $('#as-root').innerHTML = h;
+          $('#as-form').addEventListener('submit', function (e) {
+            e.preventDefault();
+            var payload = {};
+            $$('#as-form [name]').forEach(function (inp) {
+              if (inp.type === 'checkbox') payload[inp.name] = inp.checked ? '1' : '0';
+              else payload[inp.name] = inp.value;
+            });
+            api.put('/admin/settings', payload).then(function (r) {
+              toast('Settings saved', 'success');
+              refreshMeta();
+            }).catch(function (er) { toast(er.message, 'error'); });
+          });
+        }).catch(function (e) { $('#as-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  /* ----- Audit log ----- */
+  ADMIN_VIEWS.audit = function () {
+    var html = '<div id="aa-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        api.get('/admin/audit').then(function (rows) {
+          var el = $('#aa-list');
+          el.innerHTML = rows.length ? adminTable(['Admin', 'Action', 'Entity', 'Detail', 'When'], rows.map(function (r) {
+            return '<tr><td>' + esc(r.admin_name || '—') + '</td><td>' + aChip(r.action, '#5B6BB0') + '</td><td>' + esc(r.entity + (r.entity_id ? ' #' + r.entity_id : '')) + '</td><td>' + esc(r.detail || '') + '</td><td>' + timeAgo(r.created_at) + '</td></tr>';
+          }).join('')) : '<div class="empty"><p>No audit entries yet.</p></div>';
+        }).catch(function (e) { $('#aa-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  function loadAdminSection(section, params) {
+    var map = {
+      dashboard: ADMIN_VIEWS.dashboard,
+      users: ADMIN_VIEWS.users,
+      listings: ADMIN_VIEWS.listings,
+      reports: ADMIN_VIEWS.reports,
+      categories: ADMIN_VIEWS.categories,
+      brands: ADMIN_VIEWS.brands,
+      locations: ADMIN_VIEWS.locations,
+      promotions: ADMIN_VIEWS.promotions,
+      payments: ADMIN_VIEWS.payments,
+      posts: ADMIN_VIEWS.posts,
+      settings: ADMIN_VIEWS.settings,
+      audit: ADMIN_VIEWS.audit
+    };
+    if (section === 'users' && params && params.id) {
+      fn = ADMIN_VIEWS.userDetail;
+    } else {
+      fn = map[section];
+      if (!fn) { section = 'dashboard'; fn = ADMIN_VIEWS.dashboard; }
+    }
+    var body = $('#admin-body');
+    if (!body) return;
+    var v = fn(params);
+    body.innerHTML = v.html;
+    // re-render active tab bar
+    var tabs = $('.admin-tabs');
+    if (tabs) tabs.innerHTML = adminTabsInner(section);
+    bindAdminTabs();
+    if (v.mount) v.mount();
+  }
+
+  views.admin = function () {
+    if (!requireAuth()) return { html: '' };
+    if (!state.user.is_admin) {
+      return {
+        html: header('Admin Panel', {}) + '<div class="empty" style="padding-top:70px"><div class="e-icon">' + icon('lock-closed-outline') + '</div><h3>Admins only</h3><p>You need an administrator account to view this page.</p></div>',
+        mount: function () {}
+      };
+    }
+    var html = header('Admin Panel', {}) + adminTabsHtml('dashboard') + '<div id="admin-body"><div class="spinner"></div></div>';
+    return {
+      html: html,
+      hideTabbar: true,
+      mount: function () {
+        bindAdminTabs();
+        loadAdminSection('dashboard');
+      }
+    };
+  };
+
+  views.adminSection = function (params) {
+    if (!requireAuth()) return { html: '' };
+    if (!state.user.is_admin) return { html: header('Admin Panel', {}) + '<div class="empty"><p>Admins only.</p></div>', mount: function () {} };
+    var section = params.section;
+    var html = header('Admin Panel', {}) + adminTabsHtml(section) + '<div id="admin-body"><div class="spinner"></div></div>';
+    return {
+      html: html,
+      hideTabbar: true,
+      mount: function () {
+        bindAdminTabs();
+        loadAdminSection(section, params);
       }
     };
   };
@@ -2455,6 +3416,9 @@
     { re: /^\/blog$/, handler: function () { return views.blog(); } },
     { re: /^\/blog\/([^\/]+)$/, handler: function (p, q, m) { return views.post({ slug: m[1] }); } },
     { re: /^\/shops$/, handler: function () { return views.shops(); } },
+    { re: /^\/admin$/, handler: function () { return views.admin(); } },
+    { re: /^\/admin\/users\/(\d+)$/, handler: function (p, q, m) { return views.adminSection({ section: 'users', id: m[1] }); } },
+    { re: /^\/admin\/([^\/]+)$/, handler: function (p, q, m) { return views.adminSection({ section: m[1] }); } },
     { re: /^\/about$/, handler: function () { return views.about(); } },
     { re: /^\/safety$/, handler: function () { return views.safety(); } },
     { re: /^\/buying-guide$/, handler: function () { return views['buying-guide'](); } },
@@ -2491,6 +3455,7 @@
     page.innerHTML = v.html;
     document.getElementById('app').classList.toggle('hide-tabbar', !!v.hideTabbar);
     window.scrollTo(0, 0);
+    setMeta(defaultMeta(h.path), (state.meta && state.meta.settings && state.meta.settings.tagline) || '');
     updateTabbar(h.path);
     renderDrawer();
     if (v.mount) {
@@ -2501,10 +3466,10 @@
   function updateTabbar(path) {
     $$('.app-tabbar a[data-tab]').forEach(function (a) {
       var key = a.getAttribute('data-tab');
-      var active = (key === 'home' && (path === '/' || path === '/browse' || path === '/search')) ||
-        (key === 'categories' && path.indexOf('/category') === 0) ||
+      var active = (key === 'home' && (path === '/' || path === '/browse' || path.indexOf('/category') === 0)) ||
+        (key === 'search' && path === '/search') ||
         (key === 'favorites' && path === '/favorites') ||
-        (key === 'profile' && (path === '/profile' || path === '/settings' || path === '/my-ads' || path === '/my-offers' || path === '/analytics' || path === '/my-shop' || path.indexOf('/edit-ad') === 0));
+        (key === 'profile' && (path === '/profile' || path === '/settings' || path === '/my-ads' || path === '/my-offers' || path === '/analytics' || path === '/my-shop' || path.indexOf('/edit-ad') === 0 || path === '/admin'));
       a.classList.toggle('active', active);
     });
   }
@@ -2514,8 +3479,8 @@
     if (!el) return;
     el.innerHTML =
       '<a data-tab="home" data-nav="#/" class="active"><span>' + icon('home-outline') + '</span>Home</a>' +
-      '<a data-tab="categories" data-nav="#/categories"><span>' + icon('grid-outline') + '</span>Categories</a>' +
-      '<a class="sell-tab" data-nav="#/sell"><span class="sell-fab">' + icon('add-outline') + '</span><span>Sell</span></a>' +
+      '<a data-tab="search" data-nav="#/search"><span>' + icon('search-outline') + '</span>Search</a>' +
+      '<a class="sell-tab" data-nav="#/sell"><span class="sell-fab">' + icon('add-outline') + '</span><span>Post Ad</span></a>' +
       '<a data-tab="favorites" data-nav="#/favorites"><span>' + icon('heart-outline') + '</span>Favorites</a>' +
       '<a data-tab="profile" data-nav="#/profile"><span>' + icon('person-outline') + '</span>' + (state.user ? 'Profile' : 'Sign in') + '</a>';
   }
@@ -2550,6 +3515,9 @@
       ['notifications-outline', 'Notifications', '#/notifications'],
       ['settings-outline', 'Settings', '#/settings']
     ] : [];
+    if (state.user && state.user.is_admin) {
+      account.push(['speedometer-outline', 'Admin Panel', '#/admin']);
+    }
     var info = [
       ['Information'],
       ['information-circle-outline', 'About', '#/about'],
@@ -2638,9 +3606,26 @@
   function closeDrawer() { $('#drawer').classList.remove('open'); $('#drawer-overlay').classList.remove('open'); }
 
   /* ---------- boot ---------- */
+  function seoRedirect() {
+    // Map server-rendered SEO URLs to their SPA hash routes so landing pages
+    // deep-link correctly (crawler/user hits /listing/slug-id etc.).
+    var p = location.pathname;
+    var m;
+    if ((m = p.match(/^\/listing\/.+?-(\d+)$/))) return '#/ads/' + m[1];
+    if ((m = p.match(/^\/guide\/([^/]+)$/))) return '#/blog/' + m[1];
+    if ((m = p.match(/^\/shop\/([^/]+)$/))) return '#/shop/' + m[1];
+    return null;
+  }
+
   function boot() {
     renderTabbar();
     renderDrawer();
+
+    // If the user landed on a server-rendered SEO URL, route to the matching view.
+    var target = (!location.hash || location.hash === '#' || location.hash === '#/') ? seoRedirect() : null;
+    if (target) {
+      history.replaceState(null, '', location.pathname + location.search + target);
+    }
 
     Promise.all([
       api.get('/meta').then(function (d) { state.meta = d; }),

@@ -1,7 +1,7 @@
 # Lanka Lens — Buy & Sell Cameras in Sri Lanka
 
-A Sri Lankan camera marketplace built by transforming the Buzzle classified-ads
-mobile template into an original **Lanka Lens** app.
+**Lanka Lens** is a dedicated Sri Lankan camera marketplace — buy and sell
+cameras, lenses, drones, action cameras and accessories, priced in rupees.
 
 ## Stack
 
@@ -81,6 +81,56 @@ python3 server/app.py        # serves on http://localhost:8000
   offers, per listing and aggregate.
 - **Seller profiles** — photo, rating (stars + reviews), member since, verified
   badge, active listings.
+
+**Part 3 — platform management, monetisation & SEO**
+
+- **Admin panel** (`#/admin`, admin-only) — a professional dashboard with live
+  totals (users, active/pending/sold listings, shops, open reports, revenue,
+  payments, messages), plus full management screens:
+  - **Users** — search, view profile + activity, verify, suspend, ban (blocks
+    re-registration), activate, delete. Every action is written to an audit log.
+  - **Listings** — approve, reject (with a reason the seller sees and can
+    resubmit), suspend, feature/unfeature, mark sold, view.
+  - **Reports** — investigate and resolve (optionally remove the listing or
+    suspend the seller), with a resolution note.
+  - **Categories** — add/rename/delete categories & subcategories and edit each
+    category's dynamic listing fields (name, label, type, required, options).
+  - **Brands & models**, **Locations** (Province → District → City) — full CRUD.
+  - **Promotions & payments** — view purchased packages and payment records.
+  - **Blog posts** — create/edit/delete the camera buying guides.
+  - **Settings** — site name, tagline, logo, contact info, listing/image limits,
+    expiry period, approval toggle, homepage banners, social links, payment
+    webhook secret, and per-package promotion prices/durations.
+- **Moderation workflow** — Submitted → Pending → Approved → Active, or
+  Pending → Rejected (seller notified with the reason and can resubmit).
+- **Camera shops** — business sellers get a public `#/shop/<slug>` page (logo,
+  name, description, location, phone, WhatsApp, opening hours, verified badge,
+  listings) and a dedicated Camera Shops directory page.
+- **Promotions** — Featured Listing, Boost, Homepage Featured and Urgent Badge.
+  Prices and durations are configurable from Admin (no hard-coded prices).
+- **Payments** — a provider-agnostic abstraction: `Pending → Processing →
+  Successful → Failed → Cancelled → Refunded`, storing transaction id, user,
+  amount, currency, package and dates. A Sri Lankan gateway plugs in via
+  `/api/payments/webhook` (HMAC-secret verified, secret lives in the backend).
+  A dev-only `simulate` endpoint lets you complete a payment locally. No payment
+  secrets are ever exposed to the frontend.
+- **Listing expiry** — configurable (default 30 days), with seller notifications
+  before expiry and one-tap renewal.
+- **SEO** — clean URLs (`/listing/<slug>-<id>`, `/guide/<slug>`, `/shop/<slug>`)
+  with server-injected dynamic titles, meta descriptions, canonical URLs, Open
+  Graph/Twitter tags, Product JSON-LD, plus `sitemap.xml` and `robots.txt`.
+  Landing on an SEO URL deep-links into the SPA.
+- **Camera buying guides** — 11 blog posts covering used DSLR & mirrorless
+  checks, shutter count, used lenses, GoPro, DJI Action, drone inspection and
+  buying tips for Sri Lanka (editable from Admin).
+- **Safety page** — meet safely, test before paying, check shutter count/serial/
+  accessories, no advance payments, never share OTP/passwords.
+- **Security & performance** — PBKDF2 password hashing, bearer-token auth (CSRF
+  is not applicable to token-based APIs), input validation, output escaping
+  (XSS), parameterised SQL, per-IP rate limiting on auth endpoints, validated +
+  re-compressed image uploads, admin authorization on every admin route,
+  lazy-loaded images, pagination, database indexes, and long-lived caching of
+  static assets.
 
 > No email/SMS gateway is configured, so verification codes and reset links are
 > surfaced in the API responses under a `dev` field for local testing (the same

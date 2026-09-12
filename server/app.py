@@ -38,7 +38,7 @@ CONDITIONS = [
     "For Parts / Repair",
 ]
 
-LISTING_STATUSES = {"active", "pending", "draft", "sold", "expired", "paused"}
+LISTING_STATUSES = {"active", "pending", "draft", "sold", "expired", "paused", "rejected"}
 
 REPORT_REASONS = [
     "Scam",
@@ -58,6 +58,38 @@ FACET_SPECS = {
     "drones":        ["flight_time", "battery_count"],
     "accessories":   ["compatibility"],
 }
+
+PAYMENT_STATUSES = ["pending", "processing", "successful", "failed", "cancelled", "refunded"]
+
+# Promotion package types (configurable via admin — prices/durations live in the DB).
+PROMOTION_TYPES = [
+    ("featured", "Featured Listing", "Show your ad in the featured section", 499, 7),
+    ("boost", "Boost", "Bump your ad to the top of search results", 299, 3),
+    ("homepage", "Homepage Featured", "Prime placement on the homepage carousel", 999, 14),
+    ("urgent", "Urgent Badge", "A prominent URGENT badge on your ad", 199, 7),
+]
+
+# Site-wide configuration defaults (all editable from the admin panel).
+DEFAULT_SETTINGS = {
+    "site_name": "Lanka Lens",
+    "tagline": "Buy & Sell Cameras in Sri Lanka",
+    "logo": "",
+    "contact_email": "hello@lankalens.lk",
+    "contact_phone": "+94 77 000 1111",
+    "contact_address": "Colombo, Sri Lanka",
+    "max_listings_per_user": "50",
+    "max_images_per_listing": "15",
+    "listing_expiry_days": "30",
+    "require_approval": "0",
+    "verification_required_to_sell": "0",
+    "homepage_banners": "[]",
+    "footer_text": "Sri Lanka's camera marketplace.",
+    "social_facebook": "",
+    "social_instagram": "",
+    "social_youtube": "",
+}
+
+USER_STATUSES = {"active", "suspended", "banned"}
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +164,7 @@ CREATE TABLE IF NOT EXISTS users (
     phone_verified INTEGER DEFAULT 0,
     seller_type TEXT DEFAULT 'individual',
     is_admin INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'active',
     created_at INTEGER
 );
 
@@ -174,6 +207,7 @@ CREATE TABLE IF NOT EXISTS listings (
     views INTEGER DEFAULT 0,
     specs TEXT DEFAULT '{}',
     contact_prefs TEXT DEFAULT '{}',
+    rejection_reason TEXT DEFAULT '',
     created_at INTEGER,
     updated_at INTEGER,
     expiry_at INTEGER,
@@ -235,6 +269,10 @@ CREATE TABLE IF NOT EXISTS reports (
     reporter_id INTEGER,
     reason TEXT DEFAULT '',
     details TEXT DEFAULT '',
+    status TEXT DEFAULT 'open',
+    resolution TEXT DEFAULT '',
+    resolved_by INTEGER,
+    resolved_at INTEGER,
     created_at INTEGER,
     FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
 );
@@ -339,6 +377,73 @@ CREATE TABLE IF NOT EXISTS brands (
     name TEXT NOT NULL,
     category TEXT DEFAULT ''
 );
+
+CREATE TABLE IF NOT EXISTS models (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    brand_id INTEGER,
+    name TEXT NOT NULL,
+    category TEXT DEFAULT '',
+    FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS site_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS payments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    transaction_id TEXT UNIQUE NOT NULL,
+    user_id INTEGER NOT NULL,
+    amount INTEGER NOT NULL,
+    currency TEXT DEFAULT 'LKR',
+    package TEXT DEFAULT '',
+    package_name TEXT DEFAULT '',
+    listing_id INTEGER,
+    status TEXT DEFAULT 'pending',
+    provider TEXT DEFAULT '',
+    created_at INTEGER,
+    updated_at INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS promotions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
+    ptype TEXT NOT NULL,
+    package_name TEXT DEFAULT '',
+    price INTEGER DEFAULT 0,
+    duration_days INTEGER DEFAULT 7,
+    payment_id INTEGER,
+    starts_at INTEGER,
+    ends_at INTEGER,
+    created_at INTEGER,
+    FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id INTEGER,
+    action TEXT DEFAULT '',
+    entity TEXT DEFAULT '',
+    entity_id INTEGER,
+    detail TEXT DEFAULT '',
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS banned_emails (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT UNIQUE NOT NULL,
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip TEXT UNIQUE NOT NULL,
+    created_at INTEGER
+);
 """
 
 
@@ -354,16 +459,30 @@ def migrate(conn):
         conn.execute("ALTER TABLE users ADD COLUMN phone_verified INTEGER DEFAULT 0")
     if "seller_type" not in uc:
         conn.execute("ALTER TABLE users ADD COLUMN seller_type TEXT DEFAULT 'individual'")
+    if "status" not in uc:
+        conn.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active'")
 
     lc = cols("listings")
     if "expiry_at" not in lc:
         conn.execute("ALTER TABLE listings ADD COLUMN expiry_at INTEGER")
     if "contact_prefs" not in lc:
         conn.execute("ALTER TABLE listings ADD COLUMN contact_prefs TEXT DEFAULT '{}'")
+    if "rejection_reason" not in lc:
+        conn.execute("ALTER TABLE listings ADD COLUMN rejection_reason TEXT DEFAULT ''")
 
     oc = cols("offers")
     if "counter_amount" not in oc:
         conn.execute("ALTER TABLE offers ADD COLUMN counter_amount INTEGER")
+
+    rc = cols("reports")
+    if "status" not in rc:
+        conn.execute("ALTER TABLE reports ADD COLUMN status TEXT DEFAULT 'open'")
+    if "resolution" not in rc:
+        conn.execute("ALTER TABLE reports ADD COLUMN resolution TEXT DEFAULT ''")
+    if "resolved_by" not in rc:
+        conn.execute("ALTER TABLE reports ADD COLUMN resolved_by INTEGER")
+    if "resolved_at" not in rc:
+        conn.execute("ALTER TABLE reports ADD COLUMN resolved_at INTEGER")
     conn.commit()
 
 
@@ -650,6 +769,8 @@ def serialize_listing(l, include_seller=True):
         "updated_at": l.get("updated_at"),
         "expiry_at": expiry,
         "category_id": l.get("category_id"),
+        "rejection_reason": l.get("rejection_reason") or "",
+        "urgent": has_urgent_badge(l["id"]),
     }
     if l.get("category_name"):
         out["category_name"] = l["category_name"]
@@ -677,6 +798,34 @@ def listing_query_base():
 def expire_overdue():
     """Mark past-due active listings as expired (cheap, run on read)."""
     execute("UPDATE listings SET status = 'expired' WHERE status = 'active' AND expiry_at IS NOT NULL AND expiry_at < ?", (now(),))
+    expire_promotions()
+
+
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_user ON listings(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_cat ON listings(category_id)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_brand ON listings(brand)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_price ON listings(price)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_expiry ON listings(expiry_at)",
+    "CREATE INDEX IF NOT EXISTS idx_listings_featured ON listings(featured)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id)",
+    "CREATE INDEX IF NOT EXISTS idx_messages_listing ON messages(listing_id)",
+    "CREATE INDEX IF NOT EXISTS idx_offers_listing ON offers(listing_id)",
+    "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON offers(buyer_id)",
+    "CREATE INDEX IF NOT EXISTS idx_offers_seller ON offers(seller_id)",
+    "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read)",
+    "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)",
+    "CREATE INDEX IF NOT EXISTS idx_ratings_seller ON ratings(seller_id)",
+    "CREATE INDEX IF NOT EXISTS idx_contact_seller ON contact_events(seller_id, kind)",
+    "CREATE INDEX IF NOT EXISTS idx_promotions_listing ON promotions(listing_id, ptype)",
+]
+
+
+def create_indexes(conn):
+    for sql in INDEXES:
+        conn.execute(sql)
+    conn.commit()
 
 
 def notify(user_id, type_, title, body, link="", dedupe=None):
@@ -717,6 +866,110 @@ def record_contact(listing_id, seller_id, buyer_id, kind):
 
 
 # ---------------------------------------------------------------------------
+# Settings, audit, listing limits & promotion helpers (Part 3)
+# ---------------------------------------------------------------------------
+def get_settings():
+    rows = query("SELECT key, value FROM site_settings")
+    settings = dict(DEFAULT_SETTINGS)
+    for r in rows:
+        settings[r["key"]] = r["value"]
+    return settings
+
+
+def get_setting(key, default=None):
+    row = query("SELECT value FROM site_settings WHERE key = ?", (key,), one=True)
+    if row is None:
+        return DEFAULT_SETTINGS.get(key, default)
+    return row["value"]
+
+
+def set_setting(key, value):
+    execute(
+        "INSERT INTO site_settings (key, value) VALUES (?,?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (key, str(value)))
+
+
+def expiry_days():
+    try:
+        return max(1, int(get_setting("listing_expiry_days", "30")))
+    except (TypeError, ValueError):
+        return 30
+
+
+def listing_limit():
+    try:
+        return max(1, int(get_setting("max_listings_per_user", "50")))
+    except (TypeError, ValueError):
+        return 50
+
+
+def image_limit():
+    try:
+        return max(1, min(30, int(get_setting("max_images_per_listing", "15"))))
+    except (TypeError, ValueError):
+        return 15
+
+
+def require_approval():
+    return get_setting("require_approval", "0") in ("1", "true", "True")
+
+
+def audit(admin_id, action, entity="", entity_id=None, detail=""):
+    execute("INSERT INTO audit_logs (admin_id, action, entity, entity_id, detail, created_at) VALUES (?,?,?,?,?,?)",
+            (admin_id, action, entity, entity_id, detail, now()))
+
+
+def promotion_prices():
+    """Promotion packages with prices from settings (configurable by admin)."""
+    out = []
+    for ptype, name, desc, default_price, default_days in PROMOTION_TYPES:
+        price = default_price
+        days = default_days
+        try:
+            price = int(get_setting(f"promo_{ptype}_price", str(default_price)))
+        except (TypeError, ValueError):
+            pass
+        try:
+            days = int(get_setting(f"promo_{ptype}_days", str(default_days)))
+        except (TypeError, ValueError):
+            pass
+        out.append({"type": ptype, "name": name, "description": desc,
+                    "price": price, "duration_days": days})
+    return out
+
+
+def apply_promotion(listing_id, ptype, duration_days):
+    """Apply a promotion package to a listing (featured flag / urgent badge)."""
+    if ptype in ("featured", "boost", "homepage"):
+        execute("UPDATE listings SET featured = 1, updated_at = ? WHERE id = ?", (now(), listing_id))
+    # urgent badge is derived from an active urgent promotion row
+
+
+def expire_promotions():
+    """Clear featured flags whose promotion window has ended."""
+    rows = query(
+        "SELECT listing_id FROM promotions WHERE ptype IN ('featured','boost','homepage') "
+        "AND ends_at IS NOT NULL AND ends_at < ?",
+        (now(),))
+    for r in rows:
+        # Only clear featured if no other active promotion keeps it featured.
+        still = query(
+            "SELECT id FROM promotions WHERE listing_id = ? AND ptype IN ('featured','boost','homepage') "
+            "AND (ends_at IS NULL OR ends_at >= ?)",
+            (r["listing_id"], now()), one=True)
+        if not still:
+            execute("UPDATE listings SET featured = 0 WHERE id = ?", (r["listing_id"],))
+
+
+def has_urgent_badge(listing_id):
+    return bool(query(
+        "SELECT id FROM promotions WHERE listing_id = ? AND ptype = 'urgent' "
+        "AND (ends_at IS NULL OR ends_at >= ?)",
+        (listing_id, now()), one=True))
+
+
+# ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
 def current_user():
@@ -735,7 +988,49 @@ def require_auth():
     u = current_user()
     if not u:
         abort(401, description="Authentication required")
+    if u.get("status") == "banned":
+        abort(403, description="This account has been banned")
+    if u.get("status") == "suspended":
+        abort(403, description="This account has been suspended")
     return u
+
+
+def require_admin():
+    u = require_auth()
+    if not u["is_admin"]:
+        abort(403, description="Admin only")
+    return u
+
+
+def admin_only(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        require_admin()
+        return fn(*args, **kwargs)
+    return wrapper
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (in-memory, per client IP)
+# ---------------------------------------------------------------------------
+_RATE = {}  # ip -> list of timestamps
+
+
+def rate_limit(limit, window=60):
+    """Allow `limit` requests per `window` seconds per client IP."""
+    def deco(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+            t = now()
+            bucket = [x for x in _RATE.get(ip, []) if x > t - window]
+            if len(bucket) >= limit:
+                abort(429, description="Too many requests, please slow down")
+            bucket.append(t)
+            _RATE[ip] = bucket
+            return fn(*args, **kwargs)
+        return wrapper
+    return deco
 
 
 def user_payload(u):
@@ -778,8 +1073,24 @@ def err(message, code=400):
 @app.errorhandler(403)
 @app.errorhandler(404)
 @app.errorhandler(413)
+@app.errorhandler(429)
 def handle_http_error(e):
     return jsonify({"ok": False, "error": getattr(e, "description", None) or e.name}), e.code
+
+
+@app.after_request
+def add_security_headers(resp):
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    if request.path.startswith("/uploads/"):
+        resp.headers.setdefault("Content-Disposition", "inline")
+        resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    # Cache immutable static assets (hashed/versioned uploads, icons, css, js).
+    if request.path.startswith(("/images/", "/css/", "/js/", "/icons/", "/fonts/", "/uploads/")):
+        resp.headers.setdefault("Cache-Control", "public, max-age=86400")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -790,12 +1101,178 @@ SAFE_DIRS = {"css", "js", "images", "icons", "fonts", "uploads"}
 
 @app.route("/")
 def index():
-    return send_from_directory(ROOT, "index.html")
+    return render_index()
 
 
 @app.route("/favicon.svg")
 def favicon_svg():
     return send_from_directory(ROOT, "favicon.svg")
+
+
+# ---------------------------------------------------------------------------
+# SEO — server-rendered <head> for the SPA shell
+# ---------------------------------------------------------------------------
+def render_index(meta=None):
+    """Serve the SPA shell with SEO meta tags injected (title/description/OG/canonical/JSON-LD)."""
+    meta = meta or {}
+    settings = get_settings()
+    site = settings.get("site_name") or "Lanka Lens"
+    tagline = settings.get("tagline") or "Buy & Sell Cameras in Sri Lanka"
+
+    title = meta.get("title") or f"{site} — {tagline}"
+    desc = meta.get("description") or (
+        "Lanka Lens is Sri Lanka's camera marketplace — buy and sell cameras, lenses, drones, "
+        "action cameras and accessories. Prices in LKR.")
+    canonical = meta.get("canonical") or request.base_url.split("?")[0]
+    og_type = meta.get("og_type") or "website"
+    image = meta.get("image") or ""
+    jsonld = meta.get("jsonld") or ""
+
+    try:
+        with open(os.path.join(ROOT, "index.html"), "r", encoding="utf-8") as fh:
+            html = fh.read()
+    except Exception:
+        return jsonify({"ok": True})
+
+    # Replace the existing <title> and <meta name="description"> with dynamic values.
+    html = re.sub(r"<title>.*?</title>", f"<title>{esc_html(title)}</title>", html, flags=re.S)
+    html = re.sub(r'<meta name="description" content=".*?"\s*/?>',
+                  f'<meta name="description" content="{esc_html(desc)}">', html)
+
+    extra = []
+    extra.append(f'<link rel="canonical" href="{esc_html(canonical)}">')
+    extra.append(f'<meta property="og:site_name" content="{esc_html(site)}">')
+    extra.append(f'<meta property="og:title" content="{esc_html(title)}">')
+    extra.append(f'<meta property="og:description" content="{esc_html(desc)}">')
+    extra.append(f'<meta property="og:type" content="{esc_html(og_type)}">')
+    if image:
+        extra.append(f'<meta property="og:image" content="{esc_html(image)}">')
+    extra.append(f'<meta property="og:url" content="{esc_html(canonical)}">')
+    extra.append(f'<meta name="twitter:card" content="summary_large_image">')
+    extra.append(f'<meta name="twitter:title" content="{esc_html(title)}">')
+    extra.append(f'<meta name="twitter:description" content="{esc_html(desc)}">')
+    if jsonld:
+        extra.append(f'<script type="application/ld+json">{jsonld}</script>')
+
+    html = html.replace("</head>", "\n".join(extra) + "\n</head>")
+    return html
+
+
+def esc_html(s):
+    return (str(s or "")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace('"', "&quot;").replace("'", "&#39;"))
+
+
+def listing_jsonld(l):
+    base = request.url_root.rstrip("/")
+    return json.dumps({
+        "@context": "https://schema.org",
+        "@type": "Product",
+        "name": l["title"],
+        "image": l["images"][:5],
+        "description": (l.get("description") or "")[:500],
+        "offers": {
+            "@type": "Offer",
+            "priceCurrency": "LKR",
+            "price": str(l["price"]),
+            "availability": "https://schema.org/InStock",
+            "url": f"{base}/listing/{l['slug']}-{l['id']}",
+        },
+    })
+
+
+@app.route("/listing/<path:slug>")
+def seo_listing(slug):
+    m = re.search(r"-(\d+)$", slug)
+    if not m:
+        abort(404)
+    lid = int(m.group(1))
+    row = query(listing_query_base() + " WHERE l.id = ? AND l.status = 'active'", (lid,), one=True)
+    if not row:
+        abort(404)
+    l = serialize_listing(row, include_seller=False)
+    cat = query("SELECT name FROM categories WHERE id = ?", (row["category_id"],), one=True)
+    base = request.url_root.rstrip("/")
+    meta = {
+        "title": f"{l['title']} — Lanka Lens",
+        "description": (l.get("description") or f"{l['title']} — {l['price']:,.0f} LKR. "
+                        f"Buy and sell camera gear in Sri Lanka on Lanka Lens.")[:300],
+        "canonical": f"{base}/listing/{slug}",
+        "og_type": "product",
+        "image": (l["images"][0] if l["images"] else "") ,
+        "jsonld": listing_jsonld(l),
+    }
+    resp = app.make_response(render_index(meta))
+    resp.headers["X-Robots-Tag"] = "index, follow"
+    return resp
+
+
+@app.route("/guide/<slug>")
+def seo_guide(slug):
+    row = query("SELECT * FROM posts WHERE slug = ?", (slug,), one=True)
+    if not row:
+        abort(404)
+    base = request.url_root.rstrip("/")
+    meta = {
+        "title": f"{row['title']} — Lanka Lens Buying Guide",
+        "description": (row["excerpt"] or row["title"])[:300],
+        "canonical": f"{base}/guide/{slug}",
+        "image": row["image"] or "",
+    }
+    return render_index(meta)
+
+
+@app.route("/shop/<slug>")
+def seo_shop(slug):
+    b = query("SELECT * FROM businesses WHERE slug = ?", (slug,), one=True)
+    if not b:
+        abort(404)
+    base = request.url_root.rstrip("/")
+    meta = {
+        "title": f"{b['name']} — Camera Shop on Lanka Lens",
+        "description": (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300],
+        "canonical": f"{base}/shop/{slug}",
+        "image": b["logo"] or "",
+    }
+    return render_index(meta)
+
+
+@app.route("/robots.txt")
+def robots_txt():
+    base = request.url_root.rstrip("/")
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        f"Sitemap: {base}/sitemap.xml\n"
+    ), 200, {"Content-Type": "text/plain"}
+
+
+@app.route("/sitemap.xml")
+def sitemap_xml():
+    base = request.url_root.rstrip("/")
+    urls = []
+    urls.append((base + "/", now(), "1.0"))
+    for cat in query("SELECT slug FROM categories ORDER BY id"):
+        urls.append((f"{base}/category/{cat['slug']}", now(), "0.7"))
+    for r in query("SELECT slug FROM posts ORDER BY id"):
+        urls.append((f"{base}/guide/{r['slug']}", now(), "0.6"))
+    for b in query("SELECT slug FROM businesses ORDER BY id"):
+        urls.append((f"{base}/shop/{b['slug']}", now(), "0.6"))
+    for l in query("SELECT id, slug, updated_at FROM listings WHERE status = 'active' ORDER BY id"):
+        urls.append((f"{base}/listing/{l['slug']}-{l['id']}", l["updated_at"] or now(), "0.8"))
+
+    def fmt(ts):
+        return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
+
+    body = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
+    for loc, ts, prio in urls:
+        body.append(
+            f"<url><loc>{esc_html(loc)}</loc><lastmod>{fmt(ts)}</lastmod>"
+            f"<priority>{prio}</priority></url>")
+    body.append("</urlset>")
+    return "\n".join(body), 200, {"Content-Type": "application/xml"}
 
 
 @app.route("/<path:filename>")
@@ -820,11 +1297,28 @@ def health():
 
 @app.route("/api/meta")
 def meta():
+    settings = get_settings()
     return ok({
         "categories": category_tree(),
         "conditions": CONDITIONS,
         "brands": [r["name"] for r in query("SELECT name FROM brands ORDER BY name")],
         "report_reasons": REPORT_REASONS,
+        "promotions": promotion_prices(),
+        "settings": {
+            "site_name": settings.get("site_name") or "Lanka Lens",
+            "tagline": settings.get("tagline") or "Buy & Sell Cameras in Sri Lanka",
+            "logo": settings.get("logo") or "",
+            "contact_email": settings.get("contact_email") or "",
+            "contact_phone": settings.get("contact_phone") or "",
+            "contact_address": settings.get("contact_address") or "",
+            "footer_text": settings.get("footer_text") or "",
+            "social_facebook": settings.get("social_facebook") or "",
+            "social_instagram": settings.get("social_instagram") or "",
+            "social_youtube": settings.get("social_youtube") or "",
+            "max_images_per_listing": image_limit(),
+            "listing_expiry_days": expiry_days(),
+            "require_approval": require_approval(),
+        },
     })
 
 
@@ -1058,7 +1552,7 @@ def create_listing():
     images = body.get("images") or []
     if isinstance(images, str):
         images = [images]
-    images = [i for i in images if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:15]
+    images = [i for i in images if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
 
     specs = body.get("specs") or {}
     if not isinstance(specs, dict):
@@ -1071,6 +1565,17 @@ def create_listing():
     status = body.get("status") or "active"
     if status not in ("active", "draft", "pending"):
         status = "active"
+
+    # Listing limits (configurable by admin).
+    if status != "draft":
+        existing = query("SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status IN ('active','pending','paused')",
+                         (u["id"],), one=True)["n"]
+        if existing >= listing_limit():
+            return err(f"You've reached the limit of {listing_limit()} active listings")
+
+    # Moderation workflow: when approval is required, published listings start as pending.
+    if status == "active" and require_approval():
+        status = "pending"
 
     brand = specs.get("brand") or body.get("brand") or ""
     model = specs.get("model") or body.get("model") or ""
@@ -1087,9 +1592,12 @@ def create_listing():
          body.get("condition") or "Good", body.get("description") or "", brand, model, year,
          body.get("province") or "", body.get("district") or "", body.get("city") or "",
          json.dumps(images), status, json.dumps(specs), json.dumps(prefs), ts, ts,
-         ts + EXPIRY_DAYS * 86400))
+         ts + expiry_days() * 86400))
     if status == "draft":
         notify(u["id"], "listing", "Draft saved", f"Your draft “{title}” was saved.", f"#/my-ads")
+    elif status == "pending":
+        notify(u["id"], "listing", "Listing submitted for review",
+               f"“{title}” is pending approval by our team.", f"#/my-ads")
     else:
         notify(u["id"], "listing", "Listing published", f"Your ad “{title}” is now live.", f"#/ads/{lid}")
     return ok({"id": lid, "status": status})
@@ -1143,7 +1651,7 @@ def update_listing(lid):
         setf("category_id", body["category_id"])
     if "images" in body:
         imgs = body["images"] if isinstance(body["images"], list) else []
-        imgs = [i for i in imgs if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:15]
+        imgs = [i for i in imgs if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
         setf("images", json.dumps(imgs))
     if "specs" in body and isinstance(body["specs"], dict):
         specs = body["specs"]
@@ -1156,13 +1664,15 @@ def update_listing(lid):
             setf("year", specs["year"])
     if "contact_prefs" in body and isinstance(body["contact_prefs"], dict):
         setf("contact_prefs", json.dumps(body["contact_prefs"]))
+    if "rejection_reason" in body:
+        setf("rejection_reason", (body["rejection_reason"] or "")[:500])
     if "status" in body:
         st = body["status"]
         if st not in LISTING_STATUSES:
             return err("Invalid status")
         setf("status", st)
         if st == "active" and not row["expiry_at"]:
-            setf("expiry_at", now() + EXPIRY_DAYS * 86400)
+            setf("expiry_at", now() + expiry_days() * 86400)
 
     if not sets:
         return ok({"id": lid})
@@ -1203,9 +1713,9 @@ def renew_listing(lid):
         return err("Listing not found", 404)
     if row["user_id"] != u["id"] and not u["is_admin"]:
         return err("Not allowed", 403)
-    new_expiry = now() + EXPIRY_DAYS * 86400
+    new_expiry = now() + expiry_days() * 86400
     execute("UPDATE listings SET status = 'active', expiry_at = ?, updated_at = ? WHERE id = ?", (new_expiry, now(), lid))
-    notify(u["id"], "listing", "Listing renewed", f"“{row['title']}” is active for another {EXPIRY_DAYS} days.", f"#/ads/{lid}")
+    notify(u["id"], "listing", "Listing renewed", f"“{row['title']}” is active for another {expiry_days()} days.", f"#/ads/{lid}")
     return ok({"id": lid, "expiry_at": new_expiry})
 
 
@@ -1754,6 +2264,20 @@ def my_business():
     return ok(business_payload(b))
 
 
+@app.route("/api/businesses")
+def businesses_list():
+    """All business sellers (camera shops) with listing counts & ratings."""
+    rows = query("SELECT * FROM businesses ORDER BY verified DESC, name")
+    out = []
+    for b in rows:
+        item = business_payload(b)
+        item["listing_count"] = query(
+            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'", (b["user_id"],), one=True)["n"]
+        item["rating"] = seller_rating(b["user_id"])
+        out.append(item)
+    return ok(out)
+
+
 @app.route("/api/business/<slug>")
 def business_page(slug):
     b = query("SELECT * FROM businesses WHERE slug = ?", (slug,), one=True)
@@ -1776,6 +2300,7 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @app.route("/api/auth/signup", methods=["POST"])
+@rate_limit(10, 60)
 def signup():
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
@@ -1789,6 +2314,8 @@ def signup():
         return err("Password must be at least 6 characters")
     if query("SELECT id FROM users WHERE email = ?", (email,), one=True):
         return err("An account with this email already exists", 409)
+    if query("SELECT id FROM banned_emails WHERE email = ?", (email,), one=True):
+        return err("This email is not allowed to register", 403)
     seller_type = body.get("seller_type") or "individual"
     if seller_type not in ("individual", "business"):
         seller_type = "individual"
@@ -1809,6 +2336,7 @@ def signup():
 
 
 @app.route("/api/auth/login", methods=["POST"])
+@rate_limit(20, 60)
 def login():
     body = request.get_json(silent=True) or {}
     email = (body.get("email") or "").strip().lower()
@@ -1816,6 +2344,8 @@ def login():
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
     if not u or not verify_password(password, u["password_hash"]):
         return err("Invalid email or password", 401)
+    if u.get("status") == "banned":
+        return err("This account has been banned", 403)
     token = secrets.token_hex(32)
     execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, u["id"], now()))
     return ok({"token": token, "user": user_payload(u)})
@@ -1830,6 +2360,7 @@ def logout():
 
 
 @app.route("/api/auth/forgot", methods=["POST"])
+@rate_limit(10, 300)
 def forgot_password():
     body = request.get_json(silent=True) or {}
     email = (body.get("email") or "").strip().lower()
@@ -2013,39 +2544,679 @@ def upload():
 # ---------------------------------------------------------------------------
 @app.route("/api/admin/categories", methods=["POST"])
 def admin_add_category():
-    u = require_auth()
-    if not u["is_admin"]:
-        return err("Admin only", 403)
+    admin = require_admin()
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
     if not name:
         return err("Name required")
-    slug = slugify(name)
-    parent_id = body.get("parent_id")
+    slug = slugify(body.get("slug") or name)
+    base = slug
+    i = 2
+    while query("SELECT id FROM categories WHERE slug = ?", (slug,), one=True):
+        slug = f"{base}-{i}"
+        i += 1
+    parent_id = body.get("parent_id") or None
+    if parent_id:
+        parent_id = int(parent_id)
     icon = body.get("icon") or "layers-outline"
     cid = execute("INSERT INTO categories (slug, name, icon, parent_id, sort, fields) VALUES (?,?,?,?,?,?)",
                   (slug, name, icon, parent_id, int(body.get("sort") or 0), json.dumps(body.get("fields") or [])))
+    audit(admin["id"], "create_category", "category", cid, name)
     return ok({"id": cid})
 
 
 @app.route("/api/admin/categories/<int:cid>", methods=["PATCH", "DELETE"])
 def admin_edit_category(cid):
-    u = require_auth()
-    if not u["is_admin"]:
-        return err("Admin only", 403)
+    admin = require_admin()
     if request.method == "DELETE":
         execute("DELETE FROM categories WHERE id = ?", (cid,))
+        audit(admin["id"], "delete_category", "category", cid)
         return ok({"deleted": cid})
     body = request.get_json(silent=True) or {}
     if body.get("name"):
-        execute("UPDATE categories SET name = ? WHERE id = ?", (body["name"], cid))
+        execute("UPDATE categories SET name = ? WHERE id = ?", (body["name"].strip(), cid))
+    if body.get("slug"):
+        slug = slugify(body["slug"])
+        base = slug
+        i = 2
+        while query("SELECT id FROM categories WHERE slug = ? AND id != ?", (slug, cid), one=True):
+            slug = f"{base}-{i}"
+            i += 1
+        execute("UPDATE categories SET slug = ? WHERE id = ?", (slug, cid))
     if body.get("icon"):
         execute("UPDATE categories SET icon = ? WHERE id = ?", (body["icon"], cid))
+    if body.get("parent_id") is not None:
+        execute("UPDATE categories SET parent_id = ? WHERE id = ?", (body["parent_id"] or None, cid))
     if "fields" in body:
         execute("UPDATE categories SET fields = ? WHERE id = ?", (json.dumps(body["fields"]), cid))
     if "sort" in body:
         execute("UPDATE categories SET sort = ? WHERE id = ?", (int(body["sort"]), cid))
     return ok({"id": cid})
+
+
+# ---------------------------------------------------------------------------
+# Promotions & payments (Part 3)
+# ---------------------------------------------------------------------------
+@app.route("/api/promotions")
+def promotions_list():
+    return ok(promotion_prices())
+
+
+@app.route("/api/me/promotions")
+def my_promotions():
+    u = require_auth()
+    rows = query(
+        "SELECT p.*, l.title AS listing_title, l.images AS listing_images "
+        "FROM promotions p JOIN listings l ON l.id = p.listing_id "
+        "WHERE p.user_id = ? ORDER BY p.created_at DESC", (u["id"],))
+    out = []
+    for r in rows:
+        r = dict(r)
+        r["listing_images"] = json.loads(r.get("listing_images") or "[]")
+        out.append(r)
+    return ok(out)
+
+
+@app.route("/api/promotions/purchase", methods=["POST"])
+def purchase_promotion():
+    u = require_auth()
+    body = request.get_json(silent=True) or {}
+    lid = body.get("listing_id")
+    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
+        return err("Listing not found", 404)
+    if row["user_id"] != u["id"] and not u["is_admin"]:
+        return err("Not allowed", 403)
+    ptype = (body.get("type") or "").strip()
+    packages = {p["type"]: p for p in promotion_prices()}
+    if ptype not in packages:
+        return err("Invalid promotion type")
+    pkg = packages[ptype]
+    txn = f"LL-{secrets.token_hex(6).upper()}"
+    pid = execute(
+        "INSERT INTO payments (transaction_id, user_id, amount, currency, package, package_name, listing_id, status, provider, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?, 'pending', 'manual', ?, ?)",
+        (txn, u["id"], pkg["price"], "LKR", ptype, pkg["name"], lid, now(), now()))
+    return ok({"payment_id": pid, "transaction_id": txn, "package": pkg})
+
+
+def _apply_promotion_from_payment(payment, pkg=None):
+    """Activate a promotion package once its payment is successful."""
+    if payment["listing_id"]:
+        pkg = pkg or next((p for p in promotion_prices() if p["type"] == payment["package"]), None)
+        if pkg:
+            starts = now()
+            ends = starts + pkg["duration_days"] * 86400
+            execute(
+                "INSERT INTO promotions (listing_id, user_id, ptype, package_name, price, duration_days, payment_id, starts_at, ends_at, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (payment["listing_id"], payment["user_id"], payment["package"], pkg["name"],
+                 payment["amount"], pkg["duration_days"], payment["id"], starts, ends, starts))
+            apply_promotion(payment["listing_id"], payment["package"], pkg["duration_days"])
+            row = query("SELECT title FROM listings WHERE id = ?", (payment["listing_id"],), one=True)
+            notify(payment["user_id"], "promotion", "Promotion active",
+                   f"Your “{row['title']}” is now boosted ({pkg['name']}).", f"#/ads/{payment['listing_id']}")
+
+
+@app.route("/api/payments/<int:pid>/simulate", methods=["POST"])
+def simulate_payment(pid):
+    """Dev-only helper: mark a manual payment successful and apply its promotion."""
+    u = require_auth()
+    pay = query("SELECT * FROM payments WHERE id = ?", (pid,), one=True)
+    if not pay:
+        return err("Payment not found", 404)
+    if pay["user_id"] != u["id"] and not u["is_admin"]:
+        return err("Not allowed", 403)
+    if pay["status"] == "successful":
+        return ok({"id": pid, "status": "successful"})
+    execute("UPDATE payments SET status = 'successful', updated_at = ? WHERE id = ?", (now(), pid))
+    _apply_promotion_from_payment(pay)
+    return ok({"id": pid, "status": "successful"})
+
+
+@app.route("/api/payments/webhook", methods=["POST"])
+def payment_webhook():
+    """Generic payment-provider webhook. Verifies a shared secret from settings, then
+    updates the payment by transaction_id and applies the promotion on success.
+
+    A Sri Lankan provider (PayHere, etc.) can be wired in by configuring
+    `payment_webhook_secret` and posting {transaction_id, status} here.
+    """
+    secret = get_setting("payment_webhook_secret", "")
+    if not secret:
+        return err("Payment provider not configured", 503)
+    provided = request.headers.get("X-Payment-Signature", "") or request.headers.get("X-Webhook-Secret", "")
+    if not hmac_compare(provided, secret):
+        return err("Invalid signature", 401)
+    body = request.get_json(silent=True) or {}
+    txn = (body.get("transaction_id") or body.get("order_id") or "").strip()
+    status = (body.get("status") or body.get("state") or "").strip().lower()
+    if not txn:
+        return err("Missing transaction_id", 400)
+    pay = query("SELECT * FROM payments WHERE transaction_id = ?", (txn,), one=True)
+    if not pay:
+        return err("Unknown transaction", 404)
+    if status in PAYMENT_STATUSES:
+        execute("UPDATE payments SET status = ?, updated_at = ? WHERE id = ?", (status, now(), pay["id"]))
+    if status == "successful" and pay["status"] != "successful":
+        _apply_promotion_from_payment(pay)
+    return ok({"acknowledged": True})
+
+
+@app.route("/api/me/payments")
+def my_payments():
+    u = require_auth()
+    rows = query("SELECT * FROM payments WHERE user_id = ? ORDER BY created_at DESC", (u["id"],))
+    return ok(rows)
+
+
+# ---------------------------------------------------------------------------
+# Admin API (Part 3)
+# ---------------------------------------------------------------------------
+def admin_user_payload(u):
+    p = user_payload(u)
+    p["status"] = u.get("status") or "active"
+    return p
+
+
+@app.route("/api/admin/dashboard")
+def admin_dashboard():
+    require_admin()
+    expire_overdue()
+    counts = {}
+    for name, sql in [
+        ("users", "SELECT COUNT(*) n FROM users"),
+        ("active_listings", "SELECT COUNT(*) n FROM listings WHERE status = 'active'"),
+        ("pending_listings", "SELECT COUNT(*) n FROM listings WHERE status = 'pending'"),
+        ("sold_listings", "SELECT COUNT(*) n FROM listings WHERE status = 'sold'"),
+        ("shops", "SELECT COUNT(*) n FROM businesses"),
+        ("reports_open", "SELECT COUNT(*) n FROM reports WHERE status = 'open'"),
+        ("messages", "SELECT COUNT(*) n FROM messages"),
+        ("promotions", "SELECT COUNT(*) n FROM promotions"),
+    ]:
+        counts[name] = query(sql, one=True)["n"]
+    revenue = query(
+        "SELECT COALESCE(SUM(amount), 0) s FROM payments WHERE status IN ('successful','processing')", one=True)["s"]
+    counts["revenue"] = revenue
+    counts["payments"] = query("SELECT COUNT(*) n FROM payments", one=True)["n"]
+    recent_users = query("SELECT * FROM users ORDER BY created_at DESC LIMIT 5")
+    recent_reports = query(
+        "SELECT r.*, l.title AS listing_title FROM reports r LEFT JOIN listings l ON l.id = r.listing_id "
+        "ORDER BY r.created_at DESC LIMIT 5")
+    recent_payments = query("SELECT * FROM payments ORDER BY created_at DESC LIMIT 5")
+    pending = query(listing_query_base() + " WHERE l.status = 'pending' ORDER BY l.created_at DESC LIMIT 8")
+    return ok({
+        "counts": counts,
+        "recent_users": [admin_user_payload(u) for u in recent_users],
+        "recent_reports": recent_reports,
+        "recent_payments": recent_payments,
+        "pending": [serialize_listing(r, include_seller=False) for r in pending],
+    })
+
+
+@app.route("/api/admin/users")
+def admin_users():
+    require_admin()
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
+    sql = "SELECT * FROM users"
+    conds, params = [], []
+    if q:
+        like = f"%{q}%"
+        conds.append("(name LIKE ? OR email LIKE ? OR phone LIKE ?)")
+        params += [like, like, like]
+    if status and status != "all":
+        conds.append("status = ?")
+        params.append(status)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY created_at DESC LIMIT 200"
+    rows = query(sql, params)
+    out = []
+    for u in rows:
+        p = admin_user_payload(u)
+        p["listing_count"] = query("SELECT COUNT(*) n FROM listings WHERE user_id = ?", (u["id"],), one=True)["n"]
+        out.append(p)
+    return ok(out)
+
+
+@app.route("/api/admin/users/<int:uid>")
+def admin_user_detail(uid):
+    require_admin()
+    u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
+    if not u:
+        return err("User not found", 404)
+    listings = query(listing_query_base() + " WHERE l.user_id = ? ORDER BY l.created_at DESC", (uid,))
+    biz = query("SELECT * FROM businesses WHERE user_id = ?", (uid,), one=True)
+    activity = {
+        "listings": len(listings),
+        "favorites": query("SELECT COUNT(*) n FROM favorites WHERE user_id = ?", (uid,), one=True)["n"],
+        "offers_made": query("SELECT COUNT(*) n FROM offers WHERE buyer_id = ?", (uid,), one=True)["n"],
+        "offers_received": query("SELECT COUNT(*) n FROM offers WHERE seller_id = ?", (uid,), one=True)["n"],
+        "messages_sent": query("SELECT COUNT(*) n FROM messages WHERE sender_id = ?", (uid,), one=True)["n"],
+        "messages_received": query("SELECT COUNT(*) n FROM messages WHERE receiver_id = ?", (uid,), one=True)["n"],
+        "reports_against": query("SELECT COUNT(*) n FROM reports r JOIN listings l ON l.id = r.listing_id WHERE l.user_id = ?", (uid,), one=True)["n"],
+        "payments": query("SELECT COUNT(*) n FROM payments WHERE user_id = ?", (uid,), one=True)["n"],
+    }
+    return ok({
+        "user": admin_user_payload(u),
+        "business": dict(biz) if biz else None,
+        "listings": [serialize_listing(r) for r in listings],
+        "activity": activity,
+    })
+
+
+@app.route("/api/admin/users/<int:uid>", methods=["PATCH"])
+def admin_update_user(uid):
+    admin = require_admin()
+    u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
+    if not u:
+        return err("User not found", 404)
+    if u["is_admin"] and u["id"] != admin["id"]:
+        return err("You cannot modify another admin", 403)
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").strip()
+    if action == "verify":
+        execute("UPDATE users SET verified = 1 WHERE id = ?", (uid,))
+        notify(uid, "listing", "Account verified", "Your Lanka Lens account is now verified.", "#/settings")
+        audit(admin["id"], "verify", "user", uid, "verified seller")
+    elif action == "unverify":
+        execute("UPDATE users SET verified = 0 WHERE id = ?", (uid,))
+        audit(admin["id"], "unverify", "user", uid)
+    elif action == "suspend":
+        execute("UPDATE users SET status = 'suspended' WHERE id = ?", (uid,))
+        execute("UPDATE listings SET status = 'paused' WHERE user_id = ? AND status = 'active'", (uid,))
+        execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        audit(admin["id"], "suspend", "user", uid)
+    elif action == "ban":
+        execute("UPDATE users SET status = 'banned' WHERE id = ?", (uid,))
+        execute("UPDATE listings SET status = 'paused' WHERE user_id = ? AND status = 'active'", (uid,))
+        execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
+        if u.get("email"):
+            execute("INSERT OR IGNORE INTO banned_emails (email, created_at) VALUES (?,?)", (u["email"], now()))
+        audit(admin["id"], "ban", "user", uid)
+    elif action == "activate":
+        execute("UPDATE users SET status = 'active' WHERE id = ?", (uid,))
+        if u.get("email"):
+            execute("DELETE FROM banned_emails WHERE email = ?", (u["email"],))
+        audit(admin["id"], "activate", "user", uid)
+    else:
+        return err("Unknown action")
+    return ok({"user": admin_user_payload(query("SELECT * FROM users WHERE id = ?", (uid,), one=True))})
+
+
+@app.route("/api/admin/users/<int:uid>", methods=["DELETE"])
+def admin_delete_user(uid):
+    admin = require_admin()
+    u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
+    if not u:
+        return err("User not found", 404)
+    if u["is_admin"]:
+        return err("You cannot delete an admin", 403)
+    audit(admin["id"], "delete", "user", uid, u["email"])
+    execute("DELETE FROM users WHERE id = ?", (uid,))
+    return ok({"deleted": uid})
+
+
+@app.route("/api/admin/listings")
+def admin_listings():
+    require_admin()
+    q = (request.args.get("q") or "").strip()
+    status = (request.args.get("status") or "").strip()
+    sql = listing_query_base()
+    conds, params = [], []
+    if q:
+        like = f"%{q}%"
+        conds.append("(l.title LIKE ? OR l.brand LIKE ? OR l.model LIKE ?)")
+        params += [like, like, like]
+    if status and status != "all":
+        conds.append("l.status = ?")
+        params.append(status)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY l.created_at DESC LIMIT 300"
+    rows = query(sql, params)
+    out = []
+    for r in rows:
+        d = serialize_listing(r, include_seller=False)
+        seller = query("SELECT id, name, email FROM users WHERE id = ?", (r["user_id"],), one=True)
+        d["seller"] = seller
+        out.append(d)
+    return ok(out)
+
+
+@app.route("/api/admin/listings/<int:lid>/moderate", methods=["POST"])
+def admin_moderate_listing(lid):
+    admin = require_admin()
+    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
+        return err("Listing not found", 404)
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").strip()
+    reason = (body.get("reason") or "").strip()
+    if action == "approve":
+        expiry = row["expiry_at"] or (now() + expiry_days() * 86400)
+        execute("UPDATE listings SET status = 'active', rejection_reason = '', expiry_at = ?, updated_at = ? WHERE id = ?",
+                (expiry, now(), lid))
+        notify(row["user_id"], "listing", "Listing approved",
+               f"“{row['title']}” was approved and is now live.", f"#/ads/{lid}")
+        audit(admin["id"], "approve", "listing", lid)
+    elif action == "reject":
+        execute("UPDATE listings SET status = 'rejected', rejection_reason = ?, updated_at = ? WHERE id = ?",
+                (reason[:500], now(), lid))
+        notify(row["user_id"], "listing", "Listing rejected",
+               f"“{row['title']}” was rejected. Reason: {reason or 'Does not meet our guidelines'}",
+               f"#/edit-ad/{lid}")
+        audit(admin["id"], "reject", "listing", lid, reason)
+    elif action == "suspend":
+        execute("UPDATE listings SET status = 'paused', updated_at = ? WHERE id = ?", (now(), lid))
+        notify(row["user_id"], "listing", "Listing suspended",
+               f"“{row['title']}” was temporarily suspended by our team.", f"#/my-ads")
+        audit(admin["id"], "suspend_listing", "listing", lid, reason)
+    elif action == "feature":
+        execute("UPDATE listings SET featured = 1, updated_at = ? WHERE id = ?", (now(), lid))
+        notify(row["user_id"], "promotion", "Listing featured",
+               f"“{row['title']}” is now featured on the homepage.", f"#/ads/{lid}")
+        audit(admin["id"], "feature", "listing", lid)
+    elif action == "unfeature":
+        execute("UPDATE listings SET featured = 0, updated_at = ? WHERE id = ?", (now(), lid))
+        audit(admin["id"], "unfeature", "listing", lid)
+    elif action == "mark_sold":
+        execute("UPDATE listings SET status = 'sold', updated_at = ? WHERE id = ?", (now(), lid))
+        audit(admin["id"], "mark_sold", "listing", lid)
+    else:
+        return err("Unknown action")
+    return ok({"id": lid, "action": action})
+
+
+@app.route("/api/admin/reports")
+def admin_reports():
+    require_admin()
+    status = (request.args.get("status") or "").strip()
+    sql = (
+        "SELECT r.*, l.title AS listing_title, l.status AS listing_status, l.user_id AS listing_owner, "
+        "u.name AS reporter_name FROM reports r "
+        "LEFT JOIN listings l ON l.id = r.listing_id "
+        "LEFT JOIN users u ON u.id = r.reporter_id ")
+    conds, params = [], []
+    if status and status != "all":
+        conds.append("r.status = ?")
+        params.append(status)
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
+    sql += " ORDER BY (r.status = 'open') DESC, r.created_at DESC LIMIT 300"
+    return ok(query(sql, params))
+
+
+@app.route("/api/admin/reports/<int:rid>/resolve", methods=["POST"])
+def admin_resolve_report(rid):
+    admin = require_admin()
+    r = query("SELECT * FROM reports WHERE id = ?", (rid,), one=True)
+    if not r:
+        return err("Report not found", 404)
+    body = request.get_json(silent=True) or {}
+    resolution = (body.get("resolution") or "Resolved").strip()
+    action = (body.get("action") or "none").strip()
+    if action == "remove_listing" and r["listing_id"]:
+        execute("DELETE FROM listings WHERE id = ?", (r["listing_id"],))
+        audit(admin["id"], "remove_listing_from_report", "listing", r["listing_id"], resolution)
+    elif action == "suspend_seller" and r["listing_id"]:
+        owner = query("SELECT user_id FROM listings WHERE id = ?", (r["listing_id"],), one=True)
+        if owner:
+            execute("UPDATE users SET status = 'suspended' WHERE id = ?", (owner["user_id"],))
+            execute("UPDATE listings SET status = 'paused' WHERE user_id = ? AND status = 'active'", (owner["user_id"],))
+            audit(admin["id"], "suspend_from_report", "user", owner["user_id"], resolution)
+    execute("UPDATE reports SET status = 'resolved', resolution = ?, resolved_by = ?, resolved_at = ? WHERE id = ?",
+            (resolution[:500], admin["id"], now(), rid))
+    audit(admin["id"], "resolve_report", "report", rid, resolution)
+    return ok({"id": rid, "status": "resolved"})
+
+
+@app.route("/api/admin/audit")
+def admin_audit():
+    require_admin()
+    rows = query(
+        "SELECT a.*, u.name AS admin_name FROM audit_logs a LEFT JOIN users u ON u.id = a.admin_id "
+        "ORDER BY a.created_at DESC LIMIT 200")
+    return ok(rows)
+
+
+# ---------------------------------------------------------------------------
+# Admin — brands & models
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/brands", methods=["GET", "POST"])
+def admin_brands():
+    require_admin()
+    if request.method == "POST":
+        body = request.get_json(silent=True) or {}
+        name = (body.get("name") or "").strip()
+        if not name:
+            return err("Name required")
+        bid = execute("INSERT INTO brands (name, category) VALUES (?,?)", (name, body.get("category") or ""))
+        return ok({"id": bid})
+    rows = query("SELECT * FROM brands ORDER BY name")
+    out = []
+    for b in rows:
+        b = dict(b)
+        b["models"] = query("SELECT * FROM models WHERE brand_id = ? ORDER BY name", (b["id"],))
+        out.append(b)
+    return ok(out)
+
+
+@app.route("/api/admin/brands/<int:bid>", methods=["PATCH", "DELETE"])
+def admin_brand(bid):
+    admin = require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM brands WHERE id = ?", (bid,))
+        audit(admin["id"], "delete_brand", "brand", bid)
+        return ok({"deleted": bid})
+    body = request.get_json(silent=True) or {}
+    if body.get("name"):
+        execute("UPDATE brands SET name = ? WHERE id = ?", (body["name"].strip(), bid))
+    if "category" in body:
+        execute("UPDATE brands SET category = ? WHERE id = ?", ((body["category"] or "").strip(), bid))
+    return ok({"id": bid})
+
+
+@app.route("/api/admin/models", methods=["POST"])
+def admin_add_model():
+    require_admin()
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return err("Name required")
+    mid = execute("INSERT INTO models (brand_id, name, category) VALUES (?,?,?)",
+                  (body.get("brand_id"), name, body.get("category") or ""))
+    return ok({"id": mid})
+
+
+@app.route("/api/admin/models/<int:mid>", methods=["PATCH", "DELETE"])
+def admin_model(mid):
+    admin = require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM models WHERE id = ?", (mid,))
+        audit(admin["id"], "delete_model", "model", mid)
+        return ok({"deleted": mid})
+    body = request.get_json(silent=True) or {}
+    if body.get("name"):
+        execute("UPDATE models SET name = ? WHERE id = ?", (body["name"].strip(), mid))
+    if "brand_id" in body:
+        execute("UPDATE models SET brand_id = ? WHERE id = ?", (body["brand_id"], mid))
+    if "category" in body:
+        execute("UPDATE models SET category = ? WHERE id = ?", ((body["category"] or "").strip(), mid))
+    return ok({"id": mid})
+
+
+# ---------------------------------------------------------------------------
+# Admin — locations (province / district / city)
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/provinces", methods=["POST"])
+def admin_add_province():
+    require_admin()
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return err("Name required")
+    pid = execute("INSERT INTO provinces (name) VALUES (?)", (name,))
+    return ok({"id": pid})
+
+
+@app.route("/api/admin/provinces/<int:pid>", methods=["PATCH", "DELETE"])
+def admin_province(pid):
+    require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM provinces WHERE id = ?", (pid,))
+        return ok({"deleted": pid})
+    body = request.get_json(silent=True) or {}
+    if body.get("name"):
+        execute("UPDATE provinces SET name = ? WHERE id = ?", (body["name"].strip(), pid))
+    return ok({"id": pid})
+
+
+@app.route("/api/admin/districts", methods=["POST"])
+def admin_add_district():
+    require_admin()
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name or not body.get("province_id"):
+        return err("Name and province required")
+    did = execute("INSERT INTO districts (province_id, name) VALUES (?,?)", (body["province_id"], name))
+    return ok({"id": did})
+
+
+@app.route("/api/admin/districts/<int:did>", methods=["PATCH", "DELETE"])
+def admin_district(did):
+    require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM districts WHERE id = ?", (did,))
+        return ok({"deleted": did})
+    body = request.get_json(silent=True) or {}
+    if body.get("name"):
+        execute("UPDATE districts SET name = ? WHERE id = ?", (body["name"].strip(), did))
+    if "province_id" in body:
+        execute("UPDATE districts SET province_id = ? WHERE id = ?", (body["province_id"], did))
+    return ok({"id": did})
+
+
+@app.route("/api/admin/cities", methods=["POST"])
+def admin_add_city():
+    require_admin()
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name or not body.get("district_id"):
+        return err("Name and district required")
+    cid = execute("INSERT INTO cities (district_id, name) VALUES (?,?)", (body["district_id"], name))
+    return ok({"id": cid})
+
+
+@app.route("/api/admin/cities/<int:cid>", methods=["PATCH", "DELETE"])
+def admin_city(cid):
+    require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM cities WHERE id = ?", (cid,))
+        return ok({"deleted": cid})
+    body = request.get_json(silent=True) or {}
+    if body.get("name"):
+        execute("UPDATE cities SET name = ? WHERE id = ?", (body["name"].strip(), cid))
+    if "district_id" in body:
+        execute("UPDATE cities SET district_id = ? WHERE id = ?", (body["district_id"], cid))
+    return ok({"id": cid})
+
+
+# ---------------------------------------------------------------------------
+# Admin — settings
+# ---------------------------------------------------------------------------
+ADMIN_SETTINGS_KEYS = [
+    "site_name", "tagline", "logo", "contact_email", "contact_phone", "contact_address",
+    "max_listings_per_user", "max_images_per_listing", "listing_expiry_days",
+    "require_approval", "verification_required_to_sell", "homepage_banners",
+    "footer_text", "social_facebook", "social_instagram", "social_youtube",
+    "payment_webhook_secret",
+    "promo_featured_price", "promo_featured_days",
+    "promo_boost_price", "promo_boost_days",
+    "promo_homepage_price", "promo_homepage_days",
+    "promo_urgent_price", "promo_urgent_days",
+]
+
+
+@app.route("/api/admin/settings", methods=["GET", "PUT"])
+def admin_settings():
+    require_admin()
+    if request.method == "GET":
+        return ok({"settings": get_settings(), "promotions": promotion_prices()})
+    body = request.get_json(silent=True) or {}
+    for key in ADMIN_SETTINGS_KEYS:
+        if key in body:
+            set_setting(key, body[key])
+    return ok({"settings": get_settings(), "promotions": promotion_prices()})
+
+
+# ---------------------------------------------------------------------------
+# Admin — payments & promotions
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/payments")
+def admin_payments():
+    require_admin()
+    rows = query(
+        "SELECT p.*, u.name AS user_name, u.email AS user_email FROM payments p "
+        "LEFT JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC LIMIT 300")
+    return ok(rows)
+
+
+@app.route("/api/admin/promotions")
+def admin_promotions():
+    require_admin()
+    rows = query(
+        "SELECT p.*, l.title AS listing_title, u.name AS user_name FROM promotions p "
+        "LEFT JOIN listings l ON l.id = p.listing_id LEFT JOIN users u ON u.id = p.user_id "
+        "ORDER BY p.created_at DESC LIMIT 300")
+    return ok(rows)
+
+
+# ---------------------------------------------------------------------------
+# Admin — blog posts (content management)
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/posts", methods=["POST"])
+def admin_add_post():
+    admin = require_admin()
+    body = request.get_json(silent=True) or {}
+    title = (body.get("title") or "").strip()
+    if not title:
+        return err("Title required")
+    slug = slugify(body.get("slug") or title)
+    base = slug
+    i = 2
+    while query("SELECT id FROM posts WHERE slug = ?", (slug,), one=True):
+        slug = f"{base}-{i}"
+        i += 1
+    pid = execute(
+        "INSERT INTO posts (slug, title, category, excerpt, body, image, author, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (slug, title, body.get("category") or "Guide", body.get("excerpt") or "", body.get("body") or "",
+         body.get("image") or "", body.get("author") or "Lanka Lens", now()))
+    audit(admin["id"], "create_post", "post", pid, title)
+    return ok({"id": pid, "slug": slug})
+
+
+@app.route("/api/admin/posts/<int:pid>", methods=["PATCH", "DELETE"])
+def admin_post(pid):
+    admin = require_admin()
+    if request.method == "DELETE":
+        execute("DELETE FROM posts WHERE id = ?", (pid,))
+        audit(admin["id"], "delete_post", "post", pid)
+        return ok({"deleted": pid})
+    body = request.get_json(silent=True) or {}
+    sets, params = [], []
+    for col in ("title", "category", "excerpt", "body", "image", "author"):
+        if col in body:
+            sets.append(f"{col} = ?")
+            params.append(body[col])
+    if body.get("slug"):
+        sets.append("slug = ?")
+        params.append(slugify(body["slug"]))
+    if sets:
+        execute(f"UPDATE posts SET {', '.join(sets)} WHERE id = ?", params + [pid])
+    audit(admin["id"], "update_post", "post", pid)
+    return ok({"id": pid})
 
 
 # ---------------------------------------------------------------------------
@@ -2056,6 +3227,7 @@ def seed():
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     migrate(conn)
+    create_indexes(conn)
 
     has_cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
     if has_cats == 0:
@@ -2083,6 +3255,33 @@ def seed():
             conn.execute("INSERT INTO brands (name, category) VALUES (?,?)", (name, cat))
         conn.commit()
 
+    if conn.execute("SELECT COUNT(*) FROM site_settings").fetchone()[0] == 0:
+        for k, v in DEFAULT_SETTINGS.items():
+            conn.execute("INSERT INTO site_settings (key, value) VALUES (?,?)", (k, str(v)))
+        conn.commit()
+
+    if conn.execute("SELECT COUNT(*) FROM models").fetchone()[0] == 0:
+        brand_ids = {r["name"]: r["id"] for r in [dict(x) for x in conn.execute("SELECT id, name FROM brands")]}
+        models = [
+            ("Sony", "A7 III", "Cameras"), ("Sony", "A7 IV", "Cameras"), ("Sony", "A6400", "Cameras"),
+            ("Sony", "A7R V", "Cameras"), ("Sony", "A1", "Cameras"),
+            ("Canon", "5D Mark IV", "Cameras"), ("Canon", "EOS R6", "Cameras"), ("Canon", "90D", "Cameras"),
+            ("Canon", "Rebel T7", "Cameras"), ("Canon", "G7 X Mark II", "Cameras"),
+            ("Nikon", "D850", "Cameras"), ("Nikon", "Z6 II", "Cameras"), ("Nikon", "Z50", "Cameras"),
+            ("Fujifilm", "X-T4", "Cameras"), ("Fujifilm", "X-T5", "Cameras"), ("Fujifilm", "X-S10", "Cameras"),
+            ("Panasonic", "GH5 II", "Cameras"), ("Panasonic", "S5", "Cameras"),
+            ("GoPro", "HERO13 Black", "Action Cameras"), ("GoPro", "HERO12 Black", "Action Cameras"),
+            ("GoPro", "HERO7 White", "Action Cameras"),
+            ("DJI", "Osmo Action 4", "Action Cameras"), ("DJI", "Mini 3", "Drones"),
+            ("DJI", "Air 3", "Drones"), ("DJI", "Mavic Air 2", "Drones"),
+            ("Insta360", "X5", "Action Cameras"), ("Autel", "EVO Nano+", "Drones"),
+            ("Sigma", "35mm f/1.4 Art", "Lenses"), ("Tamron", "70-200mm f/2.8 G2", "Lenses"),
+        ]
+        for bname, mname, cat in models:
+            bid = brand_ids.get(bname)
+            conn.execute("INSERT INTO models (brand_id, name, category) VALUES (?,?,?)", (bid, mname, cat))
+        conn.commit()
+
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         users = [
             ("Nimalka Perera", "nimalka@lankalens.lk", "password123", "+94 77 123 4567", "Western Province", "Colombo", "Colombo", 1, 0,
@@ -2093,6 +3292,10 @@ def seed():
              "individual", "Travel photographer covering the south coast."),
             ("Ishara Jayasuriya", "ishara@lankalens.lk", "password123", "+94 70 456 7890", "Western Province", "Colombo", "Nugegoda", 1, 0,
              "business", "Owner of Colombo Camera House. Authorised dealer for major brands."),
+            ("Ruwan Bandara", "ruwan@lankalens.lk", "password123", "+94 71 888 2244", "Central Province", "Kandy", "Kandy", 1, 0,
+             "business", "Owner of Kandy Photo Store. Full-service camera store in the hill country."),
+            ("Sakunthala Ramanan", "sakunthala@lankalens.lk", "password123", "+94 77 555 6677", "Northern Province", "Jaffna", "Jaffna", 0, 0,
+             "business", "Runs Jaffna Photo Works — everything for photographers up north."),
             ("Demo User", "demo@lankalens.lk", "demo1234", "+94 77 000 1111", "Western Province", "Colombo", "Colombo", 0, 0,
              "individual", "Just browsing for my next camera."),
             ("Admin", "admin@lankalens.lk", "admin1234", "+94 77 999 8888", "Western Province", "Colombo", "Colombo", 1, 1,
@@ -2108,21 +3311,33 @@ def seed():
         conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0:
-        ish = conn.execute("SELECT id FROM users WHERE email = ?", ("ishara@lankalens.lk",)).fetchone()
-        if ish:
-            conn.execute(
-                """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
-                   phone, whatsapp, opening_hours, verified, created_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
-                (ish["id"], "Colombo Camera House", "colombo-camera-house", "/images/shops/shop-1.jpg",
-                 "Authorised dealer for Sony, Canon and Fujifilm. Trade-ins, repairs and rentals welcome.",
-                 "Western Province", "Colombo", "Colombo", "Colombo 04",
-                 "+94 11 250 4400", "94112504400",
-                 json.dumps({"mon": "9:00 AM – 6:00 PM", "tue": "9:00 AM – 6:00 PM", "wed": "9:00 AM – 6:00 PM",
-                             "thu": "9:00 AM – 6:00 PM", "fri": "9:00 AM – 6:00 PM", "sat": "9:00 AM – 4:00 PM",
-                             "sun": "Closed"}),
-                 now()))
-            conn.commit()
+        weekday = {"mon": "9:00 AM – 6:00 PM", "tue": "9:00 AM – 6:00 PM", "wed": "9:00 AM – 6:00 PM",
+                   "thu": "9:00 AM – 6:00 PM", "fri": "9:00 AM – 6:00 PM", "sat": "9:00 AM – 4:00 PM",
+                   "sun": "Closed"}
+        biz = [
+            ("ishara@lankalens.lk", "Colombo Camera House", "colombo-camera-house", "/images/shops/shop-1.jpg",
+             "Authorised dealer for Sony, Canon and Fujifilm. Trade-ins, repairs and rentals welcome.",
+             "Colombo 04", "Colombo", "Colombo", "Western Province",
+             "+94 11 250 4400", "94112504400", 1, weekday),
+            ("ruwan@lankalens.lk", "Kandy Photo Store", "kandy-photo-store", "/images/shops/shop-2.jpg",
+             "Full-service camera store in Kandy. Sales, repairs, rentals and printing.",
+             "Peradeniya Road", "Kandy", "Kandy", "Central Province",
+             "+94 81 223 5112", "94812235112", 1, weekday),
+            ("sakunthala@lankalens.lk", "Jaffna Photo Works", "jaffna-photo-works", "/images/shops/shop-3.jpg",
+             "Everything for photographers in the Northern Province — cameras, lenses and printing.",
+             "Hospital Road", "Jaffna", "Jaffna", "Northern Province",
+             "+94 21 222 3315", "94212223315", 0, weekday),
+        ]
+        for email, name, slug, logo, desc, area, city, district, province, phone, wa, verified, hours in biz:
+            owner = conn.execute("SELECT id FROM users WHERE email = ?", (email,)).fetchone()
+            if owner:
+                conn.execute(
+                    """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
+                       phone, whatsapp, opening_hours, verified, created_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (owner["id"], name, slug, logo, desc, province, district, city, area,
+                     phone, wa, json.dumps(hours), verified, now()))
+        conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0:
         users_map = {r["email"]: r["id"] for r in [dict(x) for x in conn.execute("SELECT id, email FROM users")]}
@@ -2349,6 +3564,35 @@ def seed():
                "warranty": "Lifetime", "receipt": "Yes"},
               desc="Peak Design Capture Clip V3 — carry your camera securely on any strap or belt.",
               brand="Peak Design", model="Capture Clip V3"),
+            L("ruwan@lankalens.lk", "mirrorless", "Canon EOS R6 Mark II Mirrorless Body", 415000, "Like New",
+              ["/images/products/canon-5d-1.jpg"],
+              {"brand": "Canon", "model": "R6 Mark II", "year": "2023", "shutter_count": "6,800", "megapixels": "24.2 MP",
+               "video_resolution": "4K 60p", "body_kit": "Body Only", "battery": "2 × LP-E6NH", "charger": "Yes",
+               "original_box": "Yes", "warranty": "6 months", "receipt": "Yes",
+               "reason_for_selling": "Shop trade-in, fully serviced."},
+              desc="Shop trade-in Canon EOS R6 Mark II in like-new condition, serviced and checked by our technicians.",
+              brand="Canon", model="R6 Mark II", year="2023"),
+            L("ruwan@lankalens.lk", "lens-nikon", "Nikon Z 24-70mm f/4 S (Brand New)", 145000, "Brand New",
+              ["/images/products/lens-canon-4.jpg"],
+              {"brand": "Nikon", "model": "Z 24-70mm f/4 S", "mount": "Nikon Z", "focal_length": "24-70mm",
+               "max_aperture": "f/4", "image_stabilization": "No", "autofocus": "Yes", "warranty": "1 year official",
+               "receipt": "Yes"},
+              desc="Brand new Nikon Z 24-70mm f/4 S with full official warranty and receipt.",
+              brand="Nikon", model="Z 24-70mm f/4 S"),
+            L("sakunthala@lankalens.lk", "mirrorless", "Nikon Z50 APS-C Mirrorless + 16-50mm Kit", 175000, "Good",
+              ["/images/products/canon-rebel-1.jpg"],
+              {"brand": "Nikon", "model": "Z50", "year": "2021", "shutter_count": "21,000", "megapixels": "20.9 MP",
+               "video_resolution": "4K 30p", "body_kit": "Body + Kit Lens", "lens_included": "16-50mm",
+               "battery": "1 × EN-EL25", "charger": "Yes", "original_box": "Yes", "warranty": "None", "receipt": "Yes",
+               "reason_for_selling": "Customer upgrade."},
+              desc="Nikon Z50 with 16-50mm kit lens in good condition. Great compact crop-sensor camera.",
+              brand="Nikon", model="Z50", year="2021"),
+            L("sakunthala@lankalens.lk", "tripods", "Manfrotto Befree Advanced Travel Tripod", 38000, "Excellent",
+              ["/images/products/tripod-1.jpg"],
+              {"brand": "Manfrotto", "model": "Befree Advanced", "compatibility": "Universal", "warranty": "3 months",
+               "receipt": "Yes"},
+              desc="Lightweight Manfrotto Befree Advanced travel tripod with ball head, in excellent condition.",
+              brand="Manfrotto", model="Befree Advanced"),
         ]
         for i, l in enumerate(listings):
             ts = now() - (len(listings) - i) * 3600
@@ -2391,24 +3635,93 @@ def seed():
 
     if conn.execute("SELECT COUNT(*) FROM posts").fetchone()[0] == 0:
         posts = [
-            ("how-to-check-a-used-camera", "How to Check a Used Camera Before You Buy",
+            ("how-to-check-a-used-camera", "How to Check a Used DSLR Before You Buy",
              "Buying Guide",
-             "A practical checklist every buyer should run through — sensor, shutter count, lens glass and more — before handing over your money.",
-             "<p>Buying used gear is the smartest way to get into photography on a budget, but a little checking goes a long way.</p>"
-             "<h4>1. Inspect the sensor</h4><p>Set the camera to its smallest aperture and shoot a plain white wall. Dust, scratches and oil spots will show up as dark marks.</p>"
-             "<h4>2. Check the shutter count</h4><p>Most bodies have a rated shutter life (often 150,000–200,000 actuations). Ask for the count and factor it into the price.</p>"
-             "<h4>3. Examine the lens glass</h4><p>Hold the lens up to a light and look for fungus, haze and dust. Run the focus and zoom rings — they should be smooth.</p>"
-             "<h4>4. Test every button and port</h4><p>Pop the battery, memory card, flash and hotshoe. Test the HDMI and USB ports if you plan to use them.</p>"
-             "<h4>5. Ask about the box, receipt and warranty</h4><p>Original packaging and a receipt are good signs the item is genuine and well cared for.</p>",
+             "A practical checklist for inspecting a second-hand DSLR — sensor, shutter count, body and every port.",
+             "<p>Buying a used DSLR is the smartest way into photography on a budget, but a little checking goes a long way.</p>"
+             "<h4>1. Inspect the sensor</h4><p>Set the camera to its smallest aperture (f/16–f/22), shoot a plain white wall and review the image. Dust, scratches and oil spots show up as dark marks.</p>"
+             "<h4>2. Check the shutter count</h4><p>Most DSLR shutters are rated for 150,000–200,000 actuations. Ask for the count and factor a high number into your offer.</p>"
+             "<h4>3. Check the mirror and viewfinder</h4><p>Look through the viewfinder for dust and haze, and check the reflex mirror for scratches. Pop the lens off and inspect the mount contacts.</p>"
+             "<h4>4. Test every button and port</h4><p>Bring your own memory card and battery. Test the flash, hotshoe, HDMI, USB and headphone ports, plus every dial.</p>"
+             "<h4>5. Ask for the box and receipt</h4><p>Original packaging, a receipt and any remaining warranty are strong signs the camera is genuine and well cared for.</p>",
+             "/images/products/canon-5d-1.jpg", "Lanka Lens Team"),
+            ("how-to-check-a-used-mirrorless", "How to Check a Used Mirrorless Camera",
+             "Buying Guide",
+             "Sensor, shutter, electronic viewfinder, IBIS and battery — the full checklist for a used mirrorless body.",
+             "<p>Mirrorless cameras are largely electronic, so the checklist is a little different from a DSLR.</p>"
+             "<h4>1. Sensor and stabilisation</h4><p>Shoot a white wall at a small aperture to reveal dust or scratches. If the body has IBIS, switch it on and confirm it engages with a short video clip.</p>"
+             "<h4>2. Electronic viewfinder and LCD</h4><p>Look for dead pixels, burn-in and flicker. Check the rear LCD touch response and the tilt/flip mechanism.</p>"
+             "<h4>3. Shutter and mechanical sound</h4><p>Fire a burst in both mechanical and electronic shutter modes and listen for anything unusual.</p>"
+             "<h4>4. Battery and ports</h4><p>Used mirrorless bodies are hard on batteries — check for swelling. Test USB-C, HDMI and the headphone/mic jacks.</p>"
+             "<h4>5. Firmware and mounts</h4><p>Confirm the latest firmware is installed and inspect the lens mount for wear or bent contacts.</p>",
              "/images/products/sony-a7iii-1.jpg", "Lanka Lens Team"),
-            ("mirrorless-vs-dslr", "Mirrorless vs DSLR in 2026 — Which Should You Buy?",
+            ("shutter-count-guide", "Shutter Count — What It Means and Why It Matters",
+             "Buying Guide",
+             "The single most important number when buying a used camera body. Here's how to read it.",
+             "<p>Every mechanical shutter has a limited lifespan, so the shutter count is the odometer of a camera.</p>"
+             "<h4>What's normal?</h4><p>Entry-level bodies are often rated for ~100,000 actuations, while professional bodies are rated 200,000–500,000. A camera under half its rating is a good buy.</p>"
+             "<h4>How to check it</h4><p>Ask the seller for a shutter count reading, or use a free tool that reads the EXIF data of a recent unedited photo taken with the camera.</p>"
+             "<h4>How it affects price</h4><p>A high shutter count doesn't mean the camera is about to die — but it should bring the price down. Use it as a negotiating point.</p>"
+             "<h4>Cameras without a mechanical shutter</h4><p>Some bodies use electronic shutters that effectively don't wear out — ask which mode was mainly used.</p>",
+             "/images/products/sony-a7iii-3.jpg", "Lanka Lens Team"),
+            ("used-lens-buying-guide", "How to Inspect a Used Lens (Fungus, Haze & Sharpness)",
+             "Buying Guide",
+             "A step-by-step guide to checking glass, focus, zoom and mount before you pay for a second-hand lens.",
+             "<p>A lens can look perfect from the outside and still hide fungus inside the glass. Inspect carefully.</p>"
+             "<h4>1. Check for fungus and haze</h4><p>Shine a light through the lens at an angle. Fungus looks like fine spider webs; haze is a milky film. Both reduce contrast and are hard to remove.</p>"
+             "<h4>2. Look for dust and scratches</h4><p>A few dust specks are normal and rarely affect photos, but deep scratches on the front or rear element will.</p>"
+             "<h4>3. Run the focus and zoom rings</h4><p>Both should move smoothly with no grinding, looseness or stiff spots. Test autofocus on your body for speed and accuracy.</p>"
+             "<h4>4. Check the aperture and contacts</h4><p>Stop the lens down and confirm the blades open and close smoothly without oil. Clean the electronic contacts and test on your own camera.</p>"
+             "<h4>5. Test it wide open</h4><p>Shoot a few frames wide open and at a couple of focal lengths to check sharpness and autofocus calibration.</p>",
+             "/images/products/lens-canon-1.jpg", "Lanka Lens Team"),
+            ("gopro-buying-guide", "Buying a Used GoPro — What to Check",
+             "Buying Guide",
+             "Lens scratches, battery swelling, seals and mounts — the things that matter when buying a used GoPro.",
+             "<p>GoPros lead a hard life, so a used one deserves a careful inspection.</p>"
+             "<h4>1. Inspect the lens cover</h4><p>The lens cover is replaceable on most models, but scratches on the sensor lens itself are permanent. Look carefully with a light.</p>"
+             "<h4>2. Check the battery</h4><p>GoPro batteries swell with age — if the battery doesn't slide in and out easily, walk away. Ask how long a full charge lasts.</p>"
+             "<h4>3. Check the seals</h4><p>If you plan to use it in water, the door seals must be clean and intact. Ask whether it has been used underwater and how it was cleaned afterwards.</p>"
+             "<h4>4. Test the screens and ports</h4><p>Power it on, record a short clip, check the touchscreen and both USB-C and the door latch.</p>"
+             "<h4>5. Verify the model</h4><p>Older models are often resold as newer ones. Check the model number in the settings or on the box.</p>",
+             "/images/products/gopro-1.jpg", "Lanka Lens Team"),
+            ("dji-action-camera-guide", "Buying a Used DJI Action Camera (Osmo Action)",
+             "Buying Guide",
+             "Lens, screens, magnetic mounts and waterproofing — a checklist for used DJI Osmo Action cameras.",
+             "<p>DJI's Osmo Action cameras are tough, but a few checks will protect you from a bad buy.</p>"
+             "<h4>1. Check both screens</h4><p>The Osmo Action's big selling point is its dual touchscreens — verify both respond and have no dead pixels or cracks.</p>"
+             "<h4>2. Lens and housing</h4><p>Look for scratches on the front lens element. Test the magnetic quick-release mount and the protective housing.</p>"
+             "<h4>3. Waterproofing</h4><p>Check the battery door and port covers are intact. Ask about any water exposure and how it was rinsed afterwards.</p>"
+             "<h4>4. Batteries and charging</h4><p>Confirm the battery charges fully and the charging hub (if included) works with all batteries.</p>"
+             "<h4>5. Test stabilisation</h4><p>Record a short walking clip and confirm RockSteady stabilisation is smooth without jitter.</p>",
+             "/images/products/osmo-1.jpg", "Lanka Lens Team"),
+            ("drone-inspection-guide", "How to Inspect a Used Drone Before You Buy",
+             "Buying Guide",
+             "Motors, gimbal, batteries, props and flight logs — the full pre-purchase checklist for a used drone.",
+             "<p>A used drone can be a brilliant deal or an expensive paperweight. Inspect it like a pilot would.</p>"
+             "<h4>1. Check the gimbal</h4><p>Power it on and watch the gimbal self-calibrate smoothly. Any grinding, twitching or error messages are red flags.</p>"
+             "<h4>2. Inspect motors and props</h4><p>Spin each motor by hand — it should be smooth with no grinding. Check the arms and body for cracks, and props for chips.</p>"
+             "<h4>3. Batteries</h4><p>Ask for the cycle count and check for swelling. Batteries are often the most expensive part of a used drone kit.</p>"
+             "<h4>4. Flight logs and history</h4><p>Ask whether it has been crashed. Flight logs in the app can reveal hard landings and error history.</p>"
+             "<h4>5. Do a test flight</h4><p>If possible, hover it briefly to confirm stable flight, GPS lock and a clean camera feed. Always follow local drone rules.</p>",
+             "/images/products/drone-1.jpg", "Lanka Lens Team"),
+            ("used-camera-buying-tips-sri-lanka", "Used Camera Buying Tips for Sri Lanka",
+             "Buying Guide",
+             "Local advice for buying second-hand gear in Sri Lanka — meet-ups, pricing, warranties and avoiding scams.",
+             "<p>Buying used camera gear in Sri Lanka is popular and generally safe — if you follow a few local ground rules.</p>"
+             "<h4>1. Meet in a public place</h4><p>Coffee shops, shopping malls or a camera store counter are ideal. Avoid inviting strangers home, and avoid going alone to unfamiliar areas.</p>"
+             "<h4>2. Compare prices first</h4><p>Check what similar models sell for on Lanka Lens and in Colombo's camera shops so you know a fair price in rupees.</p>"
+             "<h4>3. Ask about import history</h4><p>Many bodies come in as grey imports. Ask for the receipt and any remaining local or international warranty.</p>"
+             "<h4>4. Test before you pay</h4><p>Bring a memory card and battery, shoot test frames, and check the shutter count. Pay only after you are satisfied.</p>"
+             "<h4>5. Never pay in advance</h4><p>No deposits, no 'shipping fees', no courier stories. And never share your OTP, PIN or online banking passwords with anyone.</p>",
+             "/images/products/fuji-xt4-1.jpg", "Lanka Lens Team"),
+            ("mirrorless-vs-dslr", "Mirrorless vs DSLR — Which Should You Buy?",
              "Buying Guide",
              "The mirrorless vs DSLR debate is mostly settled, but each still has its place. Here's how to decide.",
              "<p>Mirrorless cameras now dominate new sales, but DSLRs remain brilliant value on the used market.</p>"
              "<h4>Go mirrorless if…</h4><p>You want silent shooting, in-viewfinder previews, better video and the newest lens mounts. Autofocus eye-tracking is superb.</p>"
              "<h4>Go DSLR if…</h4><p>You want maximum battery life, an optical viewfinder and cheap, abundant used lenses.</p>"
              "<h4>The real decision</h4><p>Your budget and lens needs matter more than the body. Invest in good glass — it holds its value far better than bodies.</p>",
-             "/images/products/fuji-xt4-1.jpg", "Lanka Lens Team"),
+             "/images/products/fuji-xt4-2.jpg", "Lanka Lens Team"),
             ("best-lenses-for-sri-lanka-travel", "Best Lenses for Sri Lanka Travel Photography",
              "Guides",
              "From misty tea hills to temple ceremonies and wild leopards — the lenses that cover it all.",
@@ -2416,15 +3729,15 @@ def seed():
              "<h4>The all-rounder</h4><p>A 24-70mm f/2.8 (or f/4) zoom handles streets, portraits and landscapes in one lens.</p>"
              "<h4>For wildlife</h4><p>Yala and Wilpattu demand reach: a 70-200mm or 100-400mm is essential for leopards and birds.</p>"
              "<h4>For low light</h4><p>Temple interiors and sunset shoots call for a fast prime — a 35mm or 50mm f/1.8 is affordable and small.</p>",
-             "/images/products/lens-canon-1.jpg", "Lanka Lens Team"),
+             "/images/products/lens-canon-2.jpg", "Lanka Lens Team"),
             ("drone-laws-sri-lanka", "Flying a Drone in Sri Lanka — The Rules You Need to Know",
              "Guides",
-             "Drone rules changed recently. Here's a quick, plain-language summary for hobbyists and creators.",
+             "Drone rules in Sri Lanka — a quick, plain-language summary for hobbyists and creators.",
              "<p>Drones under 250g are generally the easiest to fly legally for recreation.</p>"
              "<h4>Registration</h4><p>Recreational drones above 250g may need registration with the Civil Aviation Authority of Sri Lanka (CAASL).</p>"
              "<h4>Where not to fly</h4><p>Stay away from airports, military areas and government buildings. Avoid crowds and respect people's privacy.</p>"
              "<h4>Fly safe</h4><p>Keep the drone within visual line of sight and avoid flying in strong coastal winds. Always check the latest CAASL guidance before you fly.</p>",
-             "/images/products/drone-1.jpg", "Lanka Lens Team"),
+             "/images/products/drone-2.jpg", "Lanka Lens Team"),
         ]
         for slug, title, cat, excerpt, body, img, author in posts:
             conn.execute(
