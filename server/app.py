@@ -1984,6 +1984,11 @@ def delete_listing(lid):
     if row["user_id"] != u["id"] and not u["is_admin"]:
         return err("Not allowed", 403)
     execute("DELETE FROM listings WHERE id = ?", (lid,))
+    # notifications.link is a hash route string, not a foreign key, so the rows
+    # that announced this listing ("Listing published", "Listing renewed",
+    # "Listing promoted") survive the cascade and would keep pointing the seller
+    # at an ad that no longer exists. Remove them with the listing.
+    execute("DELETE FROM notifications WHERE link = ?", (f"#/ads/{lid}",))
     return ok({"deleted": lid})
 
 
