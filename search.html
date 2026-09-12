@@ -1,0 +1,304 @@
+<div class="page">
+	<div class="navbar navbar-transparent">
+		<div class="navbar-bg"></div>
+		<div class="navbar-inner sliding">
+			<div class="left">
+				<a class="link back">
+					<i class="icon icon-back"></i>
+				</a>
+			</div>
+			<div class="title">Search</div>
+		</div>
+	</div>
+	<div class="page-content">
+		<!-- search -->
+
+		<!-- separator -->
+		<div class="separator-small"></div>
+		<!-- end separator -->
+
+		<form class="searchbar searchbar-init" data-search-container=".search-list" data-search-in=".item-title">
+			<div class="searchbar-inner">
+				<div class="searchbar-input-wrap">
+					<input type="search" placeholder="Find Laptop, Handphone, and other">
+					<i class="searchbar-icon"></i>
+					<span class="input-clear-button"></span>
+				</div>
+				<span class="searchbar-disable-button">Cancel</span>
+			</div>
+		</form>
+
+		<!-- separator -->
+		<div class="separator-large"></div>
+		<!-- end separator -->
+
+		<div class="search-action">
+			<div class="container">
+				<div class="row">
+					<div class="col-50">
+						<a class="sheet-open" href="#" data-sheet=".my-sheet-swipe-to-close">
+							<div class="content">
+								<ion-icon name="funnel-outline"></ion-icon><span>Sort</span>
+							</div>
+						</a>
+					</div>
+					<div class="col-50">
+						<a href="#" class="panel-open" data-panel=".sidebar-right">
+							<div class="content">
+								<ion-icon name="filter-outline"></ion-icon><span>Filter</span>
+							</div>
+						</a>
+					</div>
+				</div>
+			</div>
+		</div>
+
+		<!-- sheet modal for sort by -->
+		<div class="sheet-modal my-sheet-swipe-to-close">
+			<div class="sheet-modal-inner">
+				<div class="block-title">
+					<h3>Sort by: <a href="" class="right-link sheet-close"><ion-icon name="close-circle-outline"></ion-icon></a></h3>
+				</div>
+				<div class="list">
+					<ul>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="shield-checkmark-outline"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Relevance</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="calendar-outline"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Date</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="arrow-up-outline"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Price: Low to high</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="arrow-down-outline"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Price: High to low</div>
+								</div>
+							</a>
+						</li>
+					</ul>
+				</div>
+			</div>
+		</div>
+		<!-- end sheet modal for sort by -->
+
+		<!-- sidebar / panel for filter -->
+		<div class="panel-backdrop"></div>
+		<div class="panel panel-right sidebar-right panel-cover panel-init">
+			<div class="block-title title-small">
+				<h3>Sort by</h3>
+			</div>
+			<form class="list">
+				<ul>
+					<li class="item-content item-input">
+						<div class="item-inner">
+							<div class="item-input-wrap input-dropdown-wrap">
+								<select>
+									<option value="Relevance">Relevance</option>
+									<option value="Date">Date</option>
+									<option value="Price">Price: Low to high</option>
+									<option value="Price">Price: High to low</option>
+								</select>
+							</div>
+						</div>
+					</li>
+				</ul>
+			</form>
+
+			<div class="block-title title-small">
+				<h3>Ratings</h3>
+			</div>
+			<div class="rating-filter">
+				<div class="container">
+					<ul>
+						<li class="rating-active"><a href=""><ion-icon name="star-sharp"></ion-icon>5</a></li>
+						<li><a href=""><ion-icon name="star-sharp"></ion-icon>4</a></li>
+						<li><a href=""><ion-icon name="star-sharp"></ion-icon>3</a></li>
+						<li><a href=""><ion-icon name="star-sharp"></ion-icon>2</a></li>
+						<li><a href=""><ion-icon name="star-sharp"></ion-icon>1</a></li>
+					</ul>
+				</div>
+			</div>
+
+			<div class="block-title title-small">
+				<h3>Location</h3>
+			</div>
+			<form class="list">
+				<ul>
+					<li class="item-content item-input">
+						<div class="item-inner">
+							<div class="item-input-wrap">
+								<input type="text" placeholder="Current location">
+								<span class="input-clear-button"></span>
+							</div>
+						</div>
+					</li>
+				</ul>
+			</form>
+
+			<div class="block-title title-small">
+				<h3>Price Range</h3>
+			</div>
+			<div class="container">
+				<form class="list">
+					<ul>
+						<li>
+							<div class="row">
+								<div class="col-50">
+									<div class="item-content item-input">
+										<div class="item-inner">
+											<div class="item-input-wrap">
+												<input type="text" placeholder="Minimum">
+												<span class="input-clear-button"></span>
+											</div>
+										</div>
+									</div>
+								</div>
+								<div class="col-50">
+									<div class="item-content item-input">
+										<div class="item-inner">
+											<div class="item-input-wrap">
+												<input type="text" placeholder="Maximum">
+												<span class="input-clear-button"></span>
+											</div>
+										</div>
+									</div>
+								</div>
+							</div>
+						</li>
+					</ul>
+				</form>
+			</div>
+
+			<!-- separator -->
+			<div class="separator-large"></div>
+			<!-- end separator -->
+
+			<div class="fitler-execution">
+				<div class="container">
+					<button class="button secondary-button panel-close">Cancel</button>
+					<!-- separator -->
+					<div class="separator-medium"></div>
+					<!-- end separator -->
+					<button class="button">Apply Filters</button>
+				</div>
+			</div>
+
+			<!-- separator -->
+			<div class="separator-large"></div>
+			<!-- end separator -->
+
+		</div>
+		<!-- end sidebar / panel for filter -->
+
+		<div class="searchbar-backdrop"></div>
+		<div class="searchbar-found">
+			<div class="search-by-category">
+				<div class="block-title">
+					<h3 class="title-extra-small">By Categories <a href="#" class="right-link">Show All</a></h3>
+				</div>
+				<div class="list">
+					<ul>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="car-sport-outline" class="color-blue"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Cars</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="bicycle-outline" class="color-purple"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Bikes</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="home-outline" class="color-orange"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Properties</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="tv-outline" class="color-red"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Electronics</div>
+								</div>
+							</a>
+						</li>
+						<li>
+							<a href="" class="item-link item-content">
+								<div class="item-media">
+									<ion-icon name="phone-portrait-outline" class="color-green"></ion-icon>
+								</div>
+								<div class="item-inner">
+									<div class="item-title">Handphone</div>
+								</div>
+							</a>
+						</li>
+					</ul>
+				</div>
+			</div>
+			<div class="popular-search">
+				<div class="block-title">
+					<h3 class="title-extra-small">Popular Search</h3>
+				</div>
+				<div class="container">
+					<ul>
+						<li><a href="#"><span>electric</span></a></li>
+						<li><a href="#"><span>manual</span></a></li>
+						<li><a href="#"><span>minimalist</span></a></li>
+						<li><a href="#"><span>mobile</span></a></li>
+						<li><a href="#"><span>motor</span></a></li>
+						<li><a href="#"><span>shop</span></a></li>
+						<li><a href="#"><span>automatic</span></a></li>
+						<li><a href="#"><span>spare part</span></a></li>
+					</ul>
+				</div>
+			</div>
+		</div>
+
+		<!-- separator -->
+		<div class="separator-large"></div>
+		<!-- end separator -->
+		<!-- end search -->
+	</div>
+</div>
