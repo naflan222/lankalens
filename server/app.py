@@ -68,6 +68,89 @@ def b2_missing_env():
     return [name for name, val in values.items() if not val]
 
 
+# ---------------------------------------------------------------------------
+# B2 endpoint / region normalization
+# ---------------------------------------------------------------------------
+# Backblaze's S3-compatible endpoint is https://s3.<region>.backblazeb2.com and
+# the SigV4 credential scope must use that same <region>. These env vars are
+# pasted by hand into Railway, so normalize them once at import time: strip
+# quotes/whitespace/trailing slashes, force the https scheme, drop a bucket
+# prefix that was pasted into the host, and recover the region from the host.
+B2_S3_HOST_RE = re.compile(r"^s3\.(?P<region>[a-z0-9-]+)\.backblazeb2\.com$")
+B2_FRIENDLY_HOST_RE = re.compile(r"^f\d{2,3}\.(?P<region>[a-z0-9-]+)\.backblazeb2\.com$")
+B2_NATIVE_API_HOST_RE = re.compile(r"^api\d*\.backblazeb2\.com$")
+
+
+def _normalize_b2_endpoint(raw, bucket=""):
+    """Return ``(url, host, region, notes)`` for a B2_ENDPOINT value.
+
+    ``region`` is the region encoded in the endpoint host (``''`` when the host is
+    not a recognizable B2 S3 host). Nothing returned here is secret, so all of it
+    is safe to log.
+    """
+    notes = []
+    val = (raw or "").strip().strip('"').strip("'").strip()
+    if not val:
+        return "", "", "", notes
+    # Drop a pasted query/fragment and trailing slashes: a trailing "/" makes
+    # botocore build "<endpoint>/<bucket>//<key>", which B2 answers with 404.
+    val = val.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", val):
+        notes.append("no scheme given; using https://")
+        val = "https://" + val
+    if val.lower().startswith("http://"):
+        notes.append("http:// given; B2 only serves the S3 API over TLS, using https://")
+        val = "https://" + val[len("http://"):]
+    from urllib.parse import urlparse
+    parsed = urlparse(val)
+    host = (parsed.hostname or "").lower()
+    port = parsed.port
+    region = ""
+    if bucket and host.startswith(bucket.lower() + "."):
+        # Virtual-hosted endpoint (bucket.s3.<region>.backblazeb2.com). The S3 API
+        # client adds the bucket itself, so keep only the service host.
+        notes.append("bucket name was part of the endpoint host; stripped it (the S3 "
+                     "client puts the bucket in the request path)")
+        host = host[len(bucket) + 1:]
+    m = B2_S3_HOST_RE.match(host)
+    if m:
+        region = m.group("region")
+    else:
+        mf = B2_FRIENDLY_HOST_RE.match(host)
+        mn = B2_NATIVE_API_HOST_RE.match(host)
+        if mf:
+            notes.append("this is a B2 *friendly URL* host (file downloads), not the "
+                         "S3-compatible endpoint; expected s3.%s.backblazeb2.com" % mf.group("region"))
+        elif mn:
+            notes.append("this is the B2 *native API* host; it rejects S3 requests. "
+                         "Expected s3.<region>.backblazeb2.com")
+        else:
+            notes.append("endpoint host is not a recognized s3.<region>.backblazeb2.com host")
+    if parsed.path and parsed.path not in ("/", ""):
+        notes.append("endpoint had a path (%s); using the host only" % parsed.path)
+    url = "https://" + host + ((":%d" % port) if port else "")
+    return url, host, region, notes
+
+
+# Computed once at import so every request signs against the same endpoint/region.
+B2_ENDPOINT_URL, B2_ENDPOINT_HOST, B2_ENDPOINT_REGION, B2_ENDPOINT_NOTES = _normalize_b2_endpoint(
+    B2_ENDPOINT, B2_BUCKET)
+# B2 validates the SigV4 credential scope against the region that serves the
+# endpoint, so the host is authoritative; B2_REGION is the fallback when the
+# endpoint is not a recognizable B2 host.
+B2_SIGNING_REGION = B2_ENDPOINT_REGION or B2_REGION
+B2_REGION_MISMATCH = bool(B2_ENDPOINT_REGION and B2_REGION and B2_ENDPOINT_REGION != B2_REGION)
+
+
+def b2_proxy_env():
+    """Names of proxy env vars that are set (botocore honors them by default).
+
+    Only names are reported: a proxy URL can embed a password.
+    """
+    names = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+    return [n for n in names if os.environ.get(n)]
+
+
 EXPIRY_DAYS = 30
 # Auth tokens used to live forever: the sessions table had no expiry column, so
 # a leaked token stayed valid until someone logged out or an admin banned the
@@ -740,6 +823,50 @@ def slugify(text):
 def b2_enabled():
     return all([B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_KEY_ID, B2_APPLICATION_KEY])
 
+
+def b2_client_config(connect_timeout=15, read_timeout=60):
+    """botocore Config that matches what Backblaze B2's S3-compatible API accepts.
+
+    Three of these settings are load-bearing for B2:
+
+    * ``addressing_style="path"`` — B2 serves the S3 API from
+      ``s3.<region>.backblazeb2.com`` with the bucket in the request path. Our
+      bucket name contains an upper-case letter, so it is not DNS-compatible and
+      virtual-hosted addressing can never work for it.
+    * ``request_checksum_calculation="when_required"`` — since boto3 1.36 the S3
+      client calculates a CRC32 checksum for every PutObject and, because the
+      request goes over HTTPS, sends it as a *trailer*. That switches the upload
+      to ``Content-Encoding: aws-chunked`` + ``Transfer-Encoding: chunked`` with
+      ``x-amz-content-sha256: STREAMING-UNSIGNED-PAYLOAD-TRAILER`` and drops
+      ``Content-Length``. B2 does not accept that framing (its S3 API documents
+      the ``x-amz-checksum-*`` / ``x-amz-sdk-checksum-algorithm`` headers as
+      unsupported) and tears the connection down instead of returning an HTTP
+      error, which botocore surfaces as ConnectionClosedError.
+    * ``response_checksum_validation="when_required"`` — the matching read-side
+      setting, so GetObject/HeadBucket are not decorated either.
+
+    Older botocore (< 1.36) has neither checksum knob and never sent those
+    headers, so it falls back to the remaining settings.
+    """
+    from botocore.config import Config
+    common = {
+        "signature_version": "s3v4",
+        "s3": {"addressing_style": "path"},
+        "connect_timeout": connect_timeout,
+        "read_timeout": read_timeout,
+        "retries": {"max_attempts": 4, "mode": "standard"},
+        "max_pool_connections": 10,
+    }
+    with_checksums = dict(common,
+                          request_checksum_calculation="when_required",
+                          response_checksum_validation="when_required")
+    try:
+        return Config(**with_checksums)
+    except TypeError:
+        # botocore older than 1.36: no checksum options (and no checksum headers).
+        return Config(**common)
+
+
 def get_b2_client():
     """Lazily create (and cache) the boto3 S3 client for Backblaze B2.
 
@@ -755,22 +882,21 @@ def get_b2_client():
         return None
     try:
         import boto3
-        from botocore.config import Config
-        endpoint = B2_ENDPOINT
-        if not endpoint.startswith("http"):
-            endpoint = "https://" + endpoint
+        endpoint = B2_ENDPOINT_URL or (
+            B2_ENDPOINT if B2_ENDPOINT.startswith("http") else "https://" + B2_ENDPOINT)
         _b2_client = boto3.client(
             "s3",
             endpoint_url=endpoint,
-            region_name=B2_REGION,
+            region_name=B2_SIGNING_REGION or B2_REGION,
             aws_access_key_id=B2_KEY_ID,
             aws_secret_access_key=B2_APPLICATION_KEY,
-            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+            config=b2_client_config(),
         )
         if not _b2_client_init_logged:
             host = endpoint.split("://", 1)[-1].split("/", 1)[0]
-            app.logger.info("B2 client initialized (bucket=%s, endpoint=%s, region=%s)",
-                            B2_BUCKET, host, B2_REGION)
+            app.logger.info("B2 client initialized (bucket=%s, endpoint=%s, region=%s, "
+                            "addressing=path, checksums=when_required)",
+                            B2_BUCKET, host, B2_SIGNING_REGION or B2_REGION)
             _b2_client_init_logged = True
         return _b2_client
     except Exception as e:
@@ -798,6 +924,49 @@ def b2_presigned_url(key, expires_in=3600):
                            key[:40], e.__class__.__name__, _b2_redact(str(e)))
         return None
 
+def _b2_failure_hint(e):
+    """Plain-language hint for the B2 failures that actually reach production.
+
+    Returned text is logged next to the exception so the Railway logs say what to
+    do, not just what broke. Never includes credential values.
+    """
+    name = e.__class__.__name__
+    text = str(e)
+    code = ""
+    response = getattr(e, "response", None)
+    if isinstance(response, dict):
+        code = str((response.get("Error") or {}).get("Code") or "")
+        status = (response.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+        if code or status:
+            code = "%s %s" % (status or "", code)
+    if name == "ConnectionClosedError":
+        return ("the endpoint closed the connection before answering. With boto3>=1.36 this is "
+                "usually the automatic CRC32 trailer upload (Transfer-Encoding: chunked + "
+                "Content-Encoding: aws-chunked), which B2 does not accept — it is disabled by "
+                "b2_client_config(). If it still happens, the region/endpoint pair is wrong or "
+                "outbound traffic to s3.<region>.backblazeb2.com:443 is blocked.")
+    if name == "EndpointConnectionError":
+        return ("DNS/TCP to the B2 endpoint failed — check B2_ENDPOINT is a real "
+                "s3.<region>.backblazeb2.com host and that the container can reach port 443.")
+    if name == "SSLError":
+        return ("the TLS handshake to the B2 endpoint failed — usually B2_ENDPOINT pointing at a "
+                "non-S3 host, a proxy intercepting TLS, or whitespace in the env var.")
+    if name == "ConnectTimeoutError" or name == "ReadTimeoutError":
+        return "the B2 endpoint did not answer in time (network path or firewall)."
+    if code.startswith("403"):
+        return ("B2 rejected the credentials/permissions — confirm B2_KEY_ID/B2_APPLICATION_KEY are an "
+                "application key with writeFiles on this bucket, and that the signing region "
+                "(%s) matches the endpoint region." % (B2_SIGNING_REGION or "?"))
+    if code.startswith("400") and "checksum" in text.lower():
+        return "B2 rejected a checksum header — ensure b2_client_config() is used for the client."
+    if code.startswith("301") or "PermanentRedirect" in text:
+        return ("B2 says the bucket lives in another region; the response header "
+                "x-amz-bucket-region has the correct one — set B2_REGION and B2_ENDPOINT to match.")
+    if code.startswith("404") and "NoSuchBucket" in text:
+        return "B2 does not have a bucket named %r visible to this key." % B2_BUCKET
+    return ""
+
+
 def b2_upload_bytes(key, data, content_type="image/jpeg"):
     if not b2_enabled():
         return False, "B2 not configured"
@@ -818,8 +987,11 @@ def b2_upload_bytes(key, data, content_type="image/jpeg"):
         # Never swallow: log the exception type, message and traceback so the
         # failure is diagnosable from the Railway logs. The message is scrubbed
         # of any credential values; the client only ever sees a generic error.
-        app.logger.error("B2 upload failed (key=%s, %d bytes): %s: %s",
-                         k, len(data), e.__class__.__name__, _b2_redact(str(e)),
+        hint = _b2_failure_hint(e)
+        app.logger.error("B2 upload failed (key=%s, %d bytes, endpoint=%s, region=%s): %s: %s%s",
+                         k, len(data), B2_ENDPOINT_HOST or "?", B2_SIGNING_REGION or "?",
+                         e.__class__.__name__, _b2_redact(str(e)),
+                         (" | Hint: " + hint) if hint else "",
                          exc_info=True)
         return False, "Could not upload image. Please try again."
 
@@ -895,12 +1067,15 @@ def extract_b2_key_from_url(url):
                 if after and (after.startswith("uploads/") or after.startswith("avatars/") or "/" in after):
                     return unquote(after)
             # Generic B2 detection for file/ style without bucket check
-            endpoint_host = ""
-            try:
-                if B2_ENDPOINT:
-                    endpoint_host = B2_ENDPOINT.strip().lower().replace("https://", "").replace("http://", "").split("/")[0].split("?")[0]
-            except Exception:
-                endpoint_host = ""
+            # Normalized at import: already lower-case, scheme-free and
+            # free of any pasted path/query.
+            endpoint_host = B2_ENDPOINT_HOST
+            if not endpoint_host:
+                try:
+                    if B2_ENDPOINT:
+                        endpoint_host = B2_ENDPOINT.strip().lower().replace("https://", "").replace("http://", "").split("/")[0].split("?")[0]
+                except Exception:
+                    endpoint_host = ""
             is_b2_host = False
             if host and endpoint_host and (host == endpoint_host or host.endswith(endpoint_host.lstrip("f0").lstrip("."))):
                 is_b2_host = True
@@ -1509,19 +1684,97 @@ def _log_b2_startup_status():
                      "environment — B2 uploads will fail. boto3 is listed in "
                      "server/requirements.txt; rebuild the Railway image.")
         return
-    endpoint = B2_ENDPOINT if B2_ENDPOINT.startswith("http") else "https://" + B2_ENDPOINT
-    host = endpoint.split("://", 1)[-1].split("/", 1)[0]
-    logger.info("B2 storage enabled (bucket=%s, endpoint=%s, region=%s, boto3=%s)",
-                B2_BUCKET, endpoint.rstrip("/"), B2_REGION, getattr(boto3, "__version__", "unknown"))
-    low = host.lower()
-    if "backblazeb2.com" in low and not low.startswith("s3."):
+    try:
+        import botocore
+        botocore_version = getattr(botocore, "__version__", "unknown")
+    except Exception:
+        botocore_version = "unknown"
+
+    # --- endpoint / region diagnostic (no credentials are printed) ---
+    logger.info("B2 storage enabled (bucket=%s, endpoint=%s, signing region=%s, boto3=%s, botocore=%s)",
+                B2_BUCKET, B2_ENDPOINT_URL or B2_ENDPOINT, B2_SIGNING_REGION or B2_REGION,
+                getattr(boto3, "__version__", "unknown"), botocore_version)
+    for note in B2_ENDPOINT_NOTES:
+        logger.warning("B2_ENDPOINT: %s", note)
+    if B2_ENDPOINT and B2_ENDPOINT.strip() != B2_ENDPOINT:
+        logger.warning("B2_ENDPOINT had leading/trailing whitespace — that alone breaks the TLS "
+                       "handshake; the trimmed value is being used.")
+    if B2_REGION_MISMATCH:
         logger.warning(
-            "B2_ENDPOINT %r does not look like a B2 *S3-compatible* endpoint (expected "
-            "s3.<region>.backblazeb2.com, e.g. https://s3.us-west-004.backblazeb2.com). "
-            "The b2api host (s<region>.backblazeb2.com) rejects S3 API requests.", host)
+            "B2_REGION=%s does not match the region in B2_ENDPOINT (%s). B2 validates the SigV4 "
+            "credential scope against the endpoint region, so requests are being signed for %s. "
+            "Set B2_REGION=%s to silence this.",
+            B2_REGION, B2_ENDPOINT_REGION, B2_SIGNING_REGION, B2_ENDPOINT_REGION)
+    if not B2_SIGNING_REGION:
+        logger.warning("No region could be determined — set B2_REGION to the bucket's region "
+                       "(the middle part of s3.<region>.backblazeb2.com).")
+    if B2_BUCKET != B2_BUCKET.lower():
+        logger.info("Bucket %r is not all lower-case, so it is not DNS-compatible; using "
+                    "path-style addressing (bucket in the URL path), which is what B2 expects.",
+                    B2_BUCKET)
+    proxies = b2_proxy_env()
+    if proxies:
+        logger.warning("Proxy environment detected (%s) — botocore sends B2 traffic through it. "
+                       "If uploads die with ConnectionClosedError, check that proxy.",
+                       ", ".join(proxies))
+
+
+def b2_startup_check():
+    """One authenticated round-trip to B2 at boot, result logged, never fatal.
+
+    Uses head_bucket: it is read-only, costs one request, and proves DNS, TLS,
+    the SigV4 signature, the bucket name and the key's permissions in a single
+    step. When B2 answers with a redirect it includes x-amz-bucket-region, which
+    is printed so a wrong B2_REGION can be corrected from the logs alone.
+
+    Set B2_STARTUP_CHECK=0 to skip it.
+    """
+    logger = app.logger
+    if os.environ.get("B2_STARTUP_CHECK", "1").strip().lower() in ("0", "false", "no", "off"):
+        logger.info("B2 startup connectivity check skipped (B2_STARTUP_CHECK=%s)",
+                    os.environ.get("B2_STARTUP_CHECK"))
+        return
+    if not b2_enabled():
+        return
+    try:
+        import boto3
+    except ImportError:
+        return
+    started = time.time()
+    try:
+        # Short timeouts: a broken endpoint must not stall the healthcheck.
+        client = boto3.client(
+            "s3",
+            endpoint_url=B2_ENDPOINT_URL,
+            region_name=B2_SIGNING_REGION or B2_REGION,
+            aws_access_key_id=B2_KEY_ID,
+            aws_secret_access_key=B2_APPLICATION_KEY,
+            config=b2_client_config(connect_timeout=8, read_timeout=15),
+        )
+        client.head_bucket(Bucket=B2_BUCKET)
+        logger.info("B2 connectivity OK — head_bucket succeeded (bucket=%s, endpoint=%s, "
+                    "region=%s, %.2fs)",
+                    B2_BUCKET, B2_ENDPOINT_HOST, B2_SIGNING_REGION, time.time() - started)
+    except Exception as e:
+        detail = ""
+        response = getattr(e, "response", None)
+        if isinstance(response, dict):
+            meta = response.get("ResponseMetadata") or {}
+            headers = meta.get("HTTPHeaders") or {}
+            real_region = headers.get("x-amz-bucket-region")
+            if real_region:
+                detail = (" | B2 reports the bucket's real region as %s — set B2_REGION=%s and "
+                          "B2_ENDPOINT=https://s3.%s.backblazeb2.com"
+                          % (real_region, real_region, real_region))
+        logger.error("B2 connectivity check FAILED (%s: %s)%s",
+                     e.__class__.__name__, _b2_redact(str(e)), detail)
+        hint = _b2_failure_hint(e)
+        if hint:
+            logger.error("B2 connectivity check hint: %s", hint)
 
 
 _log_b2_startup_status()
+b2_startup_check()
 
 
 @app.teardown_appcontext
@@ -1816,7 +2069,15 @@ def static_files(filename):
 # ---------------------------------------------------------------------------
 @app.route("/api/health")
 def health():
-    return ok({"status": "up", "time": now()})
+    # `storage` is a non-secret summary of where uploads land, so the storage
+    # backend can be confirmed from the outside without reading Railway logs.
+    if b2_enabled():
+        storage = "Backblaze B2 (endpoint=%s, region=%s, bucket=%s)" % (
+            B2_ENDPOINT_URL or "unparsed", B2_SIGNING_REGION or "?", B2_BUCKET)
+    else:
+        storage = "local disk (uploads/) — B2 disabled, missing: %s" % (
+            ", ".join(b2_missing_env()) or "none")
+    return ok({"status": "up", "time": now(), "storage": storage})
 
 
 @app.route("/api/meta")
