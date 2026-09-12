@@ -26,8 +26,16 @@ DB_PATH = os.path.join(BASE_DIR, "lankalens.db")
 UPLOAD_DIR = os.path.join(ROOT, "uploads")
 
 ALLOWED_IMG = {"jpg", "jpeg", "png", "webp", "gif"}
-MAX_IMG_BYTES = 8 * 1024 * 1024
+MAX_IMG_BYTES = 1 * 1024 * 1024
 PER_PAGE = 24
+# Backblaze B2 (S3-compatible) — credentials from Railway env only, never hardcoded
+B2_BUCKET = os.environ.get("B2_BUCKET", "").strip()
+B2_ENDPOINT = os.environ.get("B2_ENDPOINT", "").strip()
+B2_REGION = os.environ.get("B2_REGION", "").strip()
+B2_KEY_ID = os.environ.get("B2_KEY_ID", "").strip()
+B2_APPLICATION_KEY = os.environ.get("B2_APPLICATION_KEY", "").strip()
+_b2_client = None
+_b2_client_error_logged = False
 EXPIRY_DAYS = 30
 # Auth tokens used to live forever: the sessions table had no expiry column, so
 # a leaked token stayed valid until someone logged out or an admin banned the
@@ -85,7 +93,7 @@ DEFAULT_SETTINGS = {
     "contact_phone": "+94 77 000 1111",
     "contact_address": "Colombo, Sri Lanka",
     "max_listings_per_user": "50",
-    "max_images_per_listing": "15",
+    "max_images_per_listing": "3",
     "listing_expiry_days": "30",
     "require_approval": "0",
     "verification_required_to_sell": "0",
@@ -694,14 +702,263 @@ def slugify(text):
     return text or "item"
 
 
+# ---------------------------------------------------------------------------
+# Backblaze B2 (S3-compatible) helpers
+# ---------------------------------------------------------------------------
+def b2_enabled():
+    return all([B2_BUCKET, B2_ENDPOINT, B2_REGION, B2_KEY_ID, B2_APPLICATION_KEY])
+
+def get_b2_client():
+    global _b2_client, _b2_client_error_logged
+    if _b2_client is not None:
+        return _b2_client
+    if not b2_enabled():
+        return None
+    try:
+        import boto3
+        from botocore.config import Config
+        endpoint = B2_ENDPOINT
+        if not endpoint.startswith("http"):
+            endpoint = "https://" + endpoint
+        _b2_client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            region_name=B2_REGION,
+            aws_access_key_id=B2_KEY_ID,
+            aws_secret_access_key=B2_APPLICATION_KEY,
+            config=Config(signature_version="s3v4", s3={"addressing_style": "virtual"}),
+        )
+        return _b2_client
+    except Exception as e:
+        if not _b2_client_error_logged:
+            try:
+                app.logger.warning("B2 client init failed: %s", e.__class__.__name__)
+            except Exception:
+                pass
+            _b2_client_error_logged = True
+        return None
+
+def b2_presigned_url(key, expires_in=3600):
+    if not key or not b2_enabled():
+        return None
+    client = get_b2_client()
+    if not client:
+        return None
+    try:
+        k = key.lstrip("/")
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": B2_BUCKET, "Key": k},
+            ExpiresIn=expires_in,
+        )
+    except Exception as e:
+        try:
+            app.logger.warning("B2 presign failed for %s: %s", key[:40], e.__class__.__name__)
+        except Exception:
+            pass
+        return None
+
+def b2_upload_bytes(key, data, content_type="image/jpeg"):
+    if not b2_enabled():
+        return False, "B2 not configured"
+    client = get_b2_client()
+    if not client:
+        return False, "B2 client unavailable"
+    try:
+        client.put_object(Bucket=B2_BUCKET, Key=key.lstrip("/"), Body=data, ContentType=content_type)
+        return True, None
+    except Exception as e:
+        try:
+            app.logger.warning("B2 upload failed for %s: %s", key[:40], e.__class__.__name__)
+        except Exception:
+            pass
+        return False, "Could not upload image. Please try again."
+
+def b2_delete_key(key):
+    if not key or not b2_enabled():
+        return False
+    client = get_b2_client()
+    if not client:
+        return False
+    try:
+        client.delete_object(Bucket=B2_BUCKET, Key=key.lstrip("/"))
+        return True
+    except Exception as e:
+        try:
+            app.logger.warning("B2 delete failed for %s: %s", key[:40], e.__class__.__name__)
+        except Exception:
+            pass
+        return False
+
+def _is_b2_key(val):
+    if not isinstance(val, str) or not val:
+        return False
+    if val.startswith("/images/"):
+        return False
+    if val.startswith("http://") or val.startswith("https://") or val.startswith("data:"):
+        return False
+    # Legacy /uploads/ and new uploads/... / avatars/... are B2 keys when B2 enabled
+    if val.startswith("/uploads/") or val.startswith("uploads/") or val.startswith("avatars/") or val.startswith("/avatars/"):
+        return True
+    # Generic key with slash (e.g. listings/..., images/...)
+    if "/" in val and not val.startswith("/"):
+        return True
+    if val.startswith("/"):
+        # Possibly B2 key with leading slash not in above, treat as B2 if B2 enabled
+        return b2_enabled() and val.count("/") >= 1
+    return False
+
+def _normalize_b2_key(val):
+    if not isinstance(val, str) or not val:
+        return None
+    return val.lstrip("/")
+
+def extract_b2_key_from_url(url):
+    if not isinstance(url, str) or not url:
+        return None
+    url = url.strip()
+    if url.startswith("/images/"):
+        return None
+    if url.startswith("http://") or url.startswith("https://"):
+        try:
+            from urllib.parse import urlparse, unquote
+            parsed = urlparse(url)
+            host = (parsed.hostname or "").lower()
+            path = parsed.path.lstrip("/")
+            # Virtual-hosted style: bucket as subdomain (mybucket.s3... or mybucket.f005...)
+            # Path is the key directly
+            if B2_BUCKET and host and (host == B2_BUCKET.lower() or host.startswith(B2_BUCKET.lower() + ".") or host.startswith(B2_BUCKET.lower() + "-")):
+                if path:
+                    return unquote(path.split("?")[0].split("#")[0])
+            # Path-style with bucket in URL: https://f005.../file/mybucket/uploads/...
+            if B2_BUCKET and B2_BUCKET.lower() in url.lower():
+                # Try to extract after bucket occurrence in path
+                low_url = url.lower()
+                low_bucket = B2_BUCKET.lower()
+                idx = low_url.index(low_bucket)
+                after = url[idx + len(B2_BUCKET):].lstrip("/")
+                after = after.split("?")[0].split("#")[0]
+                # after may start with "/" or be file/... remove leading file/ if present
+                if after.lower().startswith("file/"):
+                    after = after[5:].lstrip("/")
+                    # after now may be mybucket/uploads... need to strip bucket again?
+                    # but we already stripped one bucket; if after still contains bucket prefix, strip it
+                    if after.lower().startswith(low_bucket + "/"):
+                        after = after[len(B2_BUCKET)+1:]
+                if after and (after.startswith("uploads/") or after.startswith("avatars/") or "/" in after):
+                    return unquote(after)
+            # Generic B2 detection for file/ style without bucket check
+            endpoint_host = ""
+            try:
+                if B2_ENDPOINT:
+                    endpoint_host = B2_ENDPOINT.strip().lower().replace("https://", "").replace("http://", "").split("/")[0].split("?")[0]
+            except Exception:
+                endpoint_host = ""
+            is_b2_host = False
+            if host and endpoint_host and (host == endpoint_host or host.endswith(endpoint_host.lstrip("f0").lstrip("."))):
+                is_b2_host = True
+            if host and "backblazeb2.com" in host:
+                is_b2_host = True
+            if not is_b2_host:
+                # Also allow if path looks like uploads/ avatars/ and host is B2-like
+                # Already handled virtual-hosted above; otherwise not B2
+                return None
+            if path.startswith("file/"):
+                parts = path.split("/", 2)
+                if len(parts) == 3:
+                    return unquote(parts[2].split("?")[0].split("#")[0])
+                elif len(parts) == 2:
+                    return unquote(parts[1].split("?")[0].split("#")[0])
+            if path and (path.startswith("uploads/") or path.startswith("avatars/")):
+                return unquote(path.split("?")[0].split("#")[0])
+        except Exception:
+            pass
+        return None
+    # Already a key
+    if "/" in url:
+        if url.startswith("/"):
+            return url.lstrip("/")
+        return url
+    return None
+
+def resolve_image_url(val):
+    if not val or not isinstance(val, str):
+        return ""
+    if val.startswith("/images/"):
+        return val
+    if val.startswith("http://") or val.startswith("https://") or val.startswith("data:"):
+        return val
+    if _is_b2_key(val):
+        key = _normalize_b2_key(val)
+        if b2_enabled():
+            url = b2_presigned_url(key)
+            if url:
+                return url
+        # Fallback: serve as local path if B2 not available or failed
+        return "/" + key if not val.startswith("/") else val
+    return val
+
+def resolve_images_list(images):
+    if not isinstance(images, list):
+        return []
+    return [resolve_image_url(x) for x in images if isinstance(x, str) and x]
+
+def b2_object_key_for_upload(filename):
+    # filename already sanitized, e.g. uuid.jpg
+    return f"uploads/{filename}"
+
+def b2_object_key_for_avatar(filename):
+    return f"avatars/{filename}"
+
+def normalize_images_input(raw):
+    out = []
+    if not isinstance(raw, list):
+        return out
+    for i in raw:
+        if not isinstance(i, str) or not i.strip():
+            continue
+        s = i.strip()
+        if s.startswith("/images/"):
+            out.append(s)
+        elif s.startswith("/uploads/") or s.startswith("uploads/"):
+            out.append(s.lstrip("/") if b2_enabled() else s)
+        elif s.startswith("/avatars/") or s.startswith("avatars/"):
+            out.append(s.lstrip("/") if b2_enabled() else s)
+        elif s.startswith("http://") or s.startswith("https://"):
+            key = extract_b2_key_from_url(s)
+            if key:
+                out.append(key)
+            elif s.startswith("/images/"):
+                out.append(s)
+        elif "/" in s:
+            # Assume B2 key
+            out.append(s.lstrip("/"))
+        # else ignore bare strings without slash
+    return out
+
+def delete_b2_objects_for_images(images):
+    # Delete B2 objects for a list of stored image values (keys or paths)
+    if not b2_enabled():
+        return
+    for img in images or []:
+        if not isinstance(img, str):
+            continue
+        if _is_b2_key(img):
+            key = _normalize_b2_key(img)
+            b2_delete_key(key)
+
 def public_user(row):
     if not row:
         return None
+    avatar_val = row["avatar"] or ""
+    # Resolve B2 avatar to presigned URL when needed
+    if avatar_val and _is_b2_key(avatar_val):
+        avatar_val = resolve_image_url(avatar_val)
     return {
         "id": row["id"], "name": row["name"], "phone": row["phone"],
         "whatsapp": row["whatsapp"], "province": row["province"],
         "district": row["district"], "city": row["city"], "bio": row["bio"],
-        "avatar": row["avatar"], "verified": bool(row["verified"]),
+        "avatar": avatar_val, "verified": bool(row["verified"]),
         "seller_type": row.get("seller_type") or "individual",
         "created_at": row["created_at"],
     }
@@ -772,7 +1029,9 @@ def listing_ctx(rows, include_seller=True):
 
 
 def serialize_listing(l, include_seller=True, ctx=None):
-    images = json.loads(l.get("images") or "[]")
+    raw_images = json.loads(l.get("images") or "[]")
+    # Resolve B2 keys to presigned URLs for display; keep legacy /images as-is
+    images = resolve_images_list(raw_images) if raw_images else []
     specs = json.loads(l.get("specs") or "{}")
     prefs = json.loads(l.get("contact_prefs") or "{}")
     if not isinstance(prefs, dict):
@@ -824,7 +1083,10 @@ def serialize_listing(l, include_seller=True, ctx=None):
             biz = (ctx["businesses"].get(seller["id"]) if ctx
                    else query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
             if biz:
-                out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz["logo"]}
+                biz_logo = biz["logo"]
+                if biz_logo and _is_b2_key(biz_logo):
+                    biz_logo = resolve_image_url(biz_logo)
+                out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz_logo}
     return out
 
 
@@ -963,10 +1225,12 @@ def listing_limit():
 
 
 def image_limit():
+    # Task requirement: max 3 photos per listing, enforce 3 even if DB has stale 15
     try:
-        return max(1, min(30, int(get_setting("max_images_per_listing", "15"))))
+        v = int(get_setting("max_images_per_listing", "3"))
+        return max(1, min(3, v))
     except (TypeError, ValueError):
-        return 15
+        return 3
 
 
 def require_approval():
@@ -1142,11 +1406,14 @@ def missing_fields_error(body, *fields):
 
 
 def user_payload(u):
+    avatar = u["avatar"] or ""
+    if avatar and _is_b2_key(avatar):
+        avatar = resolve_image_url(avatar)
     return {
         "id": u["id"], "name": u["name"], "email": u["email"],
         "phone": u["phone"], "whatsapp": u["whatsapp"],
         "province": u["province"], "district": u["district"], "city": u["city"],
-        "bio": u["bio"], "avatar": u["avatar"], "verified": bool(u["verified"]),
+        "bio": u["bio"], "avatar": avatar, "verified": bool(u["verified"]),
         "email_verified": bool(u.get("email_verified")),
         "phone_verified": bool(u.get("phone_verified")),
         "seller_type": u.get("seller_type") or "individual",
@@ -1846,10 +2113,18 @@ def create_listing():
     title = clean["title"]
     price = clean.get("price", 0)
 
-    images = body.get("images") or []
-    if isinstance(images, str):
-        images = [images]
-    images = [i for i in images if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
+    raw_images = body.get("images") or []
+    if isinstance(raw_images, str):
+        raw_images = [raw_images]
+    # Normalize presigned URLs / legacy /uploads/ / B2 keys into canonical keys
+    images = normalize_images_input(raw_images) if isinstance(raw_images, list) else []
+    if len(images) > image_limit():
+        return err(f"Too many images — maximum is {image_limit()} photos per listing")
+    # Also reject raw count before normalization (e.g. attacker sending 20)
+    if isinstance(raw_images, list) and len([x for x in raw_images if isinstance(x, str) and x.strip()]) > image_limit():
+        # Check if normalized already truncated would hide excess; enforce strict
+        if len(images) > image_limit() or len([x for x in raw_images if isinstance(x, str) and x.strip()]) > image_limit():
+            return err(f"Too many images — maximum is {image_limit()} photos per listing")
 
     specs = clean.get("specs", {})
 
@@ -1932,8 +2207,36 @@ def update_listing(lid):
     if "category_id" in clean:
         setf("category_id", clean["category_id"])
     if "images" in body:
-        imgs = body["images"] if isinstance(body["images"], list) else []
-        imgs = [i for i in imgs if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:image_limit()]
+        raw = body["images"] if isinstance(body["images"], list) else []
+        imgs = normalize_images_input(raw)
+        if len(imgs) > image_limit():
+            return err(f"Too many images — maximum is {image_limit()} photos per listing")
+        # Also reject if raw sent > limit but normalization would hide via filtering
+        raw_count = len([x for x in raw if isinstance(x, str) and x.strip()])
+        if raw_count > image_limit():
+            return err(f"Too many images — maximum is {image_limit()} photos per listing")
+        # Delete B2 objects that were removed in this update
+        try:
+            old_imgs = json.loads(row["images"] or "[]")
+            removed = [x for x in old_imgs if x not in imgs]
+            delete_b2_objects_for_images(removed)
+            # Also clean local thumb files for removed local images if B2 not enabled? best effort
+            if not b2_enabled():
+                for r in removed:
+                    if isinstance(r, str) and r.startswith("/uploads/"):
+                        try:
+                            p = os.path.join(UPLOAD_DIR, os.path.basename(r))
+                            if os.path.exists(p):
+                                os.remove(p)
+                            # try thumb
+                            base, ext = os.path.splitext(os.path.basename(r))
+                            tp = os.path.join(UPLOAD_DIR, f"{base}_thumb.jpg")
+                            if os.path.exists(tp):
+                                os.remove(tp)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         setf("images", json.dumps(imgs))
     if "specs" in clean:
         specs = clean["specs"]
@@ -1983,6 +2286,25 @@ def delete_listing(lid):
         return err("Listing not found", 404)
     if row["user_id"] != u["id"] and not u["is_admin"]:
         return err("Not allowed", 403)
+    # Delete B2 objects for this listing before DB delete
+    try:
+        imgs = json.loads(row["images"] or "[]")
+        delete_b2_objects_for_images(imgs)
+        if not b2_enabled():
+            for im in imgs:
+                if isinstance(im, str) and im.startswith("/uploads/"):
+                    try:
+                        p = os.path.join(UPLOAD_DIR, os.path.basename(im))
+                        if os.path.exists(p):
+                            os.remove(p)
+                        base, ext = os.path.splitext(os.path.basename(im))
+                        tp = os.path.join(UPLOAD_DIR, f"{base}_thumb.jpg")
+                        if os.path.exists(tp):
+                            os.remove(tp)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
     execute("DELETE FROM listings WHERE id = ?", (lid,))
     # notifications.link is a hash route string, not a foreign key, so the rows
     # that announced this listing ("Listing published", "Listing renewed",
@@ -2096,6 +2418,8 @@ def remove_favorite(lid):
 # ---------------------------------------------------------------------------
 def offer_payload(o):
     listing = query("SELECT title, images FROM listings WHERE id = ?", (o["listing_id"],), one=True)
+    raw_imgs = json.loads((listing["images"] if listing else "") or "[]")
+    imgs = resolve_images_list(raw_imgs) if raw_imgs else []
     return {
         "id": o["id"], "listing_id": o["listing_id"],
         "buyer_id": o["buyer_id"], "seller_id": o["seller_id"],
@@ -2103,7 +2427,7 @@ def offer_payload(o):
         "message": o.get("message") or "", "status": o["status"],
         "created_at": o["created_at"],
         "listing_title": listing["title"] if listing else "",
-        "listing_images": json.loads((listing["images"] if listing else "") or "[]"),
+        "listing_images": imgs,
     }
 
 
@@ -2241,8 +2565,12 @@ def chat_thread(other_id):
     if lid and lid["lid"]:
         lrow = query("SELECT id, title, images, price FROM listings WHERE id = ?", (lid["lid"],), one=True)
         if lrow:
+            raw = json.loads(lrow["images"] or "[]")
+            img0 = (raw or [None])[0]
+            if img0 and _is_b2_key(img0):
+                img0 = resolve_image_url(img0)
             listing = {"id": lrow["id"], "title": lrow["title"], "price": lrow["price"],
-                       "image": (json.loads(lrow["images"] or "[]") or [None])[0]}
+                       "image": img0}
     return ok({"messages": rows, "other": other, "blocked": blocked, "blocked_by": blocked_by, "listing": listing})
 
 
@@ -2391,22 +2719,68 @@ def upload_avatar():
         return err(f"Unsupported image type: {ext or 'unknown'}")
     data = f.read()
     if len(data) > MAX_IMG_BYTES:
-        return err("Image too large (max 8MB)")
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
-    name = f"avatar_{uuid.uuid4().hex}.jpg"
-    path = os.path.join(UPLOAD_DIR, name)
+        return err("Image too large (max 1MB)")
+    # Delete old avatar from B2 if it was a B2 key (avoid orphan)
+    old_avatar = u.get("avatar") or query("SELECT avatar FROM users WHERE id = ?", (u["id"],), one=True)["avatar"] if u.get("avatar") is None else u.get("avatar")
+    # Need explicit query for old because u may not have fresh avatar? Use query anyway
+    try:
+        old_row = query("SELECT avatar FROM users WHERE id = ?", (u["id"],), one=True)
+        old_avatar = (old_row["avatar"] if old_row else "") or ""
+    except Exception:
+        old_avatar = u.get("avatar") or ""
     src = decode_image(data)
     if src is None:
         return err("That file is not a readable image. Upload a JPG, PNG, WEBP or GIF.")
     try:
         from PIL import Image, ImageOps
+        import io as _io
         img = ImageOps.exif_transpose(src).convert("RGB")
         img = ImageOps.fit(img, (256, 256), Image.Resampling.LANCZOS)
-        img.save(path, "JPEG", quality=85)
-    except Exception:
+        if b2_enabled():
+            out = _io.BytesIO()
+            img.save(out, "JPEG", quality=85)
+            out.seek(0)
+            key = b2_object_key_for_avatar(f"avatar_{uuid.uuid4().hex}.jpg")
+            ok1, err1 = b2_upload_bytes(key, out.getvalue(), content_type="image/jpeg")
+            if not ok1:
+                return err(err1 or "Could not upload image. Please try again.")
+            # Clean up old B2 avatar after successful upload
+            if old_avatar and _is_b2_key(old_avatar):
+                b2_delete_key(_normalize_b2_key(old_avatar))
+            elif old_avatar and old_avatar.startswith("/uploads/avatar_"):
+                try:
+                    p = os.path.join(UPLOAD_DIR, os.path.basename(old_avatar))
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            execute("UPDATE users SET avatar = ? WHERE id = ?", (key, u["id"]))
+            url = resolve_image_url(key) or ("/" + key)
+            return ok({"url": url, "key": key})
+        else:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            name = f"avatar_{uuid.uuid4().hex}.jpg"
+            path = os.path.join(UPLOAD_DIR, name)
+            img.save(path, "JPEG", quality=85)
+            # Clean old local avatar
+            if old_avatar and old_avatar.startswith("/uploads/avatar_"):
+                try:
+                    p = os.path.join(UPLOAD_DIR, os.path.basename(old_avatar))
+                    if os.path.exists(p):
+                        os.remove(p)
+                except Exception:
+                    pass
+            execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/uploads/{name}", u["id"]))
+            return ok({"url": f"/uploads/{name}"})
+    except Exception as e:
+        # If the exception came from our own err return, it's already handled above; this is unexpected
+        if isinstance(e, Exception) and "Could not upload" in str(e):
+            raise
+        try:
+            app.logger.warning("Avatar processing failed: %s", e.__class__.__name__)
+        except Exception:
+            pass
         return err("Could not process that image. Try a different photo.")
-    execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/uploads/{name}", u["id"]))
-    return ok({"url": f"/uploads/{name}"})
 
 
 @app.route("/api/me/password", methods=["POST"])
@@ -2476,9 +2850,12 @@ def my_analytics():
         wa = query("SELECT COUNT(*) n FROM contact_events WHERE listing_id = ? AND kind = 'whatsapp'", (l["id"],), one=True)["n"]
         of = query("SELECT COUNT(*) n FROM offers WHERE listing_id = ?", (l["id"],), one=True)["n"]
         img = json.loads(l["images"] or "[]")
+        first_img = img[0] if img else None
+        if first_img and _is_b2_key(first_img):
+            first_img = resolve_image_url(first_img)
         per.append({
             "id": l["id"], "title": l["title"], "status": l["status"],
-            "image": img[0] if img else None,
+            "image": first_img,
             "views": l["views"] or 0, "favorites": fav, "messages": msgs,
             "calls": cl, "whatsapp": wa, "offers": of,
         })
@@ -2503,11 +2880,14 @@ def business_payload(b):
         hours = {}
     if not isinstance(hours, dict):
         hours = {}
+    logo = b.get("logo") or ""
+    if logo and _is_b2_key(logo):
+        logo = resolve_image_url(logo)
     # Defensive .get() reads: a database created before a column was added must
     # not turn the whole shop list into a 500.
     return {
         "id": b.get("id"), "name": b.get("name") or "Unnamed shop", "slug": b.get("slug") or "",
-        "logo": b.get("logo") or "",
+        "logo": logo,
         "description": b.get("description") or "", "province": b.get("province") or "",
         "district": b.get("district") or "",
         "city": b.get("city") or "", "area": b.get("area") or "", "phone": b.get("phone") or "",
@@ -2527,15 +2907,33 @@ def my_business():
     name = (body.get("name") or "").strip()
     if not name:
         return err("Business name is required")
+    # Normalize logo: accept presigned http URL, /uploads/ or B2 key and store canonical key
+    logo_input = body.get("logo")
+    logo_val = None
+    if isinstance(logo_input, str) and logo_input.strip():
+        s = logo_input.strip()
+        if s.startswith("/images/"):
+            logo_val = s
+        else:
+            norm = normalize_images_input([s])
+            logo_val = norm[0] if norm else s
+            # If http url without B2 extraction and not /images/, keep original but will be stored as provided
+            if not logo_val:
+                logo_val = s
     existing = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
     if existing:
         slug = existing["slug"]
         if body.get("slug"):
             slug = slugify(body["slug"])
+        # If logo_val is None (not provided), keep existing; else use new
+        final_logo = logo_val if logo_val is not None else existing["logo"]
+        # Delete old B2 logo if replaced
+        if logo_val is not None and existing["logo"] and existing["logo"] != final_logo and _is_b2_key(existing["logo"]):
+            b2_delete_key(_normalize_b2_key(existing["logo"]))
         execute(
             """UPDATE businesses SET name=?, slug=?, logo=?, description=?, province=?, district=?, city=?, area=?,
                phone=?, whatsapp=?, opening_hours=? WHERE user_id=?""",
-            (name, slug, body.get("logo") or existing["logo"], body.get("description") or existing["description"] or "",
+            (name, slug, final_logo, body.get("description") or existing["description"] or "",
              body.get("province") or existing["province"] or "", body.get("district") or existing["district"] or "",
              body.get("city") or existing["city"] or "", body.get("area") or existing["area"] or "",
              body.get("phone") or existing["phone"] or "", body.get("whatsapp") or existing["whatsapp"] or "",
@@ -2551,7 +2949,7 @@ def my_business():
             """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
                phone, whatsapp, opening_hours, verified, created_at)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
-            (u["id"], name, slug, body.get("logo") or "", body.get("description") or "",
+            (u["id"], name, slug, logo_val or "", body.get("description") or "",
              body.get("province") or "", body.get("district") or "", body.get("city") or "",
              body.get("area") or "", body.get("phone") or "", body.get("whatsapp") or "",
              json.dumps(body.get("opening_hours") or {}), now()))
@@ -2834,8 +3232,12 @@ def decode_image(data):
 
 
 def process_image(data, ext, max_dim=1600, thumb_dim=420):
-    """Return (main_filename, thumb_filename) or (None, error_message)."""
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    """Return (main_key_or_filename, thumb_key_or_filename) or (None, error_message).
+
+    When B2 is configured, uploads directly to the private bucket and returns
+    B2 object keys (uploads/xxx.jpg) without touching local disk. Otherwise
+    saves to UPLOAD_DIR and returns local filenames.
+    """
     img = decode_image(data)
     if img is None:
         return None, "That file is not a readable image. Upload a JPG, PNG, WEBP or GIF."
@@ -2844,6 +3246,7 @@ def process_image(data, ext, max_dim=1600, thumb_dim=420):
     thumb_name = f"{name}_thumb.jpg"
     try:
         from PIL import Image, ImageOps
+        import io as _io
         img = ImageOps.exif_transpose(img)
         if img.mode in ("RGBA", "P", "LA"):
             img = img.convert("RGBA")
@@ -2853,23 +3256,57 @@ def process_image(data, ext, max_dim=1600, thumb_dim=420):
         else:
             img = img.convert("RGB")
         img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
-        img.save(os.path.join(UPLOAD_DIR, main_name), "JPEG", quality=82, optimize=True)
-        thumb = img.copy()
-        thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
-        thumb.save(os.path.join(UPLOAD_DIR, thumb_name), "JPEG", quality=78, optimize=True)
-        return main_name, thumb_name
+        if b2_enabled():
+            # Upload to Backblaze B2 private bucket
+            main_io = _io.BytesIO()
+            img.save(main_io, "JPEG", quality=82, optimize=True)
+            main_io.seek(0)
+            thumb = img.copy()
+            thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
+            thumb_io = _io.BytesIO()
+            thumb.save(thumb_io, "JPEG", quality=78, optimize=True)
+            thumb_io.seek(0)
+            main_key = b2_object_key_for_upload(main_name)
+            thumb_key = b2_object_key_for_upload(thumb_name)
+            ok1, err1 = b2_upload_bytes(main_key, main_io.getvalue(), content_type="image/jpeg")
+            if not ok1:
+                return None, err1 or "Could not upload image. Please try again."
+            ok2, err2 = b2_upload_bytes(thumb_key, thumb_io.getvalue(), content_type="image/jpeg")
+            if not ok2:
+                # thumb failure is non-fatal; keep main image
+                try:
+                    app.logger.warning("B2 thumb upload failed for %s: %s", thumb_key, err2)
+                except Exception:
+                    pass
+                return main_key, None
+            return main_key, thumb_key
+        else:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            img.save(os.path.join(UPLOAD_DIR, main_name), "JPEG", quality=82, optimize=True)
+            thumb = img.copy()
+            thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
+            thumb.save(os.path.join(UPLOAD_DIR, thumb_name), "JPEG", quality=78, optimize=True)
+            return main_name, thumb_name
     except Exception as exc:
         # The bytes decoded as an image but could not be re-encoded (e.g. an
         # exotic mode). Store the original under a safe name rather than
         # silently discarding the user's upload.
         safe_ext = ext if ext in ALLOWED_IMG else "jpg"
-        main_name = f"{name}.{safe_ext}"
-        try:
-            with open(os.path.join(UPLOAD_DIR, main_name), "wb") as fh:
-                fh.write(data)
-            return main_name, None
-        except OSError:
-            return None, f"Could not save that image ({exc.__class__.__name__})."
+        fallback_name = f"{name}.{safe_ext}"
+        if b2_enabled():
+            fallback_key = b2_object_key_for_upload(fallback_name)
+            ok1, err1 = b2_upload_bytes(fallback_key, data, content_type=f"image/{safe_ext}" if safe_ext != "jpg" else "image/jpeg")
+            if ok1:
+                return fallback_key, None
+            return None, err1 or f"Could not save that image ({exc.__class__.__name__})."
+        else:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            try:
+                with open(os.path.join(UPLOAD_DIR, fallback_name), "wb") as fh:
+                    fh.write(data)
+                return fallback_name, None
+            except OSError:
+                return None, f"Could not save that image ({exc.__class__.__name__})."
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -2885,13 +3322,27 @@ def upload():
             return err(f"Unsupported image type: {ext or 'unknown'}")
         data = f.read()
         if len(data) > MAX_IMG_BYTES:
-            return err("Image too large (max 8MB)")
-        main_name, thumb_name = process_image(data, ext)
-        if not main_name:
-            return err(thumb_name or "Could not process that image")
-        item = {"url": f"/uploads/{main_name}"}
-        if thumb_name:
-            item["thumb"] = f"/uploads/{thumb_name}"
+            return err("Image too large (max 1MB)")
+        main_key, thumb_key = process_image(data, ext)
+        if not main_key:
+            return err(thumb_key or "Could not process that image")
+        # When B2 is enabled, process_image returns B2 keys (uploads/xxx.jpg).
+        # Return a presigned URL for immediate preview while the canonical key
+        # is also returned; normalize_images_input on listing save extracts the key.
+        if b2_enabled() and _is_b2_key(main_key):
+            url = resolve_image_url(main_key) or ("/" + main_key.lstrip("/"))
+            item = {"url": url, "key": main_key}
+            if thumb_key and _is_b2_key(thumb_key):
+                t_url = resolve_image_url(thumb_key) or ("/" + thumb_key.lstrip("/"))
+                item["thumb"] = t_url
+                item["thumb_key"] = thumb_key
+            elif thumb_key:
+                item["thumb"] = f"/uploads/{thumb_key}"
+        else:
+            # Local fallback
+            item = {"url": f"/uploads/{main_key}"}
+            if thumb_key:
+                item["thumb"] = f"/uploads/{thumb_key}"
         items.append(item)
     return ok({"items": items})
 
@@ -2969,7 +3420,8 @@ def my_promotions():
     out = []
     for r in rows:
         r = dict(r)
-        r["listing_images"] = json.loads(r.get("listing_images") or "[]")
+        raw = json.loads(r.get("listing_images") or "[]")
+        r["listing_images"] = resolve_images_list(raw) if raw else []
         out.append(r)
     return ok(out)
 
@@ -3504,7 +3956,19 @@ def admin_settings():
     body = request.get_json(silent=True) or {}
     for key in ADMIN_SETTINGS_KEYS:
         if key in body:
-            set_setting(key, body[key])
+            val = body[key]
+            # Enforce hard cap of 3 for image limit per listing (task requirement)
+            if key == "max_images_per_listing":
+                try:
+                    iv = int(val)
+                    if iv > 3:
+                        iv = 3
+                    if iv < 1:
+                        iv = 1
+                    val = str(iv)
+                except (TypeError, ValueError):
+                    val = "3"
+            set_setting(key, val)
     return ok({"settings": get_settings(), "promotions": promotion_prices()})
 
 

@@ -1573,7 +1573,7 @@
           '<textarea class="textarea" id="wz-desc" placeholder="Condition, usage history, what’s included…" style="min-height:130px">' + esc(wz.description) + '</textarea></div></div>';
       } else if (i === 5) {
         b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('images-outline') + 'Photos</h2></div>' +
-          '<p class="form-hint" style="margin-bottom:10px">Add up to 15 photos. The first photo is your cover. Use ★ to set a cover, arrows to reorder.</p>' +
+          '<p class="form-hint" style="margin-bottom:10px">Add up to 3 photos. The first photo is your cover. Use ★ to set a cover, arrows to reorder.</p>' +
           '<div class="upload-grid" id="wz-upload"></div></div>' +
           '<p class="form-hint" style="padding:0 16px;margin-top:10px">Tip for used gear: shoot the front, back, top, LCD, lens mount and accessories. Never show serial numbers publicly.</p>';
       } else if (i === 6) {
@@ -1635,17 +1635,23 @@
           '<button type="button" data-wz-right="' + i + '"' + (i === wz.images.length - 1 ? ' disabled' : '') + '>' + icon('arrow-forward-outline') + '</button>' +
           '</div></div>';
       }).join('');
-      grid.innerHTML = tiles + (wz.images.length < 15
+      grid.innerHTML = tiles + (wz.images.length < 3
         ? '<label class="upload-tile" id="wz-add">' + icon('add-outline') + '<input type="file" accept="image/*" multiple hidden></label>'
         : '');
       var inp = $('#wz-add input');
       if (inp) inp.addEventListener('change', function () {
         var picked = Array.prototype.slice.call(this.files || []);
+        var skipped = 0;
+        var tooLarge = 0;
         picked.forEach(function (f) {
-          if (wz.images.length >= 15) return;
+          if (wz.images.length >= 3) { skipped++; return; }
+          if (f.size > 1048576) { tooLarge++; return; }
+          if (f.type && f.type.indexOf('image/') !== 0) { return; }
           var item = { file: f, _url: URL.createObjectURL(f) };
           wz.images.push(item);
         });
+        if (tooLarge) toast('Some photos were over 1MB and were skipped', 'error');
+        else if (skipped) toast('Maximum is 3 photos', 'error');
         renderUploads();
       });
       $$('#wz-upload [data-wz-rm]').forEach(function (btn) {
@@ -1836,11 +1842,23 @@
       }
 
       if (files.length) {
+        // Client-side 1MB guard (server also enforces 1MB)
+        var oversize = files.filter(function (f) { return f.size > 1048576; });
+        if (oversize.length) {
+          toast('Each photo must be 1MB or smaller — "' + oversize[0].name + '" is too large', 'error');
+          setBusy(false);
+          return;
+        }
+        if (wz.images.length > 3) {
+          toast('Maximum is 3 photos per listing', 'error');
+          setBusy(false);
+          return;
+        }
         var fd = new FormData();
         files.forEach(function (f) { fd.append('files', f); });
         api.form('/upload', fd)
           .then(function (d) {
-            finish(((d && d.items) || []).map(function (x) { return x.url; }));
+            finish(((d && d.items) || []).map(function (x) { return x.key || x.url; }));
           })
           .catch(function (er) { toast(er.message, 'error'); setBusy(false); });
       } else finish([]);
@@ -2928,7 +2946,7 @@
       title: 'Sell Your Camera', hero: 'Sell Your Camera', sub: 'Turn your unused gear into cash in three steps.',
       body: '<p class="lead">Listing on Lanka Lens is free and takes only a few minutes.</p>' +
         '<h3>1. Choose a category</h3><p>Pick the right category — the listing form shows fields that match your item (shutter count for cameras, mount for lenses, and so on).</p>' +
-        '<h3>2. Add photos and details</h3><p>Listings with clear photos and complete specifications sell much faster. Add up to 15 photos and an honest description.</p>' +
+        '<h3>2. Add photos and details</h3><p>Listings with clear photos and complete specifications sell much faster. Add up to 3 photos and an honest description.</p>' +
         '<h3>3. Publish and respond</h3><p>Buyers can reach you by call, WhatsApp or chat, and can make offers. Respond quickly to close the sale.</p>' +
         '<h3>Pricing tips</h3><ul><li>Check similar listings to set a realistic price.</li><li>Mark as negotiable if you’re flexible — it attracts more offers.</li><li>Include what’s in the box (charger, batteries, warranty) to justify your price.</li></ul>' +
         '<div class="mt16"><a class="btn btn-primary" data-nav="#/sell">Start selling</a></div>'
@@ -2957,7 +2975,7 @@
     'help': {
       title: 'Help', hero: 'Help & Support', sub: 'Everything you need to get the most from Lanka Lens.',
       body: '<p class="lead">Browse the topics below or contact us if you still need a hand.</p>' +
-        '<h3>Posting a listing</h3><ul><li>Tap the orange + button, choose a category and fill in the details.</li><li>Add up to 15 photos — your first photo is the cover image.</li><li>Set a price in Sri Lankan Rupees (LKR).</li></ul>' +
+        '<h3>Posting a listing</h3><ul><li>Tap the orange + button, choose a category and fill in the details.</li><li>Add up to 3 photos — your first photo is the cover image.</li><li>Set a price in Sri Lankan Rupees (LKR).</li></ul>' +
         '<h3>Buying</h3><ul><li>Use search or browse by category, brand and location.</li><li>Contact sellers by Call, WhatsApp or Chat from any listing.</li><li>Save listings with the heart icon to find them again in Favorites.</li></ul>' +
         '<h3>Account</h3><ul><li>Update your name, phone and location in Settings.</li><li>Manage your ads in My Ads — mark items as sold or delete them.</li><li>Track offers in My Offers.</li></ul>' +
         '<h3>Still stuck?</h3><p>Email hello@lankalens.lk or use the contact form.</p>'
