@@ -17,6 +17,108 @@
   function icon(name, cls) {
     return '<ion-icon name="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></ion-icon>';
   }
+
+  /* ---------- shared loading / empty / error states ----------
+     Every API-driven section renders one of these blocks, so a slow, failed or
+     empty request can never leave the UI stuck on a spinner or silently blank.
+     renderAsync() wires them up (including the retry button) in one place. */
+  function loadingHtml(msg) {
+    return '<div class="state-block state-loading"><div class="spinner"></div>' +
+      (msg ? '<p>' + esc(msg) + '</p>' : '') + '</div>';
+  }
+  function emptyHtml(msg, sub, iconName) {
+    return '<div class="state-block state-empty"><div class="e-icon">' + icon(iconName || 'file-tray-outline') + '</div>' +
+      '<h3>' + esc(msg || 'Nothing here yet') + '</h3>' + (sub ? '<p>' + esc(sub) + '</p>' : '') + '</div>';
+  }
+  function errorHtml(msg, retryLabel, iconName) {
+    return '<div class="state-block state-error"><div class="e-icon err">' + icon(iconName || 'cloud-offline-outline') + '</div>' +
+      '<h3>Could not load this</h3><p>' + esc(msg || 'Something went wrong.') + '</p>' +
+      '<button class="btn btn-outline btn-sm" type="button" data-state-retry>' +
+      icon('refresh-outline') + esc(retryLabel || 'Try again') + '</button></div>';
+  }
+
+  /**
+   * Background calls whose failure must not blank the UI (telemetry pings,
+   * favourite-id sync, share sheet, logout). They used to end in an empty
+   * .catch(function () {}) — the error vanished completely, which made "why is
+   * this section empty?" undiagnosable. These are recorded on state and logged,
+   * so nothing fails silently.
+   */
+  function logNonCritical(what) {
+    return function (e) {
+      state.softErrors.push({ what: what, message: (e && e.message) || String(e || ''), at: Date.now() });
+      if (state.softErrors.length > 20) state.softErrors.shift();
+      try { if (window.console && console.warn) console.warn('[LankaLens] ' + what + ' failed:', (e && e.message) || e); } catch (ignore) { /* no console */ }
+    };
+  }
+
+  /**
+   * Run a mutation (delete / renew / accept / block / save…) and always tell the
+   * user the outcome. These used to be bare api.post(...).then(...) chains: when
+   * the request failed nothing happened at all — no toast, no state change — so
+   * a click looked like the app had ignored it.
+   * Returns a promise that resolves to the payload, or null on failure.
+   */
+  function act(promise, successMsg, done, fail) {
+    return promise.then(function (r) {
+      if (successMsg) toast(successMsg, 'success');
+      if (done) done(r);
+      return r;
+    }, function (e) {
+      var msg = (e && e.message) ? e.message : 'That did not work. Please try again.';
+      toast(msg, 'error');
+      logNonCritical(successMsg || 'action')(e);
+      if (fail) fail(e);
+      return null;
+    });
+  }
+
+  /**
+   * Load data into a container with explicit loading / success / empty / error
+   * states. opts:
+   *   into        selector of the container to fill
+   *   load        function returning a Promise of the data (re-run on retry)
+   *   render      function(data) -> html for the success state
+   *   isEmpty     function(data) -> bool (default: falsy or zero-length)
+   *   emptyText / emptySub / emptyIcon   empty-state copy
+   *   loadingText                          loading-state copy (null to skip)
+   *   retryLabel                           error-state button copy
+   *   onRender / onEmpty / onError         post-render hooks(el, data|error)
+   */
+  function renderAsync(opts) {
+    var el = $(opts.into);
+    if (!el) return;
+    if (opts.loadingText !== null) el.innerHTML = loadingHtml(opts.loadingText || 'Loading…');
+    var req;
+    try {
+      req = opts.load();
+    } catch (e) {
+      fail(el, opts, e);
+      return;
+    }
+    if (!req || typeof req.then !== 'function') return;
+    req.then(function (data) {
+      var target = $(opts.into);
+      if (!target) return;
+      var empty = opts.isEmpty ? opts.isEmpty(data) : (!data || !data.length);
+      if (empty) {
+        target.innerHTML = opts.emptyHtml || emptyHtml(opts.emptyText, opts.emptySub, opts.emptyIcon);
+        if (opts.onEmpty) opts.onEmpty(target, data);
+        return;
+      }
+      target.innerHTML = opts.render(data);
+      if (opts.onRender) opts.onRender(target, data);
+    }).catch(function (e) { fail($(opts.into), opts, e); });
+
+    function fail(target, o, e) {
+      if (!target) return;
+      var msg = (e && e.message) ? e.message : 'Something went wrong.';
+      target.innerHTML = errorHtml(msg, o.retryLabel, o.errorIcon);
+      var btn = target.querySelector('[data-state-retry]');
+      if (btn) btn.addEventListener('click', function () { renderAsync(o); });
+      if (o.onError) o.onError(target, e);
+    }
+  }
   function fmtLKR(n) {
     return 'Rs. ' + Number(n || 0).toLocaleString('en-LK');
   }
@@ -127,6 +229,7 @@
     locations: null,
     favIds: [],
     sessionRestored: false,
+    softErrors: [],
     route: { path: '/', query: new URLSearchParams() }
   };
 
@@ -280,6 +383,39 @@
     state.favIds = [];
   }
 
+  /**
+   * Metadata (categories / brands / conditions) used by the sell wizard, the
+   * browse filters and the home grid. Boot normally loads it, but any view that
+   * needs it must be able to fetch it on demand: a failed or still-pending /meta
+   * call used to render those pages completely empty (e.g. "Choose a Category"
+   * with no categories to choose).
+   */
+  var metaInFlight = null;
+  function ensureMeta() {
+    if (state.meta && state.meta.categories && state.meta.categories.length) return Promise.resolve(state.meta);
+    if (!metaInFlight) {
+      metaInFlight = api.get('/meta').then(function (d) {
+        state.meta = d || state.meta;
+        metaInFlight = null;
+        return state.meta;
+      }, function (e) { metaInFlight = null; throw e; });
+    }
+    return metaInFlight;
+  }
+
+  /**
+   * Run a search. An empty term browses everything instead of doing nothing,
+   * and re-running the same term re-queries (a plain hash assignment would not
+   * fire hashchange, so the page would appear to ignore the click).
+   */
+  function goSearch(q) {
+    q = String(q == null ? '' : q).trim();
+    var target = '#/browse' + (q ? '?q=' + encodeURIComponent(q) : '');
+    if (location.hash === target) render();
+    else location.hash = target;
+    return target;
+  }
+
   function requireAuth() {
     if (state.user) return true;
     // Don't bounce to the sign-in page while the stored session is still being
@@ -296,7 +432,7 @@
   }
   function refreshFavIds() {
     if (state.user) {
-      api.get('/favorites/ids').then(function (ids) { state.favIds = ids || []; }).catch(function () {});
+      api.get('/favorites/ids').then(function (ids) { state.favIds = ids || []; }).catch(logNonCritical('favourite sync'));
     } else {
       state.favIds = [];
     }
@@ -452,10 +588,13 @@
       '</div></div>';
   }
 
-  function listingGrid(items) {
+  function listingGrid(items, q) {
     if (!items || !items.length) {
-      return '<div class="empty"><div class="e-icon">' + icon('camera-outline') + '</div>' +
-        '<h3>No listings found</h3><p>Try a different search, or be the first to post in this category.</p></div>';
+      return '<div class="empty"><div class="e-icon">' + icon('search-outline') + '</div>' +
+        '<h3>' + (q ? 'No results for “' + esc(q) + '”' : 'No listings found') + '</h3>' +
+        '<p>' + (q
+          ? 'Check the spelling, try fewer words, or search a broader term like “Canon”, “lens” or “drone”.'
+          : 'Try a different search, or be the first to post in this category.') + '</p></div>';
     }
     return '<div class="listing-grid">' + items.map(lcard).join('') + '</div>';
   }
@@ -500,24 +639,25 @@
       '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." aria-label="Search">' +
       '<button type="submit">Search</button></form>';
 
-    var cats = (state.meta && state.meta.categories) || [];
     var sections = '';
     sections += '<div class="section"><div class="section-head"><h2>' + icon('grid-outline') + 'Browse Categories</h2>' +
-      '<a class="more" data-nav="#/categories">View all</a></div><div class="cat-grid">' + cats.map(catTile).join('') + '</div></div>';
+      '<a class="more" data-nav="#/categories">View all</a></div><div id="home-cats">' + loadingHtml('Loading categories…') + '</div></div>';
 
-    sections += '<div class="section" id="home-featured"></div>';
-    sections += '<div class="section" id="home-latest"></div>';
+    sections += '<div class="section" id="home-featured"><div class="section-head"><h2>' + icon('flash-outline') + 'Featured Listings</h2>' +
+      '<a class="more" data-nav="#/browse">View all</a></div><div id="home-featured-body">' + loadingHtml('Loading listings…') + '</div></div>';
+    sections += '<div class="section" id="home-latest"><div class="section-head"><h2>' + icon('time-outline') + 'Latest Listings</h2>' +
+      '<a class="more" data-nav="#/browse">View all</a></div><div id="home-latest-body">' + loadingHtml('Loading listings…') + '</div></div>';
 
     sections += '<div class="section"><div class="section-head"><h2>' + icon('star-outline') + 'Popular Brands</h2></div>' +
-      '<div class="chips" style="padding:0 16px">' + (state.meta ? state.meta.brands.slice(0, 12).map(function (b) {
-        return '<a class="chip" data-nav="#/browse?q=' + encodeURIComponent(b) + '">' + esc(b) + '</a>';
-      }).join('') : '') + '</div></div>';
+      '<div id="home-brands">' + loadingHtml() + '</div></div>';
 
     sections += promoBanner('cart-outline', 'Find a Camera Shop', 'Authorised dealers and trusted local shops across the island.', '#/shops');
     sections += promoBanner('shield-checkmark', 'Buy & Sell Safely', 'Our tips to avoid scams and meet sellers safely.', '#/safety');
 
-    sections += '<div class="section" id="home-shops"></div>';
-    sections += '<div class="section" id="home-posts"></div>';
+    sections += '<div class="section" id="home-shops"><div class="section-head"><h2>' + icon('cart-outline') + 'Camera Shops</h2>' +
+      '<a class="more" data-nav="#/shops">View all</a></div><div id="home-shops-body">' + loadingHtml('Loading camera shops…') + '</div></div>';
+    sections += '<div class="section" id="home-posts"><div class="section-head"><h2>' + icon('reader-outline') + 'Buying Guides</h2>' +
+      '<a class="more" data-nav="#/blog">View all</a></div><div id="home-posts-body">' + loadingHtml('Loading guides…') + '</div></div>';
 
     return {
       html: stats + sections + footer(),
@@ -525,34 +665,70 @@
         var f = $('#home-search');
         if (f) f.addEventListener('submit', function (e) {
           e.preventDefault();
-          var q = $('input', f).value.trim();
-          location.hash = '#/browse?q=' + encodeURIComponent(q);
+          var input = $('input', f);
+          var q = (input ? input.value : '').trim();
+          goSearch(q);
         });
-        api.get('/listings?featured=1').then(function (d) {
-          var el = $('#home-featured');
-          if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('flash-outline') + 'Featured Listings</h2><a class="more" data-nav="#/browse">View all</a></div>' +
-            '<div class="hscroll">' + (d.items || []).slice(0, 8).map(lcard).join('') + '</div>';
-        }).catch(function () {});
-        api.get('/listings?sort=newest').then(function (d) {
-          var el = $('#home-latest');
-          if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('time-outline') + 'Latest Listings</h2><a class="more" data-nav="#/browse">View all</a></div>' +
-            '<div class="hscroll">' + (d.items || []).slice(0, 8).map(lcard).join('') + '</div>';
-        }).catch(function () {});
-        api.get('/businesses').then(function (shops) {
-          var el = $('#home-shops');
-          if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('cart-outline') + 'Camera Shops</h2><a class="more" data-nav="#/shops">View all</a></div>' +
-            '<div class="hscroll">' + (shops || []).slice(0, 5).map(shopCardSmall).join('') + '</div>';
-        }).catch(function () {});
-        api.get('/posts').then(function (posts) {
-          var el = $('#home-posts');
-          if (el) el.innerHTML = '<div class="section-head"><h2>' + icon('reader-outline') + 'Buying Guides</h2><a class="more" data-nav="#/blog">View all</a></div>' +
-            '<div class="hscroll">' + (posts || []).slice(0, 4).map(function (p) {
+
+        renderAsync({
+          into: '#home-cats',
+          load: function () { return ensureMeta().then(function (m) { return m.categories; }); },
+          isEmpty: function (c) { return !c || !c.length; },
+          emptyText: 'No categories available',
+          emptySub: 'Check your connection and reload.',
+          retryLabel: 'Reload categories',
+          render: function (c) { return '<div class="cat-grid">' + c.map(catTile).join('') + '</div>'; }
+        });
+
+        renderAsync({
+          into: '#home-brands',
+          load: function () { return ensureMeta().then(function (m) { return (m.brands || []).slice(0, 12); }); },
+          isEmpty: function (b) { return !b || !b.length; },
+          emptyText: 'No brands yet',
+          render: function (b) {
+            return '<div class="chips" style="padding:0 16px">' + b.map(function (n) {
+              return '<a class="chip" data-nav="#/browse?q=' + encodeURIComponent(n) + '">' + esc(n) + '</a>';
+            }).join('') + '</div>';
+          }
+        });
+
+        function listingStrip(sel, url, emptyText) {
+          renderAsync({
+            into: sel,
+            load: function () { return api.get(url); },
+            isEmpty: function (d) { return !d || !(d.items || []).length; },
+            emptyText: emptyText,
+            emptySub: 'New gear shows up here as soon as it is listed.',
+            render: function (d) { return '<div class="hscroll">' + (d.items || []).slice(0, 8).map(lcard).join('') + '</div>'; }
+          });
+        }
+        listingStrip('#home-featured-body', '/listings?featured=1', 'No featured listings yet');
+        listingStrip('#home-latest-body', '/listings?sort=newest', 'No listings yet');
+
+        renderAsync({
+          into: '#home-shops-body',
+          load: function () { return api.get('/businesses'); },
+          isEmpty: function (s) { return !s || !s.length; },
+          emptyText: 'No trusted camera shops yet',
+          emptySub: 'Shops appear here once they register as business sellers.',
+          retryLabel: 'Reload shops',
+          render: function (s) { return '<div class="hscroll">' + s.slice(0, 5).map(shopCardSmall).join('') + '</div>'; }
+        });
+
+        renderAsync({
+          into: '#home-posts-body',
+          load: function () { return api.get('/posts'); },
+          isEmpty: function (p) { return !p || !p.length; },
+          emptyText: 'No guides published yet',
+          render: function (posts) {
+            return '<div class="hscroll">' + posts.slice(0, 4).map(function (p) {
               return '<div class="lcard card-sm" data-nav="#/blog/' + esc(p.slug) + '">' +
                 '<div class="thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="">' : '<span class="ph">' + icon('reader-outline') + '</span>') + '</div>' +
                 '<div class="body"><div class="title" style="min-height:auto">' + esc(p.title) + '</div>' +
                 '<div class="meta"><span>' + esc(p.category || 'Guide') + '</span><span class="sep">·</span><span>' + fmtDate(p.created_at) + '</span></div></div></div>';
             }).join('') + '</div>';
-        }).catch(function () {});
+          }
+        });
       }
     };
   };
@@ -587,48 +763,96 @@
   }
 
   views.categories = function () {
-    var cats = (state.meta && state.meta.categories) || [];
     var html = fullHeader('Categories', { right: '<button class="icon-btn" data-nav="#/search">' + icon('search-outline') + '</button>' });
-    html += '<div class="section" style="padding-top:14px"><div class="cat-grid">' + cats.map(catTile).join('') + '</div></div>';
-    html += '<div class="section"><div class="section-head"><h2>' + icon('layers-outline') + 'Browse by Type</h2></div></div>';
-    cats.forEach(function (c) {
-      html += '<div class="divider-label">' + esc(c.name) + '</div><div class="subcats" style="padding:0 16px 6px">' +
-        (c.children || []).map(function (s) {
-          return '<a class="chip" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
-        }).join('') + '</div>';
-    });
+    html += '<div class="section" style="padding-top:14px"><div id="cats-grid">' + loadingHtml('Loading categories…') + '</div></div>';
+    html += '<div class="section"><div class="section-head"><h2>' + icon('layers-outline') + 'Browse by Type</h2></div>' +
+      '<div id="cats-types">' + loadingHtml() + '</div></div>';
     html += '<div style="height:12px"></div>';
-    return { html: html, mount: function () {} };
+    return {
+      html: html,
+      mount: function () {
+        function loadCats() { return ensureMeta().then(function (m) { return m.categories; }); }
+        var states = {
+          isEmpty: function (c) { return !c || !c.length; },
+          emptyText: 'No categories available',
+          emptySub: 'Check your connection and reload.',
+          retryLabel: 'Reload categories'
+        };
+        renderAsync(Object.assign({
+          into: '#cats-grid', load: loadCats,
+          render: function (cats) { return '<div class="cat-grid">' + cats.map(catTile).join('') + '</div>'; }
+        }, states));
+        renderAsync(Object.assign({
+          into: '#cats-types', load: loadCats,
+          render: function (cats) {
+            return cats.map(function (c) {
+              return '<div class="divider-label">' + esc(c.name) + '</div><div class="subcats" style="padding:0 16px 6px">' +
+                (c.children || []).map(function (s) {
+                  return '<a class="chip" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
+                }).join('') + '</div>';
+            }).join('');
+          }
+        }, states));
+      }
+    };
   };
 
   views.category = function (params) {
     var slug = params.slug;
-    var cats = (state.meta && state.meta.categories) || [];
-    var found = null;
-    cats.forEach(function (c) { (c.children || []).forEach(function (s) { if (s.slug === slug) found = { parent: c, sub: s }; }); });
-    var name = found ? found.sub.name : 'Category';
+    var known = findSub(slug);
+    var name = known ? known.sub.name : 'Category';
     var html = header(name, {});
-    html += '<div class="subcats" style="padding-top:12px">' +
-      '<a class="chip" data-nav="#/browse?category=' + esc(found ? found.parent.slug : slug) + '">All ' + esc(found ? found.parent.name : name) + '</a>' +
-      (found ? found.parent.children.map(function (s) {
-        return '<a class="chip' + (s.slug === slug ? ' active' : '') + '" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
-      }).join('') : '') + '</div>';
+    html += '<div class="subcats" id="cat-siblings" style="padding-top:12px">' + (known ? siblingsHtml(known, slug) : '') + '</div>';
     html += '<div class="section" style="padding-top:12px"><div class="section-head"><h2>' + icon('grid-outline') + 'Listings</h2>' +
       '<span class="muted fs12" id="cat-count"></span></div></div>';
-    html += '<div id="cat-results">' + '<div class="spinner"></div>' + '</div>';
+    html += '<div id="cat-results">' + loadingHtml('Loading listings…') + '</div>';
     return {
       html: html,
       mount: function () {
-        api.get('/listings?subcategory=' + encodeURIComponent(slug)).then(function (d) {
-          var el = $('#cat-count'); if (el) el.textContent = d.total + ' found';
-          var r = $('#cat-results');
-          if (r) r.innerHTML = listingGrid(d.items);
-        }).catch(function (e) {
-          var r = $('#cat-results'); if (r) r.innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>';
+        // Resolve the category names too, so a deep link works even when /meta
+        // had not loaded before the first render.
+        ensureMeta().then(function () {
+          var found = findSub(slug) || findParent(slug);
+          var t = $('.app-header .title');
+          if (t && found) t.textContent = found.sub ? found.sub.name : found.name;
+          var sib = $('#cat-siblings');
+          if (sib && found) sib.innerHTML = siblingsHtml(found, slug);
+        }).catch(logNonCritical('category header'));
+
+        renderAsync({
+          into: '#cat-results',
+          // category= matches a sub-category AND everything under a parent, so
+          // the home "Browse Categories" tiles (which link to parent slugs like
+          // #/category/cameras) list gear instead of an empty page.
+          load: function () { return api.get('/listings?category=' + encodeURIComponent(slug)); },
+          isEmpty: function (d) { return !d || !(d.items || []).length; },
+          emptyText: 'No listings in this category yet',
+          emptySub: 'Be the first to post here — it takes about a minute.',
+          retryLabel: 'Reload listings',
+          render: function (d) {
+            var c = $('#cat-count'); if (c) c.textContent = (d.total || 0) + ' found';
+            return listingGrid(d.items);
+          },
+          onError: function () { var c = $('#cat-count'); if (c) c.textContent = ''; }
         });
       }
     };
   };
+
+  function findParent(slug) {
+    var cats = (state.meta && state.meta.categories) || [];
+    for (var i = 0; i < cats.length; i++) if (cats[i].slug === slug) return cats[i];
+    return null;
+  }
+
+  function siblingsHtml(found, slug) {
+    var parent = found.sub ? found.parent : found;
+    var kids = parent.children || [];
+    return '<a class="chip" data-nav="#/browse?category=' + esc(parent.slug) + '">All ' + esc(parent.name) + '</a>' +
+      kids.map(function (s) {
+        return '<a class="chip' + (s.slug === slug ? ' active' : '') + '" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
+      }).join('');
+  }
 
   views.browse = function (query) {
     var q = query.get('q') || '';
@@ -676,36 +900,57 @@
           qs.set('sort', filters.sort);
           return qs;
         }
+        function moreButton(d) {
+          var m = $('#browse-more');
+          if (!m) return;
+          m.innerHTML = (filters.page < (d.pages || 1))
+            ? '<button class="btn btn-outline btn-sm" id="load-more">Load more</button>' : '';
+          var lm = $('#load-more');
+          if (lm) lm.addEventListener('click', function () { filters.page++; loadMore(); });
+        }
         function load() {
           filters.page = 1;
           var qs = buildQuery();
-          $('#browse-results').innerHTML = '<div class="spinner"></div>';
+          var r0 = $('#browse-results');
+          if (r0) r0.innerHTML = loadingHtml('Searching listings…');
+          var c0 = $('#browse-count'); if (c0) c0.textContent = '';
           api.get('/listings?' + qs.toString()).then(function (d) {
-            var c = $('#browse-count'); if (c) c.textContent = d.total + ' found';
+            d = d || {};
+            var c = $('#browse-count'); if (c) c.textContent = (d.total || 0) + ' found';
+            var r = $('#browse-results');
+            if (r) r.innerHTML = listingGrid(d.items, filters.q);
+            moreButton(d);
+            renderActiveChips();
+          }).catch(function (e) {
+            var c = $('#browse-count'); if (c) c.textContent = '';
             var r = $('#browse-results');
             if (r) {
-              if (filters.page === 1) r.innerHTML = listingGrid(d.items);
+              r.innerHTML = errorHtml((e && e.message) || 'Search failed.', 'Search again');
+              var btn = r.querySelector('[data-state-retry]');
+              if (btn) btn.addEventListener('click', function () { load(); });
             }
-            var m = $('#browse-more');
-            if (m) m.innerHTML = (filters.page < d.pages)
-              ? '<button class="btn btn-outline btn-sm" id="load-more">Load more</button>' : '';
-            var lm = $('#load-more');
-            if (lm) lm.addEventListener('click', function () { filters.page++; loadMore(); });
-            renderActiveChips();
-          }).catch(function (e) { $('#browse-results').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+            var m = $('#browse-more'); if (m) m.innerHTML = '';
+          });
         }
         function loadMore() {
           var qs = buildQuery();
           qs.set('page', filters.page);
+          var m0 = $('#browse-more');
+          if (m0) m0.innerHTML = '<div class="spinner spinner-sm"></div>';
           api.get('/listings?' + qs.toString()).then(function (d) {
             var r = $('#browse-results');
-            var grid = r.querySelector('.listing-grid');
-            if (grid) grid.insertAdjacentHTML('beforeend', d.items.map(lcard).join(''));
+            var grid = r ? r.querySelector('.listing-grid') : null;
+            if (grid) grid.insertAdjacentHTML('beforeend', (d.items || []).map(lcard).join(''));
+            moreButton(d);
+          }).catch(function (e) {
+            filters.page = Math.max(1, filters.page - 1);   // let the user retry the same page
             var m = $('#browse-more');
-            if (m) m.innerHTML = (filters.page < d.pages)
-              ? '<button class="btn btn-outline btn-sm" id="load-more">Load more</button>' : '';
-            var lm = $('#load-more');
-            if (lm) lm.addEventListener('click', function () { filters.page++; loadMore(); });
+            if (m) {
+              m.innerHTML = '<div class="state-block state-error compact"><p>' + esc((e && e.message) || 'Could not load more listings.') + '</p>' +
+                '<button class="btn btn-outline btn-sm" type="button" id="load-more-retry">' + icon('refresh-outline') + 'Retry</button></div>';
+              var btn = $('#load-more-retry');
+              if (btn) btn.addEventListener('click', function () { filters.page++; loadMore(); });
+            }
           });
         }
         function renderActiveChips() {
@@ -867,9 +1112,8 @@
       '<div class="search-hero" style="margin:0"><span>' + icon('search-outline') + '</span>' +
       '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." autofocus>' +
       '<button type="submit">Search</button></div></form></div>';
-    var cats = (state.meta && state.meta.categories) || [];
     html += '<div class="section"><div class="section-head"><h2>' + icon('grid-outline') + 'Search by Category</h2></div>' +
-      '<div class="cat-grid">' + cats.map(catTile).join('') + '</div></div>';
+      '<div id="search-cats">' + loadingHtml('Loading categories…') + '</div></div>';
     html += '<div class="section"><div class="section-head"><h2>' + icon('trending-up-outline') + 'Popular Searches</h2></div>' +
       '<div class="chips" style="padding:0 16px">' +
       ['Sony A7 III', 'Canon 50mm', 'GoPro', 'DJI Mini', 'Fujifilm', 'Sigma lens', 'Tripod', 'Gimbal'].map(function (s) {
@@ -878,10 +1122,23 @@
     return {
       html: html,
       mount: function () {
-        $('#search-form').addEventListener('submit', function (e) {
-          e.preventDefault();
-          var q = $('input', this).value.trim();
-          if (q) location.hash = '#/browse?q=' + encodeURIComponent(q);
+        var form = $('#search-form');
+        if (form) {
+          form.addEventListener('submit', function (e) {
+            e.preventDefault();
+            var input = $('input', form);
+            // Empty searches browse everything instead of silently doing nothing.
+            goSearch(input ? input.value : '');
+          });
+        }
+        renderAsync({
+          into: '#search-cats',
+          load: function () { return ensureMeta().then(function (m) { return m.categories; }); },
+          isEmpty: function (c) { return !c || !c.length; },
+          emptyText: 'No categories available',
+          emptySub: 'Use the search box above, or try a popular search.',
+          retryLabel: 'Reload categories',
+          render: function (c) { return '<div class="cat-grid">' + c.map(catTile).join('') + '</div>'; }
         });
       }
     };
@@ -1003,7 +1260,7 @@
     });
 
     function recordContact(kind) {
-      api.post('/listings/' + l.id + '/contact', { kind: kind }).catch(function () {});
+      api.post('/listings/' + l.id + '/contact', { kind: kind }).catch(logNonCritical('contact analytics'));
     }
     if ($('#btn-chat')) $('#btn-chat').addEventListener('click', function () {
       recordContact('chat');
@@ -1037,7 +1294,13 @@
   function shareListing(l) {
     var url = location.origin + location.pathname + '#/ads/' + l.id;
     if (navigator.share) {
-      navigator.share({ title: l.title, text: l.title + ' — ' + fmtLKR(l.price), url: url }).catch(function () {});
+      navigator.share({ title: l.title, text: l.title + ' — ' + fmtLKR(l.price), url: url })
+        .catch(function (e) {
+          // Dismissing the share sheet is not an error; anything else is worth recording.
+          if (e && (e.name === 'AbortError' || e.name === 'NotAllowedError')) return;
+          logNonCritical('share')(e);
+          toast('Could not open the share sheet', 'error');
+        });
     } else if (navigator.clipboard) {
       navigator.clipboard.writeText(url).then(function () { toast('Link copied', 'success'); }).catch(function () { toast('Could not copy link', 'error'); });
     } else {
@@ -1072,18 +1335,45 @@
   }
 
   views.sell = function () {
-    var cats = (state.meta && state.meta.categories) || [];
     var html = header('Sell Your Camera', {});
-    html += '<div class="section" style="padding-top:14px"><div class="section-head"><h2>' + icon('add-circle-outline') + 'Choose a Category</h2></div></div>';
-    cats.forEach(function (c) {
-      html += '<div class="divider-label">' + esc(c.name) + '</div>';
-      html += '<div class="subcats" style="padding:0 16px 8px">' + (c.children || []).map(function (s) {
-        return '<a class="chip" data-nav="#/sell/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
-      }).join('') + '</div>';
-    });
+    html += '<div class="section" style="padding-top:14px"><div class="section-head"><h2>' + icon('add-circle-outline') + 'Choose a Category</h2></div>' +
+      '<p class="form-hint" style="padding:0 16px 4px">Pick what you are selling — the next steps adapt to it (a lens asks for mount and aperture, a drone for flight time and batteries).</p></div>';
+    html += '<div id="sell-cats">' + loadingHtml('Loading categories…') + '</div>';
     html += '<div style="height:12px"></div>';
-    return { html: html, mount: function () {} };
+    return { html: html, mount: loadSellCategories };
   };
+
+  /**
+   * Category list for the Post Ad entry page. Loaded on demand from the API so
+   * the page works even when /meta failed or had not resolved at first render
+   * (that used to show the heading and nothing to click).
+   */
+  function sellCatsHtml(cats) {
+    var out = '';
+    cats.forEach(function (c) {
+      var kids = c.children || [];
+      out += '<div class="divider-label">' + esc(c.name) + '</div>';
+      out += '<div class="subcats" style="padding:0 16px 8px">' + (kids.length
+        ? kids.map(function (s) {
+            return '<a class="chip" role="button" tabindex="0" data-nav="#/sell/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
+          }).join('')
+        : '<a class="chip" role="button" tabindex="0" data-nav="#/sell/' + esc(c.slug) + '">' + esc(c.name) + '</a>') + '</div>';
+    });
+    return out;
+  }
+
+  function loadSellCategories() {
+    renderAsync({
+      into: '#sell-cats',
+      load: function () { return ensureMeta().then(function (m) { return m.categories; }); },
+      isEmpty: function (c) { return !c || !c.length; },
+      emptyText: 'No categories available',
+      emptySub: 'Categories come from the server. Check the connection and try again.',
+      emptyIcon: 'alert-circle-outline',
+      retryLabel: 'Reload categories',
+      render: sellCatsHtml
+    });
+  }
 
   /* ============================================================
      Multi-step post-an-ad wizard (also powers edit)
@@ -1113,6 +1403,7 @@
     var edit = initial.edit || null;
     var wz = {
       step: 0,
+      submitting: false,
       cat: initial.cat || null,
       title: edit ? edit.title : '',
       price: edit ? String(edit.price || '') : '',
@@ -1318,27 +1609,34 @@
 
     function readStep() {
       var i = wz.step;
+      var root = $('#wizard-root');
+      if (!root) return;
+      function val(sel) { var el = $(sel, root); return el ? el.value : ''; }
+      function checked(sel) { var el = $(sel, root); return el ? !!el.checked : false; }
       if (i === 0) {
-        $$('[data-spec]', $('#wizard-root')).forEach(function (inp) { wz.specs[inp.getAttribute('data-spec')] = inp.value; });
+        $$('[data-spec]', root).forEach(function (inp) { wz.specs[inp.getAttribute('data-spec')] = inp.value.trim(); });
       } else if (i === 1) {
-        $$('[data-spec]', $('#wizard-root')).forEach(function (inp) { if (inp.value) wz.specs[inp.getAttribute('data-spec')] = inp.value; });
+        // Store every value (including cleared ones) so editing an ad can remove
+        // a spec instead of silently keeping the old value.
+        $$('[data-spec]', root).forEach(function (inp) {
+          var v = inp.value.trim();
+          var key = inp.getAttribute('data-spec');
+          if (v) wz.specs[key] = v; else delete wz.specs[key];
+        });
       } else if (i === 2) {
         // condition handled via click handlers
       } else if (i === 3) {
-        wz.price = $('#wz-price').value.trim();
-        wz.negotiable = $('#wz-neg').checked;
+        wz.price = val('#wz-price').trim();
+        wz.negotiable = checked('#wz-neg');
       } else if (i === 4) {
-        wz.title = $('#wz-title').value.trim();
-        wz.description = $('#wz-desc').value.trim();
+        wz.title = val('#wz-title').trim();
+        wz.description = val('#wz-desc').trim();
       } else if (i === 6) {
-        var p = $('#wizard-root').querySelector('[data-loc="province"]');
-        var d = $('#wizard-root').querySelector('[data-loc="district"]');
-        var c = $('#wizard-root').querySelector('[data-loc="city"]');
-        wz.province = p ? p.value : '';
-        wz.district = d ? d.value : '';
-        wz.city = c ? c.value : '';
+        wz.province = val('[data-loc="province"]');
+        wz.district = val('[data-loc="district"]');
+        wz.city = val('[data-loc="city"]');
       } else if (i === 7) {
-        wz.contact = { phone: $('#wz-phone').checked, whatsapp: $('#wz-wa').checked, chat: $('#wz-chat').checked };
+        wz.contact = { phone: checked('#wz-phone'), whatsapp: checked('#wz-wa'), chat: checked('#wz-chat') };
       }
     }
 
@@ -1411,13 +1709,42 @@
       });
     }
 
+    /** Validate every required field, not just the visible step. */
+    function validateAll() {
+      if (!wz.cat || !wz.cat.sub) return { step: -1, msg: 'Please choose a category' };
+      if (field('model') && !(wz.specs.model || '').trim()) return { step: 0, msg: 'Please enter the model' };
+      var bad = fields().filter(function (f) { return f.required && !String(wz.specs[f.name] == null ? '' : wz.specs[f.name]).trim(); });
+      if (bad.length) return { step: (bad[0].name === 'brand' || bad[0].name === 'model' || bad[0].name === 'year') ? 0 : 1, msg: 'Please fill in ' + bad[0].label };
+      if (!wz.condition) return { step: 2, msg: 'Please choose a condition' };
+      if (!wz.price || parseInt(wz.price, 10) <= 0) return { step: 3, msg: 'Please enter a valid price' };
+      if (!wz.title.trim()) return { step: 4, msg: 'Please add a title' };
+      if (!wz.province || !wz.district) return { step: 6, msg: 'Please choose a location' };
+      return null;
+    }
+
     function submit(status) {
+      if (wz.submitting) return;                 // ignore double clicks / double taps
       readStep();
-      var problem = validate();
-      if (status === 'active' && problem) return toast(problem, 'error');
-      var btn = $('#wz-publish') || $('#wz-draft');
+      var problem = validateAll();
+      if (problem) {
+        toast(problem.msg, 'error');
+        if (problem.step >= 0 && problem.step !== wz.step) { wz.step = problem.step; render(); window.scrollTo(0, 0); }
+        return;
+      }
+      var buttons = [$$('#wizard-root #wz-publish'), $$('#wizard-root #wz-draft')];
+      buttons = Array.prototype.concat.apply([], buttons).filter(Boolean);
+      function setBusy(on) {
+        wz.submitting = on;
+        buttons.forEach(function (b) { b.disabled = on; });
+        var pub = $('#wz-publish');
+        if (pub) pub.innerHTML = on
+          ? '<div class="spinner spinner-sm"></div>' + esc(status === 'draft' ? 'Saving…' : 'Publishing…')
+          : icon('checkmark-circle-outline') + esc(edit ? 'Save Changes' : 'Publish Listing');
+      }
+      setBusy(true);
+
       var files = wz.images.filter(function (it) { return it.file; }).map(function (it) { return it.file; });
-      function enable() { if (btn) { btn.disabled = false; } }
+
       function finish(uploadedUrls) {
         var idx = 0;
         var imgs = wz.images.map(function (it) { return it.file ? uploadedUrls[idx++] : it.url; });
@@ -1432,13 +1759,14 @@
           specs: wz.specs, images: imgs,
           contact_prefs: wz.contact, status: status
         };
-        if (btn) { btn.disabled = true; }
         var req = edit ? api.patch('/listings/' + edit.id, payload) : api.post('/listings', payload);
         req.then(function (r) {
           toast(status === 'draft' ? 'Draft saved' : (edit ? 'Listing updated' : 'Listing published!'), 'success');
-          location.hash = status === 'draft' ? '#/my-ads' : '#/ads/' + r.id;
-        }).catch(function (er) { toast(er.message, 'error'); enable(); });
+          setBusy(false);
+          location.hash = status === 'draft' ? '#/my-ads' : '#/ads/' + ((r && r.id) || '');
+        }).catch(function (er) { toast(er.message, 'error'); setBusy(false); });
       }
+
       if (files.length) {
         var fd = new FormData();
         files.forEach(function (f) { fd.append('files', f); });
@@ -1446,9 +1774,9 @@
           .then(function (r) { return r.json(); })
           .then(function (d) {
             if (!d.ok) throw new Error(d.error || 'Upload failed');
-            finish(d.data.items.map(function (x) { return x.url; }));
+            finish((d.data.items || []).map(function (x) { return x.url; }));
           })
-          .catch(function (er) { toast(er.message, 'error'); enable(); });
+          .catch(function (er) { toast(er.message, 'error'); setBusy(false); });
       } else finish([]);
     }
 
@@ -1464,9 +1792,34 @@
 
   views.sellForm = function (params) {
     if (!requireAuth()) return { html: '' };
-    var found = findSub(params.slug);
-    if (!found) { location.hash = '#/sell'; return { html: '' }; }
-    return listingWizardView(listingWizard({ cat: found }));
+    // Categories must be resolved before the wizard can be built. Previously a
+    // missing/failed /meta made findSub() return null and the router silently
+    // bounced back to #/sell, so the wizard never appeared.
+    var html = header('Post an Ad', {}) + '<div id="wizard-root">' + loadingHtml('Preparing your ad…') + '</div>';
+    return {
+      html: html,
+      hideTabbar: true,
+      mount: function () {
+        ensureMeta().then(function () {
+          var root = $('#wizard-root');
+          if (!root) return;
+          var found = findSub(params.slug);
+          if (!found) {
+            root.innerHTML = errorHtml('No category matches "' + (params.slug || '') + '". Pick one from the list.', 'Choose a category', 'alert-circle-outline');
+            var pick = root.querySelector('[data-state-retry]');
+            if (pick) pick.addEventListener('click', function () { location.hash = '#/sell'; });
+            return;
+          }
+          listingWizard({ cat: found }).render();
+        }).catch(function (e) {
+          var root = $('#wizard-root');
+          if (!root) return;
+          root.innerHTML = errorHtml((e && e.message) || 'Could not load the category list.', 'Try again', 'cloud-offline-outline');
+          var btn = root.querySelector('[data-state-retry]');
+          if (btn) btn.addEventListener('click', function () { render(); });
+        });
+      }
+    };
   };
 
   function listingWizardView(wz) {
@@ -1595,7 +1948,7 @@
         if (act === 'edit') { location.hash = '#/edit-ad/' + id; return; }
         if (act === 'delete') {
           openDialog('Delete listing', '<p>This will permanently remove your listing. This cannot be undone.</p>', 'Delete', true, function () {
-            api.del('/listings/' + id).then(function () { closeDialog(); toast('Listing deleted', 'success'); views.myAdsRemount(); });
+            act(api.del('/listings/' + id), 'Listing deleted', function () { closeDialog(); views.myAdsRemount(); });
           });
           return;
         }
@@ -1608,7 +1961,7 @@
           return;
         }
         if (act === 'renew') {
-          api.post('/listings/' + id + '/renew').then(function () { toast('Listing renewed', 'success'); views.myAdsRemount(); });
+          act(api.post('/listings/' + id + '/renew'), 'Listing renewed', function () { views.myAdsRemount(); });
           return;
         }
         if (act === 'promote') {
@@ -1645,18 +1998,20 @@
     if (!requireAuth()) return { html: '' };
     var html = header('Favorites', { right: '<button class="icon-btn" data-nav="#/search">' + icon('search-outline') + '</button>' });
     html += '<div class="section"><div class="section-head"><h2>' + icon('heart-outline') + 'Saved Listings</h2></div></div>';
-    html += '<div id="fav-list"><div class="spinner"></div></div>';
+    html += '<div id="fav-list">' + loadingHtml('Loading your favourites…') + '</div>';
     return {
       html: html,
       mount: function () {
-        api.get('/favorites').then(function (items) {
-          var el = $('#fav-list');
-          if (!items.length) {
-            el.innerHTML = '<div class="empty"><div class="e-icon">' + icon('heart-outline') + '</div><h3>No favorites yet</h3><p>Tap the heart on any listing to save it here.</p><a class="btn btn-primary btn-sm" data-nav="#/browse" style="margin-top:12px">Browse listings</a></div>';
-            return;
-          }
-          el.innerHTML = listingGrid(items);
-        }).catch(function (e) { $('#fav-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        renderAsync({
+          into: '#fav-list',
+          load: function () { return api.get('/favorites'); },
+          isEmpty: function (items) { return !items || !items.length; },
+          emptyHtml: '<div class="empty"><div class="e-icon">' + icon('heart-outline') + '</div><h3>No favorites yet</h3>' +
+            '<p>Tap the heart on any listing to save it here.</p>' +
+            '<a class="btn btn-primary btn-sm" data-nav="#/browse" style="margin-top:12px">Browse listings</a></div>',
+          retryLabel: 'Reload favourites',
+          render: function (items) { return listingGrid(items); }
+        });
       }
     };
   };
@@ -1703,8 +2058,11 @@
       mount: function () {
         var threadEl = $('#thread');
         var blockedBy = false;
+        var loadedOnce = false;
+        if (threadEl) threadEl.innerHTML = loadingHtml('Loading conversation…');
         function load() {
           api.get('/chat/' + otherId).then(function (d) {
+            loadedOnce = true;
             blockedBy = d.blocked_by;
             var u = state.user;
             var h = (d.messages || []).map(function (m) {
@@ -1724,11 +2082,23 @@
             else if (d.blocked) hh += '<div class="thr-notice">' + icon('ban-outline') + 'You blocked this user. <a id="thr-unblock">Unblock</a></div>';
             head.innerHTML = hh;
             var ub = $('#thr-unblock');
-            if (ub) ub.addEventListener('click', function () { api.del('/chat/' + otherId + '/block').then(function () { load(); }); });
+            if (ub) ub.addEventListener('click', function () { act(api.del('/chat/' + otherId + '/block'), 'User unblocked', function () { load(); }); });
             var inp = $('#msg-input'), btn = $('#msg-send');
             if (inp) inp.disabled = blockedBy;
             if (btn) btn.disabled = blockedBy;
             window.scrollTo(0, document.body.scrollHeight);
+          }).catch(function (e) {
+            // First load failed: show a retryable error. A failed background
+            // poll must not wipe a conversation the user is reading.
+            if (!loadedOnce) {
+              if (threadEl) {
+                threadEl.innerHTML = errorHtml((e && e.message) || 'Could not load this conversation.', 'Reload conversation', 'chatbubble-ellipses-outline');
+                var btn = threadEl.querySelector('[data-state-retry]');
+                if (btn) btn.addEventListener('click', function () { load(); });
+              }
+            } else {
+              logNonCritical('chat refresh')(e);
+            }
           });
         }
         load();
@@ -1746,14 +2116,14 @@
           openSheet(null, [
             { icon: 'ban-outline', label: 'Block user', onClick: function () {
               openDialog('Block user', '<p>They won’t be able to message you anymore.</p>', 'Block', true, function () {
-                api.post('/chat/' + otherId + '/block').then(function () { closeDialog(); load(); });
+                act(api.post('/chat/' + otherId + '/block'), null, function () { closeDialog(); load(); });
               });
             } },
             { icon: 'flag-outline', label: 'Report user', danger: true, onClick: function () {
               var reasons = (state.meta && state.meta.report_reasons) || ['Scam', 'Fake product', 'Wrong information', 'Other'];
               openSheet('Report user', reasons.map(function (r) {
                 return { icon: 'flag-outline', label: r, danger: true, onClick: function () {
-                  api.post('/chat/' + otherId + '/report', { reason: r }).then(function () { toast('Reported — thanks', 'success'); });
+                  act(api.post('/chat/' + otherId + '/report', { reason: r }), 'Reported — thanks');
                 } };
               }));
             } }
@@ -1771,20 +2141,24 @@
     return {
       html: html,
       mount: function () {
-        api.get('/notifications').then(function (d) {
-          var el = $('#notif-list');
-          if (!d.items.length) { el.innerHTML = '<div class="empty"><div class="e-icon">' + icon('notifications-outline') + '</div><h3>No notifications</h3></div>'; return; }
-          el.innerHTML = d.items.map(function (n) {
+        renderAsync({
+          into: '#notif-list',
+          load: function () { return api.get('/notifications'); },
+          isEmpty: function (d) { return !d || !(d.items || []).length; },
+          emptyHtml: '<div class="empty"><div class="e-icon">' + icon('notifications-outline') + '</div><h3>No notifications</h3><p>Offers, messages and listing updates show up here.</p></div>',
+          retryLabel: 'Reload notifications',
+          render: function (d) { return d.items.map(function (n) {
             var colors = { offer: '#C77D23', message: '#3A6FB0', listing: '#0E7C66', favorite: '#E5484D', promotion: '#F0A500', expiring: '#B04A3A', rating: '#9C4F96', info: '#74817C' };
             var ic = { offer: 'cash-outline', message: 'chatbubble-ellipses-outline', listing: 'camera-outline', favorite: 'heart-outline', promotion: 'flash-outline', expiring: 'hourglass-outline', rating: 'star-outline', info: 'notifications-outline' };
             return '<div class="notif-item' + (n.read ? '' : ' unread') + '"' + (n.link ? ' data-nav="' + esc(n.link) + '"' : '') + '>' +
               '<span class="ni-icon" style="background:' + (colors[n.type] || '#74817C') + '1a;color:' + (colors[n.type] || '#74817C') + '">' + icon(ic[n.type] || 'notifications-outline') + '</span>' +
               '<div class="ni-main"><b>' + esc(n.title) + '</b><p>' + esc(n.body) + '</p></div>' +
               '<span class="ni-time">' + timeAgo(n.created_at) + '</span></div>';
-          }).join('');
+          }).join(''); }
         });
-        $('#mark-read').addEventListener('click', function () {
-          api.post('/notifications/read').then(function () {
+        var mr = $('#mark-read');
+        if (mr) mr.addEventListener('click', function () {
+          act(api.post('/notifications/read'), null, function () {
             $$('.notif-item').forEach(function (x) { x.classList.remove('unread'); });
           });
         });
@@ -1827,12 +2201,21 @@
     return {
       html: html,
       mount: function () {
+        function setCount(sel, v) { var el = $(sel); if (el) el.textContent = v; }
+        setCount('#p-l', '…'); setCount('#p-f', '…'); setCount('#p-r', '…');
         api.get('/me').then(function (d) {
-          $('#p-l').textContent = d.counts.listings;
-          $('#p-f').textContent = d.counts.favorites;
+          var c = (d && d.counts) || {};
+          setCount('#p-l', c.listings == null ? '—' : c.listings);
+          setCount('#p-f', c.favorites == null ? '—' : c.favorites);
+        }).catch(function (e) {
+          logNonCritical('profile counts')(e);
+          setCount('#p-l', '—'); setCount('#p-f', '—');
         });
         api.get('/me/offers').then(function (d) {
-          $('#p-r').textContent = (d.received || []).length + (d.sent || []).length;
+          setCount('#p-r', ((d && d.received) || []).length + ((d && d.sent) || []).length);
+        }).catch(function (e) {
+          logNonCritical('offer counts')(e);
+          setCount('#p-r', '—');
         });
       }
     };
@@ -1937,12 +2320,12 @@
           $('#offers-root').innerHTML = h;
           $$('#offers-root [data-accept]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.post('/offers/' + b.getAttribute('data-accept'), { action: 'accept' }).then(function () { toast('Offer accepted', 'success'); views.myOffersRemount(); });
+              act(api.post('/offers/' + b.getAttribute('data-accept'), { action: 'accept' }), 'Offer accepted', function () { views.myOffersRemount(); });
             });
           });
           $$('#offers-root [data-decline]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.post('/offers/' + b.getAttribute('data-decline'), { action: 'decline' }).then(function () { toast('Offer declined'); views.myOffersRemount(); });
+              act(api.post('/offers/' + b.getAttribute('data-decline'), { action: 'decline' }), 'Offer declined', function () { views.myOffersRemount(); });
             });
           });
           $$('#offers-root [data-counter]').forEach(function (b) {
@@ -2313,7 +2696,7 @@
     // The request must be built while the token is still set (headers are read
     // synchronously), so fire it before clearing.
     if (api.token) {
-      api.post('/auth/logout').catch(function () {});
+      api.post('/auth/logout').catch(logNonCritical('logout'));
     }
     clearSession();
     renderDrawer(); renderTabbar();
@@ -2345,10 +2728,15 @@
       mount: function () {
         $('#contact-form').addEventListener('submit', function (e) {
           e.preventDefault();
-          api.post('/contact', {
-            name: $('[name="name"]', this).value, email: $('[name="email"]', this).value,
-            subject: $('[name="subject"]', this).value, message: $('[name="message"]', this).value
-          }).then(function () { toast('Message sent — thank you!', 'success'); this.reset(); }.bind(this));
+          var form = this;
+          var btn = form.querySelector('button[type="submit"]');
+          if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner spinner-sm"></div>Sending…'; }
+          act(api.post('/contact', {
+            name: $('[name="name"]', form).value, email: $('[name="email"]', form).value,
+            subject: $('[name="subject"]', form).value, message: $('[name="message"]', form).value
+          }), 'Message sent — thank you!', function () { form.reset(); }, null).then(function () {
+            if (btn) { btn.disabled = false; btn.innerHTML = icon('send-outline') + 'Send Message'; }
+          });
         });
       }
     };
@@ -2357,19 +2745,26 @@
   views.blog = function () {
     var html = header('Buying Guides', {});
     html += '<div class="hero-page" style="padding:22px 20px"><h1 style="font-size:20px">Camera guides & tips</h1><p>Practical advice for buying, selling and shooting in Sri Lanka.</p></div>';
-    html += '<div id="posts-list"><div class="spinner"></div></div>';
+    html += '<div id="posts-list">' + loadingHtml('Loading guides…') + '</div>';
     return {
       html: html,
       mount: function () {
-        api.get('/posts').then(function (posts) {
-          var el = $('#posts-list');
-          if (!posts.length) { el.innerHTML = '<div class="empty"><p>No posts yet.</p></div>'; return; }
-          el.innerHTML = posts.map(function (p) {
-            return '<div class="post-card" data-nav="#/blog/' + esc(p.slug) + '">' +
-              (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="">' : '') +
-              '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + esc(p.title) + '</b>' +
-              '<span class="excerpt">' + esc(p.excerpt) + '</span></div></div>';
-          }).join('');
+        renderAsync({
+          into: '#posts-list',
+          load: function () { return api.get('/posts'); },
+          isEmpty: function (posts) { return !posts || !posts.length; },
+          emptyText: 'No guides published yet',
+          emptySub: 'Buying advice for used cameras, lenses and drones will appear here.',
+          emptyIcon: 'reader-outline',
+          retryLabel: 'Reload guides',
+          render: function (posts) {
+            return posts.map(function (p) {
+              return '<div class="post-card" data-nav="#/blog/' + esc(p.slug) + '">' +
+                (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="">' : '') +
+                '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + esc(p.title) + '</b>' +
+                '<span class="excerpt">' + esc(p.excerpt) + '</span></div></div>';
+            }).join('');
+          }
         });
       }
     };
@@ -2399,25 +2794,32 @@
   views.shops = function () {
     var html = header('Camera Shops', {});
     html += '<div class="hero-page" style="padding:22px 20px"><h1 style="font-size:20px">Trusted camera shops</h1><p>Authorised dealers and specialist stores across Sri Lanka.</p></div>';
-    html += '<div id="shops-list"><div class="spinner"></div></div>';
+    html += '<div id="shops-list">' + loadingHtml('Loading camera shops…') + '</div>';
     return {
       html: html,
       mount: function () {
-        api.get('/businesses').then(function (shops) {
-          var el = $('#shops-list');
-          if (!shops.length) { el.innerHTML = '<div class="empty"><p>No shops listed yet.</p></div>'; return; }
-          el.innerHTML = '<div class="detail-wrap" style="display:grid;gap:14px">' + shops.map(function (s) {
-            return '<div class="shop-card" data-nav="#/shop/' + esc(s.slug) + '">' +
-              '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '') + '</div>' +
-              '<div class="body"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
-              '<div class="area">' + icon('location-outline') + esc([s.area, s.city, s.province].filter(Boolean).join(', ')) + '</div>' +
-              '<p class="fs13 muted" style="margin-top:8px;line-height:1.5">' + esc(s.description) + '</p>' +
-              '<div class="specs">' + (s.listing_count ? '<span class="chip">' + s.listing_count + ' listings</span>' : '') +
-              (s.rating && s.rating.count ? '<span class="chip">' + s.rating.avg + ' ★ (' + s.rating.count + ')</span>' : '') + '</div>' +
-              '<div class="flex gap8" style="margin-top:12px">' +
-              '<button class="btn btn-primary btn-sm" data-call-shop="' + esc(s.phone) + '">' + icon('call-outline') + 'Call</button>' +
-              '<button class="btn btn-wa btn-sm" data-wa-shop="' + esc(s.whatsapp || s.phone) + '">' + icon('logo-whatsapp') + 'WhatsApp</button></div></div></div>';
-          }).join('') + '</div><div style="height:16px"></div>';
+        renderAsync({
+          into: '#shops-list',
+          load: function () { return api.get('/businesses'); },
+          isEmpty: function (shops) { return !shops || !shops.length; },
+          emptyText: 'No trusted camera shops yet.',
+          emptySub: 'Shops appear here as soon as a business seller registers.',
+          emptyIcon: 'storefront-outline',
+          retryLabel: 'Reload shops',
+          render: function (shops) {
+            return '<div class="detail-wrap" style="display:grid;gap:14px">' + shops.map(function (s) {
+              return '<div class="shop-card" data-nav="#/shop/' + esc(s.slug) + '">' +
+                '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '<span class="ph">' + icon('storefront-outline') + '</span>') + '</div>' +
+                '<div class="body"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
+                '<div class="area">' + icon('location-outline') + esc([s.area, s.city, s.province].filter(Boolean).join(', ')) + '</div>' +
+                '<p class="fs13 muted" style="margin-top:8px;line-height:1.5">' + esc(s.description) + '</p>' +
+                '<div class="specs">' + (s.listing_count ? '<span class="chip">' + s.listing_count + ' listings</span>' : '') +
+                (s.rating && s.rating.count ? '<span class="chip">' + s.rating.avg + ' ★ (' + s.rating.count + ')</span>' : '') + '</div>' +
+                '<div class="flex gap8" style="margin-top:12px">' +
+                '<button class="btn btn-primary btn-sm" data-call-shop="' + esc(s.phone) + '">' + icon('call-outline') + 'Call</button>' +
+                '<button class="btn btn-wa btn-sm" data-wa-shop="' + esc(s.whatsapp || s.phone) + '">' + icon('logo-whatsapp') + 'WhatsApp</button></div></div></div>';
+            }).join('') + '</div><div style="height:16px"></div>';
+          }
         });
       }
     };
@@ -2722,7 +3124,10 @@
       }
       var bb = $('#become-business');
       if (bb) bb.addEventListener('click', function () {
-        api.patch('/me', { seller_type: 'business' }).then(function (d) { state.user = d.user; renderDrawer(); render({}); });
+        act(api.patch('/me', { seller_type: 'business' }), 'You are now a business seller', function (d) {
+          if (d && d.user) state.user = d.user;
+          renderDrawer(); render({});
+        });
       });
       bindLocationSelects($('#shop-root'), { province: biz.province, district: biz.district, city: biz.city });
       $('#logo-input').addEventListener('change', function () {
@@ -2794,7 +3199,12 @@
             '<div class="section-head" style="margin:18px 0 8px"><h2>' + icon('camera-outline') + 'Listings (' + (d.listings || []).length + ')</h2></div>' +
             '</div><div>' + listingGrid(d.listings) + '</div><div style="height:16px"></div>';
         }).catch(function (e) {
-          $('#shop-page').innerHTML = header('Shop', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
+          var el = $('#shop-page');
+          if (el) {
+            el.innerHTML = header('Shop', {}) + errorHtml((e && e.message) || 'Could not load this shop.', 'Try again', 'storefront-outline');
+            var btn = el.querySelector('[data-state-retry]');
+            if (btn) btn.addEventListener('click', function () { render(); });
+          }
         });
       }
     };
@@ -3003,13 +3413,13 @@
               var act2 = b.getAttribute('data-uact');
               if (act2 === 'delete') {
                 openDialog('Delete user', '<p>This permanently removes <b>' + esc(u.name) + '</b> and all their data. This cannot be undone.</p>', 'Delete', true, function () {
-                  api.del('/admin/users/' + id).then(function () { closeDialog(); toast('User deleted', 'success'); location.hash = '#/admin/users'; });
+                  act(api.del('/admin/users/' + id), 'User deleted', function () { closeDialog(); location.hash = '#/admin/users'; });
                 });
                 return;
               }
               if (act2 === 'ban') {
                 openDialog('Ban user', '<p>Ban <b>' + esc(u.name) + '</b>? Their listings will be paused and their email blocked from registering.</p>', 'Ban', true, function () {
-                  api.patch('/admin/users/' + id, { action: 'ban' }).then(function () { closeDialog(); toast('User banned', 'success'); ADMIN_VIEWS.userDetail(params).mount(); });
+                  act(api.patch('/admin/users/' + id, { action: 'ban' }), 'User banned', function () { closeDialog(); ADMIN_VIEWS.userDetail(params).mount(); });
                 });
                 return;
               }
@@ -3200,7 +3610,7 @@
   }
 
   function refreshMeta() {
-    api.get('/meta').then(function (d) { state.meta = d; }).catch(function () {});
+    api.get('/meta').then(function (d) { state.meta = d; }).catch(logNonCritical('metadata refresh'));
   }
 
   ADMIN_VIEWS.categories = function () {
@@ -3324,7 +3734,7 @@
             });
             $$('#ab-list [data-brand-del]').forEach(function (b) {
               b.addEventListener('click', function () {
-                api.del('/admin/brands/' + b.getAttribute('data-brand-del')).then(function () { toast('Brand deleted', 'success'); refreshMeta(); load(); });
+                act(api.del('/admin/brands/' + b.getAttribute('data-brand-del')), 'Brand deleted', function () { refreshMeta(); load(); });
               });
             });
             $$('#ab-list [data-model-add]').forEach(function (b) {
@@ -3333,13 +3743,13 @@
                 var inp = document.querySelector('[data-model-name="' + bid + '"]');
                 var name = inp.value.trim();
                 if (!name) return toast('Enter a model name', 'error');
-                api.post('/admin/models', { brand_id: parseInt(bid, 10), name: name }).then(function () { toast('Model added', 'success'); load(); });
+                act(api.post('/admin/models', { brand_id: parseInt(bid, 10), name: name }), 'Model added', function () { load(); });
               });
             });
             $$('#ab-list [data-model-del]').forEach(function (a) {
               a.addEventListener('click', function (e) {
                 e.preventDefault(); e.stopPropagation();
-                api.del('/admin/models/' + a.getAttribute('data-model-del')).then(function () { toast('Model deleted', 'success'); load(); });
+                act(api.del('/admin/models/' + a.getAttribute('data-model-del')), 'Model deleted', function () { load(); });
               });
             });
           }).catch(function (e) { $('#ab-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
@@ -3393,24 +3803,24 @@
           $('#loc-prov-sel').addEventListener('change', fillDistricts);
           fillDistricts();
           $('#loc-add-prov').addEventListener('click', function () {
-            api.post('/admin/provinces', { name: $('#loc-prov').value }).then(function () { toast('Province added', 'success'); ADMIN_VIEWS.locations().mount(); });
+            act(api.post('/admin/provinces', { name: $('#loc-prov').value }), 'Province added', function () { ADMIN_VIEWS.locations().mount(); });
           });
           $('#loc-add-dist').addEventListener('click', function () {
-            api.post('/admin/districts', { province_id: parseInt($('#loc-prov-sel').value, 10), name: $('#loc-dist').value }).then(function () { toast('District added', 'success'); ADMIN_VIEWS.locations().mount(); });
+            act(api.post('/admin/districts', { province_id: parseInt($('#loc-prov-sel').value, 10), name: $('#loc-dist').value }), 'District added', function () { ADMIN_VIEWS.locations().mount(); });
           });
           $('#loc-add-city').addEventListener('click', function () {
             var did = $('#loc-dist-sel').value;
             if (!did) return toast('Choose a district first', 'error');
-            api.post('/admin/cities', { district_id: parseInt(did, 10), name: $('#loc-city').value }).then(function () { toast('City added', 'success'); ADMIN_VIEWS.locations().mount(); });
+            act(api.post('/admin/cities', { district_id: parseInt(did, 10), name: $('#loc-city').value }), 'City added', function () { ADMIN_VIEWS.locations().mount(); });
           });
           $$('#aloc-list [data-prov-del]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.del('/admin/provinces/' + b.getAttribute('data-prov-del')).then(function () { toast('Province deleted', 'success'); ADMIN_VIEWS.locations().mount(); });
+              act(api.del('/admin/provinces/' + b.getAttribute('data-prov-del')), 'Province deleted', function () { ADMIN_VIEWS.locations().mount(); });
             });
           });
           $$('#aloc-list [data-dist-del]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.del('/admin/districts/' + b.getAttribute('data-dist-del')).then(function () { toast('District deleted', 'success'); ADMIN_VIEWS.locations().mount(); });
+              act(api.del('/admin/districts/' + b.getAttribute('data-dist-del')), 'District deleted', function () { ADMIN_VIEWS.locations().mount(); });
             });
           });
         }).catch(function (e) { $('#aloc-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
@@ -3434,11 +3844,16 @@
           h += '<div class="a-sec-head"><h3>' + icon('trending-up-outline') + 'Active promotions</h3></div>';
           var body = $('#apromo');
           body.innerHTML = h;
-          api.get('/admin/promotions').then(function (rows) {
+          // Returned so a failure here is reported instead of becoming an
+          // unhandled rejection that leaves the table half-drawn.
+          return api.get('/admin/promotions').then(function (rows) {
             var el = $('#apromo');
-            el.innerHTML = h + (rows.length ? adminTable(['Listing', 'User', 'Type', 'Paid', 'Expires'], rows.map(function (r) {
+            el.innerHTML = h + ((rows || []).length ? adminTable(['Listing', 'User', 'Type', 'Paid', 'Expires'], rows.map(function (r) {
               return '<tr><td>' + esc(r.listing_title || '—') + '</td><td>' + esc(r.user_name || '') + '</td><td>' + aChip(r.ptype, '#F0A500') + '</td><td>' + fmtLKR(r.price) + '</td><td>' + (r.ends_at ? fmtDate(r.ends_at) : '—') + '</td></tr>';
             }).join('')) : '<p class="muted fs12 pad16">No promotions purchased yet.</p>');
+          }, function (e) {
+            var el = $('#apromo');
+            if (el) el.innerHTML = h + errorHtml((e && e.message) || 'Could not load promotions.', 'Reload', 'alert-circle-outline');
           });
         }).catch(function (e) { $('#apromo').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
       }
@@ -3481,21 +3896,31 @@
                 '<button class="btn btn-outline btn-sm" data-post-edit="' + p.id + '" data-post-slug="' + esc(p.slug) + '">' + icon('create-outline') + '</button>' +
                 '<button class="btn btn-danger btn-sm" data-post-del="' + p.id + '">' + icon('trash-outline') + '</button></div>';
             }).join('') || '<div class="empty"><p>No posts yet.</p></div>';
+            bindPostRows();
+          }).catch(function (e) {
+            var el = $('#ap-list');
+            if (el) {
+              el.innerHTML = errorHtml((e && e.message) || 'Could not load posts.', 'Reload posts');
+              var btn = el.querySelector('[data-state-retry]');
+              if (btn) btn.addEventListener('click', function () { load(); });
+            }
+          });
+        }
+        function bindPostRows() {
             $('#ap-add').addEventListener('click', function () { openPostEditor(null); });
             $$('#ap-list [data-post-edit]').forEach(function (b) {
               b.addEventListener('click', function () {
-                api.get('/posts/' + b.getAttribute('data-post-slug')).then(function (p) { openPostEditor(p); });
+                act(api.get('/posts/' + b.getAttribute('data-post-slug')), null, function (p) { if (p) openPostEditor(p); });
               });
             });
             $$('#ap-list [data-post-del]').forEach(function (b) {
               b.addEventListener('click', function () {
                 var pid = b.getAttribute('data-post-del');
                 openDialog('Delete post', '<p>This permanently removes the post.</p>', 'Delete', true, function () {
-                  api.del('/admin/posts/' + pid).then(function () { closeDialog(); toast('Post deleted', 'success'); load(); });
+                  act(api.del('/admin/posts/' + pid), 'Post deleted', function () { closeDialog(); load(); });
                 });
               });
             });
-          });
         }
         load();
       }
@@ -3944,10 +4369,13 @@
       state.user = (d && d.user) || null;
       if (!state.user) clearSession();
     }).catch(function (e) {
-      // A rejected token means the stored session is dead — drop it so the UI
-      // never claims to be signed in. On a pure network failure keep it and
-      // retry on the next load.
-      if (!e || e.status !== 0) clearSession();
+      // Only a rejected token (401/403) means the stored session is dead — drop
+      // it so the UI never claims to be signed in. A server error (5xx) or a
+      // network failure is not the user's fault: keep the token and retry on the
+      // next load instead of signing everybody out during a hiccup.
+      var status = e ? e.status : 0;
+      if (status === 401 || status === 403) clearSession();
+      else logNonCritical('session restore')(e);
     }).then(function () {
       state.sessionRestored = true;
       refreshFavIds();

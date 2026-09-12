@@ -1446,13 +1446,43 @@ def brands():
 # ---------------------------------------------------------------------------
 # Listings
 # ---------------------------------------------------------------------------
+# Fields a free-text search token may match. Every token must match at least one
+# of these (tokens are ANDed, fields are ORed) so that "Canon 5D" or
+# "sony a7 iii body" find listings even when the words are not adjacent in any
+# single column. Always parameterized - user input never reaches the SQL text.
+SEARCH_TOKEN_SQL = (
+    "l.title LIKE ? ESCAPE '\\' OR l.brand LIKE ? ESCAPE '\\' OR l.model LIKE ? ESCAPE '\\' "
+    "OR l.description LIKE ? ESCAPE '\\' OR l.specs LIKE ? ESCAPE '\\' OR c.name LIKE ? ESCAPE '\\' "
+    "OR EXISTS (SELECT 1 FROM users su WHERE su.id = l.user_id AND su.name LIKE ? ESCAPE '\\') "
+    "OR EXISTS (SELECT 1 FROM businesses sb WHERE sb.user_id = l.user_id AND sb.name LIKE ? ESCAPE '\\')"
+)
+SEARCH_TOKEN_PARAMS = 8
+MAX_SEARCH_TOKENS = 8
+
+
+def like_escape(value):
+    """Escape LIKE wildcards so '%'/'_' typed by a user are matched literally."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def search_tokens(q):
+    """Split a search string into bounded, wildcard-escaped LIKE patterns."""
+    out = []
+    for tok in re.split(r"[\s,;/|]+", (q or "").strip()):
+        if not tok:
+            continue
+        out.append("%" + like_escape(tok) + "%")
+        if len(out) >= MAX_SEARCH_TOKENS:
+            break
+    return out
+
+
 def build_listing_where(args):
     conds, params = [], []
     q = (args.get("q") or "").strip()
-    if q:
-        like = f"%{q}%"
-        conds.append("(l.title LIKE ? OR l.brand LIKE ? OR l.model LIKE ? OR l.description LIKE ? OR l.specs LIKE ? OR c.name LIKE ?)")
-        params += [like, like, like, like, like, like]
+    for pattern in search_tokens(q):
+        conds.append("(" + SEARCH_TOKEN_SQL + ")")
+        params += [pattern] * SEARCH_TOKEN_PARAMS
 
     category = (args.get("category") or "").strip()
     subcategory = (args.get("subcategory") or "").strip()
@@ -1470,8 +1500,8 @@ def build_listing_where(args):
 
     model = (args.get("model") or "").strip()
     if model:
-        like = f"%{model}%"
-        conds.append("(l.model LIKE ? OR l.title LIKE ?)")
+        like = f"%{like_escape(model)}%"
+        conds.append("(l.model LIKE ? ESCAPE '\\' OR l.title LIKE ? ESCAPE '\\')")
         params += [like, like]
 
     condition = (args.get("condition") or "").strip()
@@ -2309,11 +2339,19 @@ def business_payload(b):
         hours = json.loads(hours)
     except Exception:
         hours = {}
+    if not isinstance(hours, dict):
+        hours = {}
+    # Defensive .get() reads: a database created before a column was added must
+    # not turn the whole shop list into a 500.
     return {
-        "id": b["id"], "name": b["name"], "slug": b["slug"], "logo": b["logo"],
-        "description": b["description"], "province": b["province"], "district": b["district"],
-        "city": b["city"], "area": b["area"], "phone": b["phone"], "whatsapp": b["whatsapp"],
-        "opening_hours": hours, "verified": bool(b["verified"]),
+        "id": b.get("id"), "name": b.get("name") or "Unnamed shop", "slug": b.get("slug") or "",
+        "logo": b.get("logo") or "",
+        "description": b.get("description") or "", "province": b.get("province") or "",
+        "district": b.get("district") or "",
+        "city": b.get("city") or "", "area": b.get("area") or "", "phone": b.get("phone") or "",
+        "whatsapp": b.get("whatsapp") or "",
+        "opening_hours": hours, "verified": bool(b.get("verified")),
+        "user_id": b.get("user_id"),
     }
 
 
@@ -2367,9 +2405,10 @@ def businesses_list():
     out = []
     for b in rows:
         item = business_payload(b)
+        uid = b.get("user_id")
         item["listing_count"] = query(
-            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'", (b["user_id"],), one=True)["n"]
-        item["rating"] = seller_rating(b["user_id"])
+            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'", (uid,), one=True)["n"] if uid else 0
+        item["rating"] = seller_rating(uid) if uid else {"count": 0, "avg": 0}
         out.append(item)
     return ok(out)
 

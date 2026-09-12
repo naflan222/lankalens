@@ -815,6 +815,10 @@ button { font-family: inherit; }
 }
 .shop-card .cover { height: 130px; background: #eef1ef; }
 .shop-card .cover img { width: 100%; height: 100%; object-fit: cover; }
+.shop-card .cover .ph {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  color: #b9c4bf; font-size: 40px;
+}
 .shop-card .body { padding: 12px 14px 14px; }
 .shop-card .name { font-size: 15px; font-weight: 700; color: var(--ink); display: flex; align-items: center; gap: 6px; }
 .shop-card .area { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 4px; margin-top: 3px; }
@@ -921,6 +925,28 @@ button { font-family: inherit; }
   margin: 30px auto; animation: spin .7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+.spinner-sm { width: 17px; height: 17px; border-width: 2px; margin: 0; display: inline-block; vertical-align: -4px; }
+
+/* ============ Loading / empty / error state blocks ============
+   Shared by every API-driven section (home strips, search, browse, camera
+   shops, post-ad categories) so a pending, failed or empty request always
+   shows something meaningful instead of a spinner that never resolves. */
+.state-block {
+  text-align: center; padding: 34px 24px; color: var(--muted);
+}
+.state-block .spinner { margin: 0 auto 14px; }
+.state-block p { font-size: 13px; line-height: 1.6; color: var(--muted); }
+.state-block h3 { font-size: 15.5px; color: var(--ink); margin-bottom: 6px; }
+.state-block .e-icon {
+  width: 72px; height: 72px; margin: 0 auto 14px; border-radius: 50%;
+  background: var(--brand-light); color: var(--brand);
+  display: flex; align-items: center; justify-content: center; font-size: 32px;
+}
+.state-block .e-icon.err { background: #FDECEC; color: #C62828; }
+.state-block .btn { margin-top: 14px; }
+.state-block.compact { padding: 10px 16px; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.state-block.compact .btn { margin-top: 6px; }
+.state-loading p { color: var(--muted); font-weight: 600; }
 
 /* filter pills row (search) */
 .filter-row { display: flex; gap: 8px; padding: 10px 16px; overflow-x: auto; scrollbar-width: none; }
