@@ -159,6 +159,12 @@ button { font-family: inherit; }
   font-size: 17px;
   font-weight: 700;
   color: var(--ink);
+  /* rendered as an <h1> for document semantics: keep the old <div> metrics so
+     the heading rules below cannot change how the top bar looks */
+  font-family: inherit;
+  letter-spacing: normal;
+  line-height: inherit;
+  margin: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

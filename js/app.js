@@ -589,8 +589,11 @@
     var left = opts.back === false ? '<span style="width:40px"></span>' :
       '<button class="back-btn" data-back aria-label="Back">' + icon('chevron-back-outline') + '</button>';
     var right = opts.right || '<span style="width:40px"></span>';
+    // The header title is the page's <h1> unless the view renders its own
+    // heading (opts.heading === false) - exactly one h1 per page.
+    var tag = opts.heading === false ? 'div' : 'h1';
     return '<header class="app-header"><div class="app-header-inner">' + left +
-      '<div class="title">' + esc(title) + '</div><div class="spacer"></div>' + right + '</div></header>';
+      '<' + tag + ' class="title">' + esc(title) + '</' + tag + '>' + '<div class="spacer"></div>' + right + '</div></header>';
   }
 
   function lcard(l) {
@@ -748,7 +751,7 @@
           render: function (posts) {
             return '<div class="hscroll">' + posts.slice(0, 4).map(function (p) {
               return '<div class="lcard card-sm" data-nav="#/blog/' + esc(p.slug) + '">' +
-                '<div class="thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="">' : '<span class="ph">' + icon('reader-outline') + '</span>') + '</div>' +
+                '<div class="thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '<span class="ph">' + icon('reader-outline') + '</span>') + '</div>' +
                 '<div class="body"><div class="title" style="min-height:auto">' + esc(p.title) + '</div>' +
                 '<div class="meta"><span>' + esc(p.category || 'Guide') + '</span><span class="sep">·</span><span>' + fmtDate(p.created_at) + '</span></div></div></div>';
             }).join('') + '</div>';
@@ -760,7 +763,7 @@
 
   function shopCardSmall(s) {
     return '<div class="lcard card-sm" data-nav="#/shop/' + esc(s.slug) + '">' +
-      '<div class="thumb">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '<span class="ph">' + icon('cart-outline') + '</span>') + '</div>' +
+      '<div class="thumb">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="' + esc(s.name || 'Shop') + ' logo' + '">' : '<span class="ph">' + icon('cart-outline') + '</span>') + '</div>' +
       '<div class="body"><div class="title" style="min-height:auto">' + esc(s.name) + (s.verified ? ' ' + icon('shield-checkmark') : '') + '</div>' +
       '<div class="meta"><span>' + icon('location-outline') + esc(s.city || s.area) + '</span></div></div></div>';
   }
@@ -1199,12 +1202,12 @@
     var ghtml = crumbs + '<div class="gallery">' +
       '<button class="back" data-back>' + icon('chevron-back-outline') + '</button>' +
       '<button class="favbig' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
-      '<div class="main">' + (imgs.length ? imgs.map(function (src) {
-        return '<div class="slide"><img src="' + esc(src) + '" alt=""></div>';
+      '<div class="main">' + (imgs.length ? imgs.map(function (src, i) {
+        return '<div class="slide"><img src="' + esc(src) + '" alt="' + esc(l.title || 'Listing') + ' photo ' + (i + 1) + '"></div>';
       }).join('') : '<div class="slide" style="display:flex;align-items:center;justify-content:center;color:#889;font-size:60px">' + icon('camera-outline') + '</div>') + '</div>' +
       '<span class="counter" id="g-counter">1 / ' + Math.max(1, imgs.length) + '</span></div>' +
       (imgs.length > 1 ? '<div class="thumbs">' + imgs.map(function (src, i) {
-        return '<div class="t' + (i === 0 ? ' active' : '') + '" data-thumb="' + i + '"><img src="' + esc(src) + '" alt=""></div>';
+        return '<div class="t' + (i === 0 ? ' active' : '') + '" data-thumb="' + i + '"><img src="' + esc(src) + '" alt="' + esc(l.title || 'Listing') + ' thumbnail ' + (i + 1) + '"></div>';
       }).join('') + '</div>' : '');
 
     var cond = l.condition || '—';
@@ -1556,7 +1559,7 @@
       var img = wz.images.length ? (wz.images[0].url || (wz.images[0].file ? '' : '')) : '';
       if (!img && wz.images.length && wz.images[0].file) img = 'file://pending';
       var showImg = wz.images.length ? wz.images[0].url : null;
-      var imgsrc = showImg ? '<img src="' + esc(showImg) + '" alt="">' : '';
+      var imgsrc = showImg ? '<img src="' + esc(showImg) + '" alt="' + 'Selected photo preview' + '">' : '';
       if (!showImg && wz.images.length && wz.images[0].file) {
         // can't preview a local file easily after re-render; show placeholder
         imgsrc = '<span class="ph">' + icon('image-outline') + '</span>';
@@ -1583,8 +1586,8 @@
         var src = it.file ? (it._url || '') : it.url;
         var thumb = it.file
           ? '<div class="ph">' + icon('image-outline') + '</div>'
-          : '<img src="' + esc(it.url) + '" alt="">';
-        return '<div class="upload-tile has-img">' + (src && it.file ? '<img src="' + src + '" alt="">' : thumb) +
+          : '<img src="' + esc(it.url) + '" alt="' + 'Photo ' + (i + 1) + '">';
+        return '<div class="upload-tile has-img">' + (src && it.file ? '<img src="' + esc(src) + '" alt="' + 'Photo ' + (i + 1) + ' preview' + '">' : thumb) +
           (i === 0 ? '<span class="cover-badge">Cover</span>' : '') +
           '<span class="rm" data-wz-rm="' + i + '">' + icon('close-outline') + '</span>' +
           '<div class="tile-tools">' +
@@ -1936,7 +1939,7 @@
     var rejectLine = l.status === 'rejected' && l.rejection_reason
       ? '<span class="status-chip" style="color:#C62828;background:#FDE8E8">' + icon('alert-circle-outline') + ' ' + esc(l.rejection_reason) + '</span>' : '';
     return '<div class="ad-row">' +
-      '<div class="ad-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+      '<div class="ad-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
       '<div class="ad-main">' +
       '<div class="ad-title" data-nav="#/ads/' + l.id + '">' + esc(l.title) + '</div>' +
       '<div class="ad-sub">' + fmtLKR(l.price) + (l.negotiable ? ' · negotiable' : '') + ' · ' + l.views + ' views</div>' +
@@ -2100,7 +2103,7 @@
             var hh = '';
             if (d.listing) {
               hh += '<div class="thr-listing" data-nav="#/ads/' + d.listing.id + '">' +
-                (d.listing.image ? '<img src="' + esc(d.listing.image) + '" alt="">' : '<span class="ph">' + icon('camera-outline') + '</span>') +
+                (d.listing.image ? '<img src="' + esc(d.listing.image) + '" alt="' + esc(d.listing.title || 'Listing') + '">' : '<span class="ph">' + icon('camera-outline') + '</span>') +
                 '<div class="tl-main"><b>' + esc(d.listing.title) + '</b><span>' + fmtLKR(d.listing.price) + '</span></div>' +
                 icon('chevron-forward-outline') + '</div>';
             }
@@ -2276,7 +2279,7 @@
           var isSelf = state.user && state.user.id === s.id;
           var ratingLine = d.rating && d.rating.count ? starsHtml(d.rating.avg, d.rating.count) : '<span class="muted fs12">No ratings yet</span>';
           var bizChip = d.business ? '<a class="biz-link" style="margin-top:12px" data-nav="#/shop/' + esc(d.business.slug) + '">' + icon('briefcase-outline') + ' Visit shop: ' + esc(d.business.name) + icon('chevron-forward-outline') + '</a>' : '';
-          $('#seller-root').innerHTML = header(s.name, {}) +
+          $('#seller-root').innerHTML = header(s.name, { heading: false }) +
             '<div class="hero-page" style="text-align:center"><div style="display:flex;justify-content:center;margin-bottom:10px">' + avatarHtml(s, 'lg') + '</div>' +
             '<h1>' + esc(s.name) + '</h1>' +
             '<p>' + (s.verified ? icon('shield-checkmark') + ' Verified seller · ' : '') +
@@ -2590,7 +2593,7 @@
   }
 
   views.signin = function (query) {
-    var html = header('Sign In', {});
+    var html = header('Sign In', { heading: false });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Welcome back</h1><p>Sign in to manage your listings and chats.</p></div>' +
       '<form id="login-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="si-email">Email</label>' +
@@ -2644,7 +2647,7 @@
   };
 
   views.signup = function (query) {
-    var html = header('Create Account', {});
+    var html = header('Create Account', { heading: false });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Join Lanka Lens</h1><p>Create a free account to buy and sell camera gear.</p></div>' +
       '<form id="signup-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="su-name">Full name</label><input class="input" id="su-name" name="name" required placeholder="Your name" autocomplete="name"></div>' +
@@ -2740,7 +2743,7 @@
   };
 
   views.contact = function () {
-    var html = header('Contact', {});
+    var html = header('Contact', { heading: false });
     html += '<div class="hero-page"><h1>Get in touch</h1><p>Questions, feedback or a partnership idea — we’d love to hear from you.</p></div>';
     html += '<div class="detail-wrap"><form id="contact-form"><div class="form-card">' +
       '<div class="form-group"><label>Name</label><input class="input" name="name" required></div>' +
@@ -2772,7 +2775,7 @@
   };
 
   views.blog = function () {
-    var html = header('Buying Guides', {});
+    var html = header('Buying Guides', { heading: false });
     html += '<div class="hero-page" style="padding:22px 20px"><h1 style="font-size:20px">Camera guides & tips</h1><p>Practical advice for buying, selling and shooting in Sri Lanka.</p></div>';
     html += '<div id="posts-list">' + loadingHtml('Loading guides…') + '</div>';
     return {
@@ -2789,7 +2792,7 @@
           render: function (posts) {
             return posts.map(function (p) {
               return '<div class="post-card" data-nav="#/blog/' + esc(p.slug) + '">' +
-                (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="">' : '') +
+                (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '') +
                 '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + esc(p.title) + '</b>' +
                 '<span class="excerpt">' + esc(p.excerpt) + '</span></div></div>';
             }).join('');
@@ -2807,8 +2810,8 @@
         api.get('/posts/' + params.slug).then(function (p) {
           setMeta(p.title + ' — ' + siteName() + ' Buying Guide', (p.excerpt || p.title).slice(0, 160),
             location.origin + '/guide/' + p.slug, p.image || '');
-          $('#post-root').innerHTML = header('Guide', {}) +
-            (p.image ? '<img src="' + esc(p.image) + '" style="width:100%;height:210px;object-fit:cover" alt="">' : '') +
+          $('#post-root').innerHTML = header('Guide', { heading: false }) +
+            (p.image ? '<img src="' + esc(p.image) + '" style="width:100%;height:210px;object-fit:cover" alt="' + esc(p.title || 'Guide') + '">' : '') +
             '<div class="detail-wrap"><span class="vbadge">' + esc(p.category || 'Guide') + '</span>' +
             '<h1 class="detail-title" style="margin-top:10px">' + esc(p.title) + '</h1>' +
             '<div class="detail-meta"><span>' + icon('person-outline') + esc(p.author || 'Lanka Lens') + '</span><span>' + icon('calendar-outline') + fmtDate(p.created_at) + '</span></div></div>' +
@@ -2821,7 +2824,7 @@
   };
 
   views.shops = function () {
-    var html = header('Camera Shops', {});
+    var html = header('Camera Shops', { heading: false });
     html += '<div class="hero-page" style="padding:22px 20px"><h1 style="font-size:20px">Trusted camera shops</h1><p>Authorised dealers and specialist stores across Sri Lanka.</p></div>';
     html += '<div id="shops-list">' + loadingHtml('Loading camera shops…') + '</div>';
     return {
@@ -2838,7 +2841,7 @@
           render: function (shops) {
             return '<div class="detail-wrap" style="display:grid;gap:14px">' + shops.map(function (s) {
               return '<div class="shop-card" data-nav="#/shop/' + esc(s.slug) + '">' +
-                '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="">' : '<span class="ph">' + icon('storefront-outline') + '</span>') + '</div>' +
+                '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="' + esc(s.name || 'Shop') + ' logo' + '">' : '<span class="ph">' + icon('storefront-outline') + '</span>') + '</div>' +
                 '<div class="body"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
                 '<div class="area">' + icon('location-outline') + esc([s.area, s.city, s.province].filter(Boolean).join(', ')) + '</div>' +
                 '<p class="fs13 muted" style="margin-top:8px;line-height:1.5">' + esc(s.description) + '</p>' +
@@ -2929,7 +2932,7 @@
   function staticPage(slug) {
     var cfg = STATIC_PAGES[slug];
     return function () {
-      var html = header(cfg.title, {});
+      var html = header(cfg.title, { heading: false });
       html += '<div class="hero-page"><h1>' + cfg.hero + '</h1><p>' + cfg.sub + '</p></div>';
       if (slug === 'faq') {
         html += '<div class="detail-wrap" style="padding-top:8px">' + FAQ_ITEMS.map(function (f, i) {
@@ -2976,7 +2979,7 @@
   views.help = staticPage('help');
 
   views.forgot = function () {
-    var html = header('Forgot Password', {});
+    var html = header('Forgot Password', { heading: false });
     html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Reset your password</h1><p>Enter your email and we’ll send you a reset link.</p></div>' +
       '<form id="forgot-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="fp-email">Email</label><input class="input" id="fp-email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autocapitalize="none" spellcheck="false"></div>' +
@@ -3014,7 +3017,7 @@
 
   views.resetPassword = function (q) {
     var token = q.get('token') || '';
-    var html = header('Set New Password', {});
+    var html = header('Set New Password', { heading: false });
     html += '<div class="auth-wrap"><div class="auth-hero"><h1>Choose a new password</h1><p>Enter a new password for your account.</p></div>' +
       '<form id="reset-form" class="auth-form"><div class="form-error" role="alert"></div>' +
       '<div class="form-group"><label for="rp-password">New password</label><input class="input" id="rp-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
@@ -3096,7 +3099,7 @@
           h += '<div class="section"><div class="section-head"><h2>' + icon('bar-chart-outline') + 'Per listing</h2></div></div>';
           if (!d.listings.length) h += '<div class="empty"><p>No listings yet.</p></div>';
           else h += '<div>' + d.listings.map(function (l) {
-            return '<div class="row-item"><div class="an-thumb">' + (l.image ? '<img src="' + esc(l.image) + '" alt="">' : icon('camera-outline')) + '</div>' +
+            return '<div class="row-item"><div class="an-thumb">' + (l.image ? '<img src="' + esc(l.image) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
               '<div class="ri-main" data-nav="#/ads/' + l.id + '"><b>' + esc(l.title) + '</b>' +
               '<span>' + l.views + ' views · ' + l.favorites + ' favs · ' + l.messages + ' msgs · ' + l.calls + ' calls · ' + l.whatsapp + ' WA · ' + l.offers + ' offers</span></div>' +
               statusChip(l.status) + '</div>';
@@ -3133,7 +3136,7 @@
         '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Shop details</h2></div>' +
         '<div class="form-group"><label>Business name</label><input class="input" name="name" value="' + esc(biz.name || '') + '" placeholder="e.g. Colombo Camera House"></div>' +
         '<div class="form-group"><label>Logo</label><div class="flex aic gap8">' +
-        (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
+        (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo' + '">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
         '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="logo-input" accept="image/*" hidden></label></div></div>' +
         '<div class="form-group"><label>Description</label><textarea class="textarea" name="description" style="min-height:90px">' + esc(biz.description || '') + '</textarea></div>' +
         '<div class="form-group"><label>Area / Street</label><input class="input" name="area" value="' + esc(biz.area || '') + '" placeholder="e.g. Galle Road"></div>' +
@@ -3169,7 +3172,7 @@
             if (!d.ok) throw new Error(d.error || 'Upload failed');
             biz.logo = d.data.items[0].url;
             var p = $('#logo-prev');
-            if (p) p.outerHTML = '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="">';
+            if (p) p.outerHTML = '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo' + '">';
           }).catch(function (e) { toast(e.message, 'error'); });
       });
       $('#shop-form').addEventListener('submit', function (e) {
@@ -3206,9 +3209,9 @@
           var hoursHtml = days.map(function (dd) {
             return '<div class="spec-row"><span class="k">' + dd[1] + '</span><span class="v">' + esc((b.opening_hours || {})[dd[0]] || '—') + '</span></div>';
           }).join('');
-          $('#shop-page').innerHTML = header(b.name, {}) +
+          $('#shop-page').innerHTML = header(b.name, { heading: false }) +
             '<div class="hero-page" style="text-align:center">' +
-            (b.logo ? '<img class="shop-logo" src="' + esc(b.logo) + '" alt="">' : '<div style="width:76px;height:76px;margin:0 auto;border-radius:18px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:34px">' + icon('briefcase-outline') + '</div>') +
+            (b.logo ? '<img class="shop-logo" src="' + esc(b.logo) + '" alt="' + esc(b.name || 'Shop') + ' logo' + '">' : '<div style="width:76px;height:76px;margin:0 auto;border-radius:18px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:34px">' + icon('briefcase-outline') + '</div>') +
             '<h1>' + esc(b.name) + '</h1>' +
             '<p>' + (b.verified ? icon('shield-checkmark') + ' Verified business · ' : '') + esc([b.city, b.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</p>' +
             '<p style="margin-top:8px">' + starsHtml(d.rating ? d.rating.avg : 0, d.rating ? d.rating.count : 0) + '</p></div>' +
@@ -3337,7 +3340,7 @@
           var pend = d.pending || [];
           h += pend.length ? pend.map(function (l) {
             return '<div class="a-row">' +
-              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
               '<div class="a-main"><b>' + esc(l.title) + '</b><span>' + fmtLKR(l.price) + ' · ' + esc(l.category_name || '') + ' · ' + timeAgo(l.created_at) + '</span></div>' +
               '<div class="a-actions">' +
               '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Approve</button>' +
@@ -3431,7 +3434,7 @@
           h += '<div class="a-sec-head"><h3>' + icon('albums-outline') + 'Listings (' + (d.listings || []).length + ')</h3></div>';
           h += (d.listings || []).length ? d.listings.map(function (l) {
             return '<div class="a-row" data-nav="#/ads/' + l.id + '">' +
-              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+              '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
               '<div class="a-main"><b>' + esc(l.title) + '</b><span>' + fmtLKR(l.price) + ' · ' + l.views + ' views</span></div>' +
               statusChip(l.status) + '<span class="chev">' + icon('chevron-forward-outline') + '</span></div>';
           }).join('') : '<p class="muted fs12 pad16">No listings.</p>';
@@ -3520,7 +3523,7 @@
               }
               actions += '<button class="btn btn-outline btn-sm" data-nav="#/ads/' + l.id + '">View</button>';
               return '<div class="a-row">' +
-                '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+                '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
                 '<div class="a-main"><b>' + esc(l.title) + '</b>' +
                 '<span>' + fmtLKR(l.price) + ' · ' + esc((l.seller && l.seller.name) || '') + ' · ' + l.views + ' views</span>' +
                 (l.rejection_reason ? '<span class="muted fs12" style="color:#C62828">' + icon('alert-circle-outline') + ' ' + esc(l.rejection_reason) + '</span>' : '') + '</div>' +
@@ -3920,7 +3923,7 @@
             var el = $('#ap-list');
             el.innerHTML = posts.map(function (p) {
               return '<div class="a-row">' +
-                '<div class="a-thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="">' : icon('reader-outline')) + '</div>' +
+                '<div class="a-thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : icon('reader-outline')) + '</div>' +
                 '<div class="a-main"><b>' + esc(p.title) + '</b><span>' + esc(p.category || 'Guide') + ' · ' + fmtDate(p.created_at) + '</span></div>' +
                 '<button class="btn btn-outline btn-sm" data-post-edit="' + p.id + '" data-post-slug="' + esc(p.slug) + '">' + icon('create-outline') + '</button>' +
                 '<button class="btn btn-danger btn-sm" data-post-del="' + p.id + '">' + icon('trash-outline') + '</button></div>';
