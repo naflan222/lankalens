@@ -353,7 +353,7 @@ button { font-family: inherit; }
 }
 .search-hero .ionicon { font-size: 21px; color: var(--muted); }
 .search-hero input {
-  flex: 1; border: 0; outline: none;
+  flex: 1; min-width: 0; border: 0; outline: none;
   height: 44px !important;
   font-size: 14.5px !important; color: var(--ink);
   background: transparent !important;
@@ -1197,20 +1197,24 @@ button { font-family: inherit; }
 .astat b { display: block; font-size: 16px; color: var(--ink); line-height: 1.1; }
 .astat span { font-size: 11px; color: var(--ink-2); }
 
-.a-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px 4px; }
+/* Admin action bars wrap on narrow screens: the status <select> and the search
+   field must never force the page wider than the viewport (320px phones). */
+.a-bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px 4px; flex-wrap: wrap; }
 .a-search {
-  flex: 1; display: flex; align-items: center; gap: 8px;
+  flex: 1; min-width: 150px; display: flex; align-items: center; gap: 8px;
   background: #eef1ef; border-radius: 12px; padding: 9px 12px; color: #9aa6a0;
 }
-.a-search input { border: 0; background: transparent; outline: none; flex: 1; font-size: 13.5px; color: var(--ink); }
+.a-search input { border: 0; background: transparent; outline: none; flex: 1; min-width: 0; font-size: 13.5px; color: var(--ink); }
 .a-search .ionicon { font-size: 17px; }
 
 .a-sec-head { display: flex; align-items: center; gap: 8px; padding: 18px 16px 8px; }
 .a-sec-head h3 { font-size: 15px; color: var(--ink); display: flex; align-items: center; gap: 8px; margin: 0; }
 .a-sec-head h3 .ionicon { color: var(--brand); }
 
+/* Rows wrap their actions/status to a second line instead of overflowing the
+   viewport when several buttons (Suspend/Sold/Feature/View…) don't fit. */
 .a-row {
-  display: flex; align-items: center; gap: 10px;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   background: var(--card); border-bottom: 1px solid var(--line); padding: 10px 14px;
 }
 .a-thumb { width: 48px; height: 48px; border-radius: 10px; overflow: hidden; background: #eef1ef; flex-shrink: 0; display: flex; align-items: center; justify-content: center; color: #b9c4bf; font-size: 22px; }
@@ -1218,7 +1222,7 @@ button { font-family: inherit; }
 .a-main { flex: 1; min-width: 0; }
 .a-main b { display: block; font-size: 13.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .a-main span { display: block; font-size: 12px; color: var(--ink-2); margin-top: 2px; }
-.a-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.a-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
 
 .a-table-wrap { overflow-x: auto; padding: 0 16px 12px; }
 .a-table { width: 100%; border-collapse: collapse; font-size: 12.5px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }

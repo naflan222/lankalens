@@ -30,9 +30,9 @@
     return '<div class="state-block state-empty"><div class="e-icon">' + icon(iconName || 'file-tray-outline') + '</div>' +
       '<h3>' + esc(msg || 'Nothing here yet') + '</h3>' + (sub ? '<p>' + esc(sub) + '</p>' : '') + '</div>';
   }
-  function errorHtml(msg, retryLabel, iconName) {
+  function errorHtml(msg, retryLabel, iconName, heading) {
     return '<div class="state-block state-error"><div class="e-icon err">' + icon(iconName || 'cloud-offline-outline') + '</div>' +
-      '<h3>Could not load this</h3><p>' + esc(msg || 'Something went wrong.') + '</p>' +
+      '<h3>' + esc(heading || 'Could not load this') + '</h3><p>' + esc(msg || 'Something went wrong.') + '</p>' +
       '<button class="btn btn-outline btn-sm" type="button" data-state-retry>' +
       icon('refresh-outline') + esc(retryLabel || 'Try again') + '</button></div>';
   }
@@ -2028,27 +2028,32 @@
     $$('[data-ad-act]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         var id = b.getAttribute('data-id');
-        var act = b.getAttribute('data-ad-act');
-        if (act === 'edit') { location.hash = '#/edit-ad/' + id; return; }
-        if (act === 'delete') {
+        // Named `adAct` (not `act`): a local named `act` used to shadow the
+        // global act() promise helper, so the delete/renew calls below threw
+        // `TypeError: act is not a function` after the request had already
+        // been sent — the listing was deleted/renewed server-side but the UI
+        // never confirmed or re-rendered.
+        var adAct = b.getAttribute('data-ad-act');
+        if (adAct === 'edit') { location.hash = '#/edit-ad/' + id; return; }
+        if (adAct === 'delete') {
           openDialog('Delete listing', '<p>This will permanently remove your listing. This cannot be undone.</p>', 'Delete', true, function () {
             act(api.del('/listings/' + id), 'Listing deleted', function () { closeDialog(); views.myAdsRemount(); });
           });
           return;
         }
         var statusMap = { pause: 'paused', resume: 'active', sold: 'sold', publish: 'active', resubmit: 'pending' };
-        if (statusMap[act]) {
-          api.patch('/listings/' + id, { status: statusMap[act] }).then(function () {
-            toast(act === 'sold' ? 'Listing marked as sold' : (act === 'resubmit' ? 'Listing resubmitted for review' : 'Listing ' + act + 'd'), 'success');
+        if (statusMap[adAct]) {
+          api.patch('/listings/' + id, { status: statusMap[adAct] }).then(function () {
+            toast(adAct === 'sold' ? 'Listing marked as sold' : (adAct === 'resubmit' ? 'Listing resubmitted for review' : 'Listing ' + adAct + 'd'), 'success');
             views.myAdsRemount();
           }).catch(function (e) { toast(e.message, 'error'); });
           return;
         }
-        if (act === 'renew') {
+        if (adAct === 'renew') {
           act(api.post('/listings/' + id + '/renew'), 'Listing renewed', function () { views.myAdsRemount(); });
           return;
         }
-        if (act === 'promote') {
+        if (adAct === 'promote') {
           openPromoteSheet(id);
           return;
         }
@@ -3370,6 +3375,40 @@
     return '<span class="status-chip" style="color:' + (color || '#74817C') + ';background:' + (color || '#74817C') + '1a">' + esc(status) + '</span>';
   }
 
+  /**
+   * Shared failure state for the admin panel. Every admin section's API
+   * .catch() funnels through here so that:
+   *   - a failed request shows WHICH section failed, with a Retry action —
+   *     never a permanent spinner;
+   *   - a rejected session (401: expired token or signed out elsewhere)
+   *     offers a way back to sign-in instead of a dead-end error;
+   *   - a container that no longer exists (the user navigated away before the
+   *     request settled) is ignored instead of throwing a TypeError inside
+   *     the catch handler and surfacing as an unhandled rejection.
+   */
+  function adminRenderError(el, e, section, retry) {
+    if (!el) return;
+    var label = ADMIN_SECTIONS.filter(function (s) { return s[0] === section; })[0];
+    var heading = label ? 'Could not load the ' + label[1].toLowerCase() + ' section' : null;
+    if (e && e.status === 401) {
+      el.innerHTML = errorHtml('Your session has expired. Please sign in again to continue.',
+        'Sign in', 'lock-closed-outline', heading || 'Session expired');
+      var signin = el.querySelector('[data-state-retry]');
+      if (signin) signin.addEventListener('click', function (ev) {
+        ev.preventDefault();
+        location.hash = '#/sign-in?next=' + encodeURIComponent(location.hash || '#/admin');
+      });
+      return;
+    }
+    var msg = (e && e.message) ? e.message : 'Something went wrong. Please try again.';
+    el.innerHTML = errorHtml(msg, 'Retry', null, heading);
+    var btn = el.querySelector('[data-state-retry]');
+    if (btn) btn.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      if (retry) retry();
+    });
+  }
+
   var ADMIN_VIEWS = {};
 
   /* ----- Dashboard ----- */
@@ -3414,7 +3453,7 @@
             var tabs = $('.admin-tabs'); if (tabs) tabs.innerHTML = adminTabsInner('dashboard');
             bindAdminTabs();
           }
-        }).catch(function (e) { $('#admin-body').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#admin-body'), e, 'dashboard', function () { loadAdminSection('dashboard'); }); });
       }
     };
   };
@@ -3442,7 +3481,7 @@
                 aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') +
                 '<span class="chev">' + icon('chevron-forward-outline') + '</span></div>';
             }).join('') || '<div class="empty"><p>No users found.</p></div>';
-          }).catch(function (e) { $('#au-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+          }).catch(function (e) { adminRenderError($('#au-list'), e, 'users', load); });
         }
         load();
         $('#au-search').addEventListener('submit', function (e) { e.preventDefault(); load(); });
@@ -3458,7 +3497,12 @@
       html: adminBody(html),
       mount: function () {
         api.get('/admin/users/' + id).then(function (d) {
-          var u = d.user, act = d.activity, biz = d.business;
+          // Named `activity` (not `act`): a local named `act` used to shadow
+          // the global act() promise helper, so the Ban and Delete buttons
+          // threw `TypeError: act is not a function` right after sending the
+          // request — the user was banned/deleted server-side but the dialog
+          // never confirmed and the detail view never re-rendered.
+          var u = d.user, activity = d.activity, biz = d.business;
           var h = '<div class="a-sec-head"><h3>' + avatarHtml(u, 'lg') + ' <span style="margin-left:8px">' + esc(u.name) + '</span></h3></div>';
           h += '<div class="info-card">' +
             '<div class="spec-row"><span class="k">Email</span><span class="v">' + esc(u.email) + '</span></div>' +
@@ -3470,7 +3514,7 @@
             '<div class="spec-row"><span class="k">Verified</span><span class="v">' + (u.verified ? 'Yes' : 'No') + ' · Email ' + (u.email_verified ? '✓' : '✗') + ' · Phone ' + (u.phone_verified ? '✓' : '✗') + '</span></div>' +
             '<div class="spec-row"><span class="k">Joined</span><span class="v">' + fmtDate(u.created_at) + '</span></div></div>';
 
-          var acts = [['camera-outline', act.listings, 'Listings'], ['heart-outline', act.favorites, 'Favorites'], ['cash-outline', act.offers_made, 'Offers made'], ['chatbubble-ellipses-outline', act.messages_sent, 'Msgs sent'], ['flag-outline', act.reports_against, 'Reports against'], ['card-outline', act.payments, 'Payments']];
+          var acts = [['camera-outline', activity.listings, 'Listings'], ['heart-outline', activity.favorites, 'Favorites'], ['cash-outline', activity.offers_made, 'Offers made'], ['chatbubble-ellipses-outline', activity.messages_sent, 'Msgs sent'], ['flag-outline', activity.reports_against, 'Reports against'], ['card-outline', activity.payments, 'Payments']];
           h += '<div class="a-sec-head"><h3>' + icon('bar-chart-outline') + 'Activity</h3></div>' +
             '<div class="admin-stats">' + acts.map(function (c) { return '<div class="astat"><b>' + c[1] + '</b><span>' + esc(c[2]) + '</span></div>'; }).join('') + '</div>';
 
@@ -3514,7 +3558,7 @@
               }).catch(function (e) { toast(e.message, 'error'); });
             });
           });
-        }).catch(function (e) { $('#aud-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#aud-root'), e, 'users', function () { loadAdminSection('users', params); }); });
       }
     };
   };
@@ -3524,8 +3568,9 @@
     $$('[data-mod]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         var lid = b.getAttribute('data-lid');
-        var act = b.getAttribute('data-mod');
-        if (act === 'reject') {
+        // `mod` (not `act`) so the global act() helper cannot be shadowed here.
+        var mod = b.getAttribute('data-mod');
+        if (mod === 'reject') {
           openDialog('Reject listing', '<p>Send the seller a reason for the rejection.</p><div class="form-group mt16"><label>Reason</label>' +
             '<textarea class="textarea" id="reject-reason" style="min-height:70px" placeholder="e.g. Missing photos / not enough details"></textarea></div>',
             'Reject', true, function () {
@@ -3535,8 +3580,8 @@
             });
           return;
         }
-        api.post('/admin/listings/' + lid + '/moderate', { action: act }).then(function () {
-          toast('Listing ' + act.replace('_', ' '), 'success');
+        api.post('/admin/listings/' + lid + '/moderate', { action: mod }).then(function () {
+          toast('Listing ' + mod.replace('_', ' '), 'success');
           loadAdminSection('listings');
         }).catch(function (e) { toast(e.message, 'error'); });
       });
@@ -3584,7 +3629,7 @@
                 '<div class="a-actions" style="flex-wrap:wrap;justify-content:flex-end">' + actions + '</div></div>';
             }).join('') || '<div class="empty"><p>No listings found.</p></div>';
             bindModeration(el);
-          }).catch(function (e) { $('#al-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+          }).catch(function (e) { adminRenderError($('#al-list'), e, 'listings', load); });
         }
         load();
         $('#al-search').addEventListener('submit', function (e) { e.preventDefault(); load(); });
@@ -3630,7 +3675,7 @@
                   });
               });
             });
-          }).catch(function (e) { $('#ar-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+          }).catch(function (e) { adminRenderError($('#ar-list'), e, 'reports', load); });
         }
         load();
         $('#ar-status').addEventListener('change', load);
@@ -3778,7 +3823,7 @@
                 });
               });
             });
-          }).catch(function (e) { $('#ac-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+          }).catch(function (e) { adminRenderError($('#ac-list'), e, 'categories', load); });
         }
         load();
       }
@@ -3837,7 +3882,7 @@
                 act(api.del('/admin/models/' + a.getAttribute('data-model-del')), 'Model deleted', function () { load(); });
               });
             });
-          }).catch(function (e) { $('#ab-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+          }).catch(function (e) { adminRenderError($('#ab-list'), e, 'brands', load); });
         }
         load();
       }
@@ -3908,7 +3953,7 @@
               act(api.del('/admin/districts/' + b.getAttribute('data-dist-del')), 'District deleted', function () { ADMIN_VIEWS.locations().mount(); });
             });
           });
-        }).catch(function (e) { $('#aloc-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#aloc-list'), e, 'locations', function () { loadAdminSection('locations'); }); });
       }
     };
   };
@@ -3938,9 +3983,13 @@
             }).join('')) : '<p class="muted fs12 pad16">No promotions purchased yet.</p>');
           }, function (e) {
             var el = $('#apromo');
-            if (el) el.innerHTML = h + errorHtml((e && e.message) || 'Could not load promotions.', 'Reload', 'alert-circle-outline');
+            if (el) {
+              el.innerHTML = h + errorHtml((e && e.message) || 'Could not load promotions.', 'Reload', 'alert-circle-outline');
+              var btn = el.querySelector('[data-state-retry]');
+              if (btn) btn.addEventListener('click', function () { loadAdminSection('promotions'); });
+            }
           });
-        }).catch(function (e) { $('#apromo').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#apromo'), e, 'promotions', function () { loadAdminSection('promotions'); }); });
       }
     };
   };
@@ -3958,7 +4007,7 @@
             return '<tr><td>' + esc(r.transaction_id) + '</td><td>' + esc(r.user_name || r.user_email || '') + '</td><td>' + esc(r.package_name || r.package) + '</td><td>' + fmtLKR(r.amount) + ' ' + esc(r.currency) + '</td>' +
               '<td>' + aChip(r.status, statusColor[r.status]) + '</td><td>' + fmtDate(r.created_at) + '</td></tr>';
           }).join('')) : '<div class="empty"><p>No payments yet.</p></div>';
-        }).catch(function (e) { $('#apay').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#apay'), e, 'payments', function () { loadAdminSection('payments'); }); });
       }
     };
   };
@@ -3982,14 +4031,7 @@
                 '<button class="btn btn-danger btn-sm" data-post-del="' + p.id + '">' + icon('trash-outline') + '</button></div>';
             }).join('') || '<div class="empty"><p>No posts yet.</p></div>';
             bindPostRows();
-          }).catch(function (e) {
-            var el = $('#ap-list');
-            if (el) {
-              el.innerHTML = errorHtml((e && e.message) || 'Could not load posts.', 'Reload posts');
-              var btn = el.querySelector('[data-state-retry]');
-              if (btn) btn.addEventListener('click', function () { load(); });
-            }
-          });
+          }).catch(function (e) { adminRenderError($('#ap-list'), e, 'posts', load); });
         }
         function bindPostRows() {
             $('#ap-add').addEventListener('click', function () { openPostEditor(null); });
@@ -4092,7 +4134,7 @@
               refreshMeta();
             }).catch(function (er) { toast(er.message, 'error'); });
           });
-        }).catch(function (e) { $('#as-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#as-root'), e, 'settings', function () { loadAdminSection('settings'); }); });
       }
     };
   };
@@ -4108,7 +4150,7 @@
           el.innerHTML = rows.length ? adminTable(['Admin', 'Action', 'Entity', 'Detail', 'When'], rows.map(function (r) {
             return '<tr><td>' + esc(r.admin_name || '—') + '</td><td>' + aChip(r.action, '#5B6BB0') + '</td><td>' + esc(r.entity + (r.entity_id ? ' #' + r.entity_id : '')) + '</td><td>' + esc(r.detail || '') + '</td><td>' + timeAgo(r.created_at) + '</td></tr>';
           }).join('')) : '<div class="empty"><p>No audit entries yet.</p></div>';
-        }).catch(function (e) { $('#aa-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }).catch(function (e) { adminRenderError($('#aa-list'), e, 'audit', function () { loadAdminSection('audit'); }); });
       }
     };
   };
@@ -4128,6 +4170,13 @@
       settings: ADMIN_VIEWS.settings,
       audit: ADMIN_VIEWS.audit
     };
+    // `fn` was previously assigned without a `var` declaration. Inside this
+    // file's 'use strict' IIFE that assignment throws
+    // `ReferenceError: fn is not defined`, which aborted loadAdminSection()
+    // before ANY section could render — the admin panel stayed on its loading
+    // spinner forever (every tab, every #/admin/<section> route). Declaring it
+    // is the root-cause fix for the admin page never finishing its load.
+    var fn;
     if (section === 'users' && params && params.id) {
       fn = ADMIN_VIEWS.userDetail;
     } else {
@@ -4136,13 +4185,30 @@
     }
     var body = $('#admin-body');
     if (!body) return;
-    var v = fn(params);
+    var v;
+    try {
+      v = fn(params);
+    } catch (e) {
+      // A section view that throws while building its markup must never leave
+      // the panel stuck on the spinner — show the failure with a Retry.
+      console.error('[LankaLens] admin section "' + section + '" failed to render:', e);
+      adminRenderError(body, e, section, function () { loadAdminSection(section, params); });
+      return;
+    }
     body.innerHTML = v.html;
     // re-render active tab bar
     var tabs = $('.admin-tabs');
     if (tabs) tabs.innerHTML = adminTabsInner(section);
     bindAdminTabs();
-    if (v.mount) v.mount();
+    if (v.mount) {
+      try {
+        v.mount();
+      } catch (e) {
+        // Same guarantee for the async boot path of a section.
+        console.error('[LankaLens] admin section "' + section + '" failed to load:', e);
+        adminRenderError(body, e, section, function () { loadAdminSection(section, params); });
+      }
+    }
   }
 
   views.admin = function () {
