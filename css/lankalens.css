@@ -422,6 +422,8 @@ button { font-family: inherit; }
 .hscroll::-webkit-scrollbar { display: none; }
 .hscroll .card { flex: 0 0 158px; scroll-snap-align: start; }
 .hscroll .card-sm { flex: 0 0 132px; scroll-snap-align: start; }
+.hscroll .lcard { flex: 0 0 158px; scroll-snap-align: start; min-width: 158px; }
+.hscroll .lcard.card-sm { flex: 0 0 132px; min-width: 132px; }
 
 /* Listing card */
 .lcard {
