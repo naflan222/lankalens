@@ -30,7 +30,9 @@ python3 server/app.py        # serves on http://localhost:8000
 | Shop owner | ishara@lankalens.lk | password123 |
 | Admin | admin@lankalens.lk | admin1234 |
 
-## What works (Part 1)
+## What works
+
+**Part 1 — marketplace base**
 
 - **Home** — header/logo, search, main categories, featured & latest listings,
   popular brands, camera shops, buying guides, safety, footer.
@@ -47,6 +49,42 @@ python3 server/app.py        # serves on http://localhost:8000
 - **My Ads** (mark sold / delete), **Favorites**, **Chat**, **Offers**, **Notifications**.
 - **Info pages** — About, Safety, Buying Guide, Sell Your Camera, Shops, Privacy,
   Terms, FAQ, Help, Contact, Blog.
+
+**Part 2 — seller & buyer experience**
+
+- **Authentication** — sign up / login / logout, forgot & reset password, email
+  verification and phone verification (OTP, dev-mode codes surfaced for local
+  testing). PBKDF2 password hashing.
+- **Seller types** — Individual sellers and Business sellers (business name,
+  logo, description, location, phone, WhatsApp, opening hours) with a public
+  shop page at `#/shop/<slug>`.
+- **My Listings** — statuses Active / Pending / Draft / Sold / Expired / Paused,
+  with actions Edit, Delete, Pause, Resume, Renew, Mark Sold and Promote (feature).
+- **Post an Ad wizard** — a 10-step flow (category → brand/model → details →
+  condition → price → description → photos → location → contact options →
+  preview/publish) plus Save as Draft.
+- **Image upload** — up to 15 images with preview, delete, reorder, cover
+  selection, server-side JPEG re-compression, thumbnail generation, file-size
+  and image-type validation.
+- **Search & filters** — keyword, category, brand, model, condition, price,
+  location, plus category-specific filters (shutter count, mount, focal length,
+  aperture, resolution, battery count, flight time). Sorts: Recommended,
+  Newest, Price ↑/↓, Most viewed.
+- **Favorites**, **Chat** (read/unread, listing attachment, block, report user),
+  **Make Offer** (accept / decline / counter-offer, linked to listing).
+- **Contact tracking** — Call / WhatsApp / Chat clicks recorded for analytics.
+- **Notifications** — message, offer, listing status, expiring-soon, favorite,
+  promotion and rating events.
+- **Reports** — scam, fake product, wrong information, duplicate, wrong category,
+  prohibited item, other.
+- **Seller analytics** — views, favorites, messages, calls, WhatsApp clicks and
+  offers, per listing and aggregate.
+- **Seller profiles** — photo, rating (stars + reviews), member since, verified
+  badge, active listings.
+
+> No email/SMS gateway is configured, so verification codes and reset links are
+> surfaced in the API responses under a `dev` field for local testing (the same
+> flow works unchanged once a real provider is plugged in).
 
 ## Project layout
 

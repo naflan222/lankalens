@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Lanka Lens — Sri Lankan camera marketplace
-Flask + SQLite backend (Part 1: core marketplace).
+Flask + SQLite backend (Part 2: users, listings, search & communication).
 
 Run:  python server/app.py
 """
@@ -27,6 +27,7 @@ UPLOAD_DIR = os.path.join(ROOT, "uploads")
 ALLOWED_IMG = {"jpg", "jpeg", "png", "webp", "gif"}
 MAX_IMG_BYTES = 8 * 1024 * 1024
 PER_PAGE = 24
+EXPIRY_DAYS = 30
 
 CONDITIONS = [
     "Brand New",
@@ -36,6 +37,28 @@ CONDITIONS = [
     "Fair",
     "For Parts / Repair",
 ]
+
+LISTING_STATUSES = {"active", "pending", "draft", "sold", "expired", "paused"}
+
+REPORT_REASONS = [
+    "Scam",
+    "Fake product",
+    "Wrong information",
+    "Duplicate",
+    "Wrong category",
+    "Prohibited item",
+    "Other",
+]
+
+# Spec facets shown per top-level category (search filters that adapt by category).
+FACET_SPECS = {
+    "cameras":       ["shutter_count", "megapixels", "video_resolution", "body_kit"],
+    "lenses":        ["mount", "focal_length", "max_aperture", "image_stabilization"],
+    "action-cameras": ["resolution"],
+    "drones":        ["flight_time", "battery_count"],
+    "accessories":   ["compatibility"],
+}
+
 
 # ---------------------------------------------------------------------------
 # Database
@@ -105,6 +128,9 @@ CREATE TABLE IF NOT EXISTS users (
     bio TEXT DEFAULT '',
     avatar TEXT DEFAULT '',
     verified INTEGER DEFAULT 0,
+    email_verified INTEGER DEFAULT 0,
+    phone_verified INTEGER DEFAULT 0,
+    seller_type TEXT DEFAULT 'individual',
     is_admin INTEGER DEFAULT 0,
     created_at INTEGER
 );
@@ -113,6 +139,16 @@ CREATE TABLE IF NOT EXISTS sessions (
     token TEXT PRIMARY KEY,
     user_id INTEGER NOT NULL,
     created_at INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS tokens (
+    token TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT DEFAULT '',
+    created_at INTEGER,
+    expires_at INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -137,8 +173,10 @@ CREATE TABLE IF NOT EXISTS listings (
     status TEXT DEFAULT 'active',
     views INTEGER DEFAULT 0,
     specs TEXT DEFAULT '{}',
+    contact_prefs TEXT DEFAULT '{}',
     created_at INTEGER,
     updated_at INTEGER,
+    expiry_at INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE CASCADE
 );
@@ -158,6 +196,7 @@ CREATE TABLE IF NOT EXISTS offers (
     buyer_id INTEGER NOT NULL,
     seller_id INTEGER NOT NULL,
     amount INTEGER,
+    counter_amount INTEGER,
     message TEXT DEFAULT '',
     status TEXT DEFAULT 'pending',
     created_at INTEGER,
@@ -198,6 +237,63 @@ CREATE TABLE IF NOT EXISTS reports (
     details TEXT DEFAULT '',
     created_at INTEGER,
     FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS user_reports (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    reporter_id INTEGER NOT NULL,
+    reported_id INTEGER NOT NULL,
+    reason TEXT DEFAULT '',
+    details TEXT DEFAULT '',
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS contact_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    listing_id INTEGER NOT NULL,
+    seller_id INTEGER NOT NULL,
+    buyer_id INTEGER,
+    kind TEXT DEFAULT '',
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS ratings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    seller_id INTEGER NOT NULL,
+    buyer_id INTEGER NOT NULL,
+    listing_id INTEGER,
+    stars INTEGER NOT NULL,
+    comment TEXT DEFAULT '',
+    created_at INTEGER,
+    UNIQUE(buyer_id, seller_id),
+    FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(buyer_id) REFERENCES users(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS blocks (
+    user_id INTEGER NOT NULL,
+    blocked_id INTEGER NOT NULL,
+    created_at INTEGER,
+    PRIMARY KEY(user_id, blocked_id)
+);
+
+CREATE TABLE IF NOT EXISTS businesses (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    name TEXT NOT NULL,
+    slug TEXT UNIQUE NOT NULL,
+    logo TEXT DEFAULT '',
+    description TEXT DEFAULT '',
+    province TEXT DEFAULT '',
+    district TEXT DEFAULT '',
+    city TEXT DEFAULT '',
+    area TEXT DEFAULT '',
+    phone TEXT DEFAULT '',
+    whatsapp TEXT DEFAULT '',
+    opening_hours TEXT DEFAULT '{}',
+    verified INTEGER DEFAULT 0,
+    created_at INTEGER,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS contact_messages (
@@ -244,6 +340,31 @@ CREATE TABLE IF NOT EXISTS brands (
     category TEXT DEFAULT ''
 );
 """
+
+
+def migrate(conn):
+    """Add columns introduced after the initial Part 1 schema (idempotent)."""
+    def cols(table):
+        return {r["name"] for r in [dict(x) for x in conn.execute(f"PRAGMA table_info({table})")]}
+
+    uc = cols("users")
+    if "email_verified" not in uc:
+        conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
+    if "phone_verified" not in uc:
+        conn.execute("ALTER TABLE users ADD COLUMN phone_verified INTEGER DEFAULT 0")
+    if "seller_type" not in uc:
+        conn.execute("ALTER TABLE users ADD COLUMN seller_type TEXT DEFAULT 'individual'")
+
+    lc = cols("listings")
+    if "expiry_at" not in lc:
+        conn.execute("ALTER TABLE listings ADD COLUMN expiry_at INTEGER")
+    if "contact_prefs" not in lc:
+        conn.execute("ALTER TABLE listings ADD COLUMN contact_prefs TEXT DEFAULT '{}'")
+
+    oc = cols("offers")
+    if "counter_amount" not in oc:
+        conn.execute("ALTER TABLE offers ADD COLUMN counter_amount INTEGER")
+    conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -454,8 +575,16 @@ def public_user(row):
         "whatsapp": row["whatsapp"], "province": row["province"],
         "district": row["district"], "city": row["city"], "bio": row["bio"],
         "avatar": row["avatar"], "verified": bool(row["verified"]),
+        "seller_type": row.get("seller_type") or "individual",
         "created_at": row["created_at"],
     }
+
+
+def seller_rating(uid):
+    row = query(
+        "SELECT COUNT(*) n, COALESCE(AVG(stars), 0) avg FROM ratings WHERE seller_id = ?",
+        (uid,), one=True)
+    return {"count": row["n"], "avg": round(row["avg"], 1)}
 
 
 def category_tree():
@@ -474,9 +603,28 @@ def category_tree():
     return roots
 
 
-def serialize_listing(l, extra=None):
+def _top_category_for(cat_id):
+    """Return the top-level category slug/name for a (possibly nested) category."""
+    cat = query("SELECT id, slug, name, parent_id FROM categories WHERE id = ?", (cat_id,), one=True)
+    while cat and cat["parent_id"]:
+        parent = query("SELECT id, slug, name, parent_id FROM categories WHERE id = ?", (cat["parent_id"],), one=True)
+        if not parent:
+            break
+        cat = parent
+    return cat
+
+
+def serialize_listing(l, include_seller=True):
     images = json.loads(l.get("images") or "[]")
     specs = json.loads(l.get("specs") or "{}")
+    prefs = json.loads(l.get("contact_prefs") or "{}")
+    if not isinstance(prefs, dict):
+        prefs = {}
+    status = l.get("status")
+    expiry = l.get("expiry_at")
+    # Effective status: an active listing past its expiry date reads as expired.
+    if status == "active" and expiry and int(expiry) < now():
+        status = "expired"
     out = {
         "id": l["id"],
         "title": l["title"],
@@ -493,23 +641,29 @@ def serialize_listing(l, extra=None):
         "location": ", ".join([x for x in [l.get("city"), l.get("province")] if x]),
         "images": images,
         "featured": bool(l.get("featured")),
-        "status": l.get("status"),
+        "status": status,
         "views": l.get("views") or 0,
         "specs": specs,
+        "contact_prefs": prefs,
         "description": l.get("description") or "",
         "created_at": l.get("created_at"),
         "updated_at": l.get("updated_at"),
+        "expiry_at": expiry,
         "category_id": l.get("category_id"),
     }
     if l.get("category_name"):
         out["category_name"] = l["category_name"]
     if l.get("category_slug"):
         out["category_slug"] = l["category_slug"]
-    seller = query(
-        "SELECT id, name, phone, whatsapp, province, district, city, bio, avatar, verified, created_at FROM users WHERE id = ?",
-        (l["user_id"],), one=True)
-    if seller:
-        out["seller"] = public_user(seller)
+    if include_seller:
+        seller = query(
+            "SELECT id, name, phone, whatsapp, province, district, city, bio, avatar, verified, seller_type, created_at FROM users WHERE id = ?",
+            (l["user_id"],), one=True)
+        if seller:
+            out["seller"] = public_user(seller)
+            biz = query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True)
+            if biz:
+                out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz["logo"]}
     return out
 
 
@@ -520,10 +674,46 @@ def listing_query_base():
     )
 
 
-def notify(user_id, type_, title, body, link=""):
+def expire_overdue():
+    """Mark past-due active listings as expired (cheap, run on read)."""
+    execute("UPDATE listings SET status = 'expired' WHERE status = 'active' AND expiry_at IS NOT NULL AND expiry_at < ?", (now(),))
+
+
+def notify(user_id, type_, title, body, link="", dedupe=None):
+    if dedupe:
+        row = query(
+            "SELECT id FROM notifications WHERE user_id = ? AND type = ? AND link = ? LIMIT 1",
+            (user_id, type_, dedupe), one=True)
+        if row:
+            return
     execute(
         "INSERT INTO notifications (user_id, type, title, body, link, read, created_at) VALUES (?,?,?,?,?,0,?)",
         (user_id, type_, title, body, link, now()))
+
+
+def make_token(user_id, kind, value="", ttl=3600):
+    token = secrets.token_hex(32)
+    execute("DELETE FROM tokens WHERE user_id = ? AND kind = ?", (user_id, kind))
+    execute("INSERT INTO tokens (token, user_id, kind, value, created_at, expires_at) VALUES (?,?,?,?,?,?)",
+            (token, user_id, kind, value, now(), now() + ttl))
+    return token
+
+
+def consume_token(token, kind):
+    row = query("SELECT * FROM tokens WHERE token = ? AND kind = ?", (token, kind), one=True)
+    if not row:
+        return None
+    if row["expires_at"] and row["expires_at"] < now():
+        execute("DELETE FROM tokens WHERE token = ?", (token,))
+        return None
+    return row
+
+
+def record_contact(listing_id, seller_id, buyer_id, kind):
+    if buyer_id and buyer_id == seller_id:
+        return
+    execute("INSERT INTO contact_events (listing_id, seller_id, buyer_id, kind, created_at) VALUES (?,?,?,?,?)",
+            (listing_id, seller_id, buyer_id, kind, now()))
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +744,9 @@ def user_payload(u):
         "phone": u["phone"], "whatsapp": u["whatsapp"],
         "province": u["province"], "district": u["district"], "city": u["city"],
         "bio": u["bio"], "avatar": u["avatar"], "verified": bool(u["verified"]),
+        "email_verified": bool(u.get("email_verified")),
+        "phone_verified": bool(u.get("phone_verified")),
+        "seller_type": u.get("seller_type") or "individual",
         "is_admin": bool(u["is_admin"]), "created_at": u["created_at"],
     }
 
@@ -631,6 +824,7 @@ def meta():
         "categories": category_tree(),
         "conditions": CONDITIONS,
         "brands": [r["name"] for r in query("SELECT name FROM brands ORDER BY name")],
+        "report_reasons": REPORT_REASONS,
     })
 
 
@@ -684,6 +878,12 @@ def build_listing_where(args):
         conds.append("l.brand = ?")
         params.append(brand)
 
+    model = (args.get("model") or "").strip()
+    if model:
+        like = f"%{model}%"
+        conds.append("(l.model LIKE ? OR l.title LIKE ?)")
+        params += [like, like]
+
     condition = (args.get("condition") or "").strip()
     if condition:
         conds.append("l.condition = ?")
@@ -711,6 +911,32 @@ def build_listing_where(args):
     if args.get("featured") == "1":
         conds.append("l.featured = 1")
 
+    # Generic spec filters: spec_<field>=value (exact),
+    # spec_<field>_min / spec_<field>_max (numeric range).
+    for key in list(args.keys()):
+        val = args.get(key)
+        if not val:
+            continue
+        if key.startswith("spec_"):
+            field = key[5:]
+            if field.endswith("_min"):
+                f = field[:-4]
+                try:
+                    conds.append(f"CAST(REPLACE(json_extract(l.specs, ?), ',', '') AS INTEGER) >= ?")
+                    params += [f"$.{f}", int(val)]
+                except ValueError:
+                    pass
+            elif field.endswith("_max"):
+                f = field[:-4]
+                try:
+                    conds.append(f"CAST(REPLACE(json_extract(l.specs, ?), ',', '') AS INTEGER) <= ?")
+                    params += [f"$.{f}", int(val)]
+                except ValueError:
+                    pass
+            else:
+                conds.append("json_extract(l.specs, ?) = ?")
+                params += [f"$.{field}", val]
+
     if args.get("status"):
         conds.append("l.status = ?"); params.append(args["status"])
     else:
@@ -722,9 +948,11 @@ def build_listing_where(args):
 
 @app.route("/api/listings")
 def listings():
+    expire_overdue()
     where, params = build_listing_where(request.args)
-    sort = request.args.get("sort", "newest")
+    sort = request.args.get("sort", "recommended")
     order = {
+        "recommended": "l.featured DESC, l.views DESC, l.created_at DESC",
         "newest": "l.created_at DESC",
         "oldest": "l.created_at ASC",
         "price_asc": "l.price ASC",
@@ -732,7 +960,10 @@ def listings():
         "popular": "l.views DESC",
     }.get(sort, "l.created_at DESC")
 
-    page = max(1, int(request.args.get("page", 1)))
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except ValueError:
+        page = 1
     total = query(f"SELECT COUNT(*) AS n FROM listings l JOIN categories c ON c.id = l.category_id{where}", params, one=True)["n"]
 
     sql = (listing_query_base() + where + f" ORDER BY {order}, l.id DESC LIMIT ? OFFSET ?")
@@ -741,13 +972,43 @@ def listings():
     return ok({"items": data, "total": total, "page": page, "pages": max(1, -(-total // PER_PAGE))})
 
 
+@app.route("/api/facets")
+def facets():
+    """Distinct filter values for a top-level category (drives the dynamic filter UI)."""
+    top = (request.args.get("category") or "").strip()
+    cat = query("SELECT id, slug, name FROM categories WHERE slug = ?", (top,), one=True)
+    if not cat:
+        return ok({"category": None, "brands": [], "models": [], "specs": {}})
+    child_ids = [cat["id"]]
+    for c in query("SELECT id FROM categories WHERE parent_id = ?", (cat["id"],)):
+        child_ids.append(c["id"])
+    ph = ",".join("?" * len(child_ids))
+    base_where = f" WHERE l.category_id IN ({ph}) AND l.status = 'active'"
+    brands = [r["v"] for r in query(f"SELECT DISTINCT l.brand AS v FROM listings l{base_where} AND l.brand != '' ORDER BY l.brand", child_ids)]
+    models = [r["v"] for r in query(f"SELECT DISTINCT l.model AS v FROM listings l{base_where} AND l.model != '' ORDER BY l.model", child_ids)]
+    specs = {}
+    for field in FACET_SPECS.get(top, []):
+        vals = [r["v"] for r in query(
+            f"SELECT DISTINCT json_extract(l.specs, ?) AS v FROM listings l{base_where} "
+            f"AND json_extract(l.specs, ?) IS NOT NULL AND json_extract(l.specs, ?) != '' ORDER BY v",
+            [f"$.{field}"] + child_ids + [f"$.{field}", f"$.{field}"])]
+        specs[field] = vals
+    return ok({"category": {"id": cat["id"], "slug": cat["slug"], "name": cat["name"]}, "brands": brands, "models": models, "specs": specs})
+
+
 @app.route("/api/listings/<int:lid>")
 def listing_detail(lid):
+    expire_overdue()
     row = query(listing_query_base() + " WHERE l.id = ?", (lid,), one=True)
     if not row:
         return err("Listing not found", 404)
-    execute("UPDATE listings SET views = views + 1 WHERE id = ?", (lid,))
-    row["views"] = (row["views"] or 0) + 1
+    if row["status"] != "active":
+        u = current_user()
+        if not u or (u["id"] != row["user_id"] and not u["is_admin"]):
+            return err("Listing not found", 404)
+    else:
+        execute("UPDATE listings SET views = views + 1 WHERE id = ?", (lid,))
+        row["views"] = (row["views"] or 0) + 1
     data = serialize_listing(row)
 
     cat = query("SELECT * FROM categories WHERE id = ?", (row["category_id"],), one=True)
@@ -759,6 +1020,12 @@ def listing_detail(lid):
         fields = json.loads(parent["fields"] or "[]")
     data["fields"] = fields
     data["category"] = {"id": cat["id"], "name": cat["name"], "slug": cat["slug"]} if cat else None
+    if parent:
+        data["top_category"] = {"id": parent["id"], "name": parent["name"], "slug": parent["slug"]}
+
+    # counts for analytics shown to the seller
+    data["favorites_count"] = query("SELECT COUNT(*) n FROM favorites WHERE listing_id = ?", (lid,), one=True)["n"]
+    data["offers_count"] = query("SELECT COUNT(*) n FROM offers WHERE listing_id = ?", (lid,), one=True)["n"]
 
     # related
     related = query(
@@ -797,21 +1064,35 @@ def create_listing():
     if not isinstance(specs, dict):
         specs = {}
 
+    prefs = body.get("contact_prefs") or {}
+    if not isinstance(prefs, dict):
+        prefs = {}
+
+    status = body.get("status") or "active"
+    if status not in ("active", "draft", "pending"):
+        status = "active"
+
     brand = specs.get("brand") or body.get("brand") or ""
     model = specs.get("model") or body.get("model") or ""
     year = specs.get("year") or body.get("year") or ""
 
+    ts = now()
     lid = execute(
         """INSERT INTO listings
            (user_id, category_id, title, slug, price, negotiable, condition, description,
-            brand, model, year, province, district, city, images, featured, status, specs, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,'active',?,?,?)""",
+            brand, model, year, province, district, city, images, featured, status, specs,
+            contact_prefs, created_at, updated_at, expiry_at)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)""",
         (u["id"], cat_id, title, slugify(title), price, 1 if body.get("negotiable") else 0,
          body.get("condition") or "Good", body.get("description") or "", brand, model, year,
          body.get("province") or "", body.get("district") or "", body.get("city") or "",
-         json.dumps(images), json.dumps(specs), now(), now()))
-    notify(u["id"], "listing", "Listing published", f"Your ad “{title}” is now live.", f"#/ads/{lid}")
-    return ok({"id": lid})
+         json.dumps(images), status, json.dumps(specs), json.dumps(prefs), ts, ts,
+         ts + EXPIRY_DAYS * 86400))
+    if status == "draft":
+        notify(u["id"], "listing", "Draft saved", f"Your draft “{title}” was saved.", f"#/my-ads")
+    else:
+        notify(u["id"], "listing", "Listing published", f"Your ad “{title}” is now live.", f"#/ads/{lid}")
+    return ok({"id": lid, "status": status})
 
 
 @app.route("/api/listings/<int:lid>", methods=["PATCH"])
@@ -823,12 +1104,82 @@ def update_listing(lid):
     if row["user_id"] != u["id"] and not u["is_admin"]:
         return err("Not allowed", 403)
     body = request.get_json(silent=True) or {}
+    sets, params = [], []
+
+    def setf(col, val):
+        sets.append(f"{col} = ?")
+        params.append(val)
+
+    if "title" in body:
+        t = (body["title"] or "").strip()
+        if not t:
+            return err("Title is required")
+        setf("title", t)
+        setf("slug", slugify(t))
+    if "price" in body:
+        try:
+            p = int(body["price"])
+        except (TypeError, ValueError):
+            return err("Price must be a number")
+        if p < 0:
+            return err("Price must be a number")
+        setf("price", p)
+    if "negotiable" in body:
+        setf("negotiable", 1 if body["negotiable"] else 0)
+    if "condition" in body:
+        setf("condition", body["condition"])
+    if "description" in body:
+        setf("description", body["description"])
+    if "province" in body:
+        setf("province", body["province"])
+    if "district" in body:
+        setf("district", body["district"])
+    if "city" in body:
+        setf("city", body["city"])
+    if "category_id" in body:
+        c = query("SELECT id FROM categories WHERE id = ?", (body["category_id"],), one=True)
+        if not c:
+            return err("Invalid category")
+        setf("category_id", body["category_id"])
+    if "images" in body:
+        imgs = body["images"] if isinstance(body["images"], list) else []
+        imgs = [i for i in imgs if isinstance(i, str) and (i.startswith("/uploads/") or i.startswith("/images/"))][:15]
+        setf("images", json.dumps(imgs))
+    if "specs" in body and isinstance(body["specs"], dict):
+        specs = body["specs"]
+        setf("specs", json.dumps(specs))
+        if specs.get("brand"):
+            setf("brand", specs["brand"])
+        if specs.get("model"):
+            setf("model", specs["model"])
+        if specs.get("year"):
+            setf("year", specs["year"])
+    if "contact_prefs" in body and isinstance(body["contact_prefs"], dict):
+        setf("contact_prefs", json.dumps(body["contact_prefs"]))
     if "status" in body:
-        execute("UPDATE listings SET status = ?, updated_at = ? WHERE id = ?",
-                (body["status"], now(), lid))
-    if "featured" in body:
-        execute("UPDATE listings SET featured = ?, updated_at = ? WHERE id = ?",
-                (1 if body["featured"] else 0, now(), lid))
+        st = body["status"]
+        if st not in LISTING_STATUSES:
+            return err("Invalid status")
+        setf("status", st)
+        if st == "active" and not row["expiry_at"]:
+            setf("expiry_at", now() + EXPIRY_DAYS * 86400)
+
+    if not sets:
+        return ok({"id": lid})
+    setf("updated_at", now())
+    execute(f"UPDATE listings SET {', '.join(sets)} WHERE id = ?", params + [lid])
+
+    if "status" in body:
+        st = body["status"]
+        labels = {"active": "published", "pending": "submitted for review", "draft": "saved as draft",
+                  "sold": "marked as sold", "expired": "expired", "paused": "paused"}
+        notify(u["id"], "listing", f"Listing {labels.get(st, st)}",
+               f"“{row['title']}” was {labels.get(st, st)}.", f"#/ads/{lid}")
+    if body.get("featured") is not None:
+        setf("featured", 1 if body["featured"] else 0)
+        execute(f"UPDATE listings SET featured = ? WHERE id = ?", (1 if body["featured"] else 0, lid))
+        if body["featured"]:
+            notify(u["id"], "promotion", "Listing promoted", f"“{row['title']}” is now featured.", f"#/ads/{lid}")
     return ok({"id": lid})
 
 
@@ -844,6 +1195,47 @@ def delete_listing(lid):
     return ok({"deleted": lid})
 
 
+@app.route("/api/listings/<int:lid>/renew", methods=["POST"])
+def renew_listing(lid):
+    u = require_auth()
+    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
+        return err("Listing not found", 404)
+    if row["user_id"] != u["id"] and not u["is_admin"]:
+        return err("Not allowed", 403)
+    new_expiry = now() + EXPIRY_DAYS * 86400
+    execute("UPDATE listings SET status = 'active', expiry_at = ?, updated_at = ? WHERE id = ?", (new_expiry, now(), lid))
+    notify(u["id"], "listing", "Listing renewed", f"“{row['title']}” is active for another {EXPIRY_DAYS} days.", f"#/ads/{lid}")
+    return ok({"id": lid, "expiry_at": new_expiry})
+
+
+@app.route("/api/listings/<int:lid>/promote", methods=["POST"])
+def promote_listing(lid):
+    u = require_auth()
+    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
+        return err("Listing not found", 404)
+    if row["user_id"] != u["id"] and not u["is_admin"]:
+        return err("Not allowed", 403)
+    execute("UPDATE listings SET featured = 1, updated_at = ? WHERE id = ?", (now(), lid))
+    notify(u["id"], "promotion", "Listing promoted", f"“{row['title']}” is now featured on the homepage.", f"#/ads/{lid}")
+    return ok({"id": lid, "featured": True})
+
+
+@app.route("/api/listings/<int:lid>/contact", methods=["POST"])
+def contact_listing(lid):
+    u = current_user()
+    body = request.get_json(silent=True) or {}
+    row = query("SELECT id, user_id FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
+        return err("Listing not found", 404)
+    kind = body.get("kind") or ""
+    if kind not in ("call", "whatsapp", "chat"):
+        return err("Invalid contact type")
+    record_contact(lid, row["user_id"], u["id"] if u else None, kind)
+    return ok({"recorded": True})
+
+
 @app.route("/api/listings/<int:lid>/report", methods=["POST"])
 def report_listing(lid):
     u = current_user()
@@ -851,8 +1243,9 @@ def report_listing(lid):
     row = query("SELECT id FROM listings WHERE id = ?", (lid,), one=True)
     if not row:
         return err("Listing not found", 404)
+    reason = (body.get("reason") or "Other").strip()
     execute("INSERT INTO reports (listing_id, reporter_id, reason, details, created_at) VALUES (?,?,?,?,?)",
-            (lid, u["id"] if u else None, body.get("reason") or "", body.get("details") or "", now()))
+            (lid, u["id"] if u else None, reason, body.get("details") or "", now()))
     return ok({"reported": True})
 
 
@@ -862,6 +1255,7 @@ def report_listing(lid):
 @app.route("/api/favorites")
 def list_favorites():
     u = require_auth()
+    expire_overdue()
     rows = query(
         "SELECT l.*, c.name AS category_name, c.slug AS category_slug, f.created_at AS fav_at "
         "FROM favorites f JOIN listings l ON l.id = f.listing_id "
@@ -882,10 +1276,14 @@ def favorite_ids():
 @app.route("/api/favorites/<int:lid>", methods=["POST"])
 def add_favorite(lid):
     u = require_auth()
-    if not query("SELECT id FROM listings WHERE id = ?", (lid,), one=True):
+    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
+    if not row:
         return err("Listing not found", 404)
     execute("INSERT OR IGNORE INTO favorites (user_id, listing_id, created_at) VALUES (?,?,?)",
             (u["id"], lid, now()))
+    if row["user_id"] != u["id"]:
+        notify(row["user_id"], "favorite", "Someone saved your listing",
+               f"{u['name']} added “{row['title']}” to their favorites.", f"#/ads/{lid}")
     return ok({"favorited": True})
 
 
@@ -899,6 +1297,19 @@ def remove_favorite(lid):
 # ---------------------------------------------------------------------------
 # Offers
 # ---------------------------------------------------------------------------
+def offer_payload(o):
+    listing = query("SELECT title, images FROM listings WHERE id = ?", (o["listing_id"],), one=True)
+    return {
+        "id": o["id"], "listing_id": o["listing_id"],
+        "buyer_id": o["buyer_id"], "seller_id": o["seller_id"],
+        "amount": o["amount"], "counter_amount": o.get("counter_amount"),
+        "message": o.get("message") or "", "status": o["status"],
+        "created_at": o["created_at"],
+        "listing_title": listing["title"] if listing else "",
+        "listing_images": json.loads((listing["images"] if listing else "") or "[]"),
+    }
+
+
 @app.route("/api/listings/<int:lid>/offer", methods=["POST"])
 def make_offer(lid):
     u = require_auth()
@@ -919,7 +1330,7 @@ def make_offer(lid):
         "INSERT INTO offers (listing_id, buyer_id, seller_id, amount, message, status, created_at) VALUES (?,?,?,?,?, 'pending', ?)",
         (lid, u["id"], row["user_id"], amount, body.get("message") or "", now()))
     notify(row["user_id"], "offer", "New offer received",
-           f"{u['name']} offered Rs. {amount:,} for “{row['title']}”.", f"#/my-ads")
+           f"{u['name']} offered Rs. {amount:,} for “{row['title']}”.", f"#/my-offers")
     return ok({"id": oid})
 
 
@@ -927,18 +1338,19 @@ def make_offer(lid):
 def my_offers():
     u = require_auth()
     received = query(
-        """SELECT o.*, l.title AS listing_title, l.images AS listing_images, u.name AS buyer_name
-           FROM offers o JOIN listings l ON l.id = o.listing_id
-           JOIN users u ON u.id = o.buyer_id WHERE o.seller_id = ? ORDER BY o.created_at DESC""",
-        (u["id"],))
+        """SELECT o.* FROM offers o WHERE o.seller_id = ? ORDER BY o.created_at DESC""", (u["id"],))
     sent = query(
-        """SELECT o.*, l.title AS listing_title, l.images AS listing_images, us.name AS seller_name
-           FROM offers o JOIN listings l ON l.id = o.listing_id
-           JOIN users us ON us.id = o.seller_id WHERE o.buyer_id = ? ORDER BY o.created_at DESC""",
-        (u["id"],))
-    for r in received + sent:
-        r["images"] = json.loads(r.get("listing_images") or "[]")
-    return ok({"received": received, "sent": sent})
+        """SELECT o.* FROM offers o WHERE o.buyer_id = ? ORDER BY o.created_at DESC""", (u["id"],))
+    def enrich(rows, name_col, other_is_buyer):
+        out = []
+        for r in rows:
+            p = offer_payload(r)
+            other_id = r["buyer_id"] if other_is_buyer else r["seller_id"]
+            other = query("SELECT id, name, avatar FROM users WHERE id = ?", (other_id,), one=True)
+            p[name_col] = other["name"] if other else "User"
+            out.append(p)
+        return out
+    return ok({"received": enrich(received, "buyer_name", True), "sent": enrich(sent, "seller_name", False)})
 
 
 @app.route("/api/offers/<int:oid>", methods=["POST"])
@@ -947,18 +1359,47 @@ def respond_offer(oid):
     row = query("SELECT * FROM offers WHERE id = ?", (oid,), one=True)
     if not row:
         return err("Offer not found", 404)
-    if row["seller_id"] != u["id"]:
-        return err("Not allowed", 403)
     body = request.get_json(silent=True) or {}
-    status = body.get("status")
-    if status not in ("accepted", "declined"):
-        return err("Invalid status")
-    execute("UPDATE offers SET status = ? WHERE id = ?", (status, oid))
-    listing = query("SELECT title FROM listings WHERE id = ?", (row["listing_id"],), one=True)
-    notify(row["buyer_id"], "offer", f"Offer {status}",
-           f"Your offer of Rs. {row['amount']:,} on “{listing['title']}” was {status}.",
-           f"#/ads/{row['listing_id']}")
-    return ok({"id": oid, "status": status})
+    action = body.get("action") or body.get("status")
+
+    # Seller acting on a pending offer: accept / decline / counter.
+    if row["seller_id"] == u["id"] and row["status"] == "pending":
+        if action in ("accepted", "accept"):
+            execute("UPDATE offers SET status = 'accepted' WHERE id = ?", (oid,))
+            notify(row["buyer_id"], "offer", "Offer accepted",
+                   f"Your offer of Rs. {row['amount']:,} was accepted.", f"#/ads/{row['listing_id']}")
+            return ok({"id": oid, "status": "accepted"})
+        if action in ("declined", "decline", "rejected", "reject"):
+            execute("UPDATE offers SET status = 'declined' WHERE id = ?", (oid,))
+            notify(row["buyer_id"], "offer", "Offer declined",
+                   f"Your offer of Rs. {row['amount']:,} was declined.", f"#/ads/{row['listing_id']}")
+            return ok({"id": oid, "status": "declined"})
+        if action == "counter":
+            try:
+                amt = int(body.get("amount"))
+            except (TypeError, ValueError):
+                return err("Enter a valid counter amount")
+            if amt <= 0:
+                return err("Enter a valid counter amount")
+            execute("UPDATE offers SET counter_amount = ?, status = 'countered' WHERE id = ?", (amt, oid))
+            notify(row["buyer_id"], "offer", "Seller countered",
+                   f"The seller countered with Rs. {amt:,}. Accept or make a new offer.", f"#/my-offers")
+            return ok({"id": oid, "status": "countered", "counter_amount": amt})
+
+    # Buyer acting on a counter: accept / decline.
+    if row["buyer_id"] == u["id"] and row["status"] == "countered":
+        if action in ("accepted", "accept"):
+            execute("UPDATE offers SET amount = counter_amount, status = 'accepted' WHERE id = ?", (oid,))
+            notify(row["seller_id"], "offer", "Counter accepted",
+                   f"The buyer accepted your counter of Rs. {row['counter_amount']:,}.", f"#/my-offers")
+            return ok({"id": oid, "status": "accepted"})
+        if action in ("declined", "decline", "rejected", "reject"):
+            execute("UPDATE offers SET status = 'declined' WHERE id = ?", (oid,))
+            notify(row["seller_id"], "offer", "Counter declined",
+                   f"The buyer declined your counter of Rs. {row['counter_amount']:,}.", f"#/my-offers")
+            return ok({"id": oid, "status": "declined"})
+
+    return err("Not allowed", 403)
 
 
 # ---------------------------------------------------------------------------
@@ -968,8 +1409,10 @@ def respond_offer(oid):
 def conversations():
     u = require_auth()
     rows = query(
-        """SELECT m.*, other.id AS other_id, other.name AS other_name, other.avatar AS other_avatar,
-                  l.title AS listing_title
+        """SELECT other.id AS other_id, other.name AS other_name, other.avatar AS other_avatar,
+                  m.body AS last_body, m.created_at AS last_at, m.sender_id AS last_sender,
+                  l.title AS listing_title, l.id AS listing_id,
+                  (SELECT COUNT(*) FROM messages x WHERE x.sender_id = other.id AND x.receiver_id = ? AND x.read = 0) AS unread
            FROM messages m
            JOIN users other ON other.id = CASE WHEN m.sender_id = ? THEN m.receiver_id ELSE m.sender_id END
            LEFT JOIN listings l ON l.id = m.listing_id
@@ -978,7 +1421,7 @@ def conversations():
                CASE WHEN sender_id = ? THEN receiver_id ELSE sender_id END
            )
            ORDER BY m.created_at DESC""",
-        (u["id"], u["id"], u["id"], u["id"]))
+        (u["id"], u["id"], u["id"], u["id"], u["id"]))
     return ok(rows)
 
 
@@ -992,8 +1435,18 @@ def chat_thread(other_id):
         (u["id"], other_id, other_id, u["id"]))
     execute("UPDATE messages SET read = 1 WHERE sender_id = ? AND receiver_id = ?",
             (other_id, u["id"]))
-    other = query("SELECT id, name, avatar, verified FROM users WHERE id = ?", (other_id,), one=True)
-    return ok({"messages": rows, "other": other})
+    other = query("SELECT id, name, avatar, verified, seller_type FROM users WHERE id = ?", (other_id,), one=True)
+    blocked = bool(query("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (u["id"], other_id), one=True))
+    blocked_by = bool(query("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (other_id, u["id"]), one=True))
+    listing = None
+    lid = query("SELECT MAX(listing_id) lid FROM messages WHERE listing_id IS NOT NULL AND (sender_id = ? OR receiver_id = ?) AND (sender_id = ? OR receiver_id = ?)",
+                (u["id"], u["id"], other_id, other_id), one=True)
+    if lid and lid["lid"]:
+        lrow = query("SELECT id, title, images, price FROM listings WHERE id = ?", (lid["lid"],), one=True)
+        if lrow:
+            listing = {"id": lrow["id"], "title": lrow["title"], "price": lrow["price"],
+                       "image": (json.loads(lrow["images"] or "[]") or [None])[0]}
+    return ok({"messages": rows, "other": other, "blocked": blocked, "blocked_by": blocked_by, "listing": listing})
 
 
 @app.route("/api/chat/<int:other_id>", methods=["POST"])
@@ -1002,6 +1455,8 @@ def send_message(other_id):
     other = query("SELECT * FROM users WHERE id = ?", (other_id,), one=True)
     if not other:
         return err("User not found", 404)
+    if query("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (other_id, u["id"]), one=True):
+        return err("You cannot message this user", 403)
     body = request.get_json(silent=True) or {}
     text = (body.get("body") or "").strip()
     if not text:
@@ -1013,12 +1468,45 @@ def send_message(other_id):
     return ok({"id": mid})
 
 
+@app.route("/api/chat/<int:other_id>/block", methods=["POST", "DELETE"])
+def block_user(other_id):
+    u = require_auth()
+    other = query("SELECT id FROM users WHERE id = ?", (other_id,), one=True)
+    if not other:
+        return err("User not found", 404)
+    if request.method == "DELETE":
+        execute("DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?", (u["id"], other_id))
+        return ok({"blocked": False})
+    execute("INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?,?,?)", (u["id"], other_id, now()))
+    return ok({"blocked": True})
+
+
+@app.route("/api/chat/<int:other_id>/report", methods=["POST"])
+def report_user(other_id):
+    u = require_auth()
+    other = query("SELECT id FROM users WHERE id = ?", (other_id,), one=True)
+    if not other:
+        return err("User not found", 404)
+    body = request.get_json(silent=True) or {}
+    execute("INSERT INTO user_reports (reporter_id, reported_id, reason, details, created_at) VALUES (?,?,?,?,?)",
+            (u["id"], other_id, body.get("reason") or "Other", body.get("details") or "", now()))
+    return ok({"reported": True})
+
+
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
 @app.route("/api/notifications")
 def notifications():
     u = require_auth()
+    # Surface "expiring soon" for the user's active listings.
+    expiring = query(
+        "SELECT * FROM listings WHERE user_id = ? AND status = 'active' AND expiry_at IS NOT NULL AND expiry_at < ?",
+        (u["id"], now() + 3 * 86400))
+    for l in expiring:
+        notify(u["id"], "expiring", "Listing expiring soon",
+               f"“{l['title']}” expires in under 3 days. Renew it to keep it live.",
+               f"#/ads/{l['id']}", dedupe=f"#/ads/{l['id']}")
     rows = query("SELECT * FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 60", (u["id"],))
     unread = sum(1 for r in rows if not r["read"])
     return ok({"items": rows, "unread": unread})
@@ -1029,6 +1517,33 @@ def read_notifications():
     u = require_auth()
     execute("UPDATE notifications SET read = 1 WHERE user_id = ?", (u["id"],))
     return ok({"read": True})
+
+
+# ---------------------------------------------------------------------------
+# Ratings
+# ---------------------------------------------------------------------------
+@app.route("/api/seller/<int:uid>/rate", methods=["POST"])
+def rate_seller(uid):
+    u = require_auth()
+    if u["id"] == uid:
+        return err("You cannot rate yourself")
+    if not query("SELECT id FROM users WHERE id = ?", (uid,), one=True):
+        return err("Seller not found", 404)
+    body = request.get_json(silent=True) or {}
+    try:
+        stars = int(body.get("stars") or 0)
+    except (TypeError, ValueError):
+        stars = 0
+    if stars < 1 or stars > 5:
+        return err("Rating must be between 1 and 5 stars")
+    execute(
+        """INSERT INTO ratings (seller_id, buyer_id, listing_id, stars, comment, created_at)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(buyer_id, seller_id) DO UPDATE SET stars = excluded.stars, comment = excluded.comment, created_at = excluded.created_at""",
+        (uid, u["id"], body.get("listing_id"), stars, (body.get("comment") or "")[:500], now()))
+    notify(uid, "rating", "New rating received",
+           f"{u['name']} rated you {stars} star(s).", "#/seller/" + str(uid))
+    return ok({"rated": True, "rating": seller_rating(uid)})
 
 
 # ---------------------------------------------------------------------------
@@ -1056,10 +1571,44 @@ def update_me():
     district = (body.get("district") or u["district"]).strip()[:60]
     city = (body.get("city") or u["city"]).strip()[:60]
     bio = (body.get("bio") or u["bio"]).strip()[:300]
+    seller_type = body.get("seller_type") or u.get("seller_type") or "individual"
+    if seller_type not in ("individual", "business"):
+        seller_type = "individual"
     execute(
-        "UPDATE users SET name=?, phone=?, whatsapp=?, province=?, district=?, city=?, bio=? WHERE id=?",
-        (name, phone, whatsapp, province, district, city, bio, u["id"]))
+        "UPDATE users SET name=?, phone=?, whatsapp=?, province=?, district=?, city=?, bio=?, seller_type=? WHERE id=?",
+        (name, phone, whatsapp, province, district, city, bio, seller_type, u["id"]))
+    # changing phone invalidates phone verification
+    if phone != (u["phone"] or ""):
+        execute("UPDATE users SET phone_verified = 0 WHERE id = ?", (u["id"],))
     return ok({"user": user_payload(query("SELECT * FROM users WHERE id = ?", (u["id"],), one=True))})
+
+
+@app.route("/api/me/avatar", methods=["POST"])
+def upload_avatar():
+    u = require_auth()
+    f = request.files.get("file")
+    if not f:
+        return err("No file uploaded")
+    ext = (f.filename or "").rsplit(".", 1)[-1].lower() if "." in (f.filename or "") else ""
+    if ext not in ALLOWED_IMG:
+        return err(f"Unsupported image type: {ext or 'unknown'}")
+    data = f.read()
+    if len(data) > MAX_IMG_BYTES:
+        return err("Image too large (max 8MB)")
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    name = f"avatar_{uuid.uuid4().hex}.jpg"
+    path = os.path.join(UPLOAD_DIR, name)
+    try:
+        from PIL import Image, ImageOps
+        img = Image.open(__import__("io").BytesIO(data))
+        img = ImageOps.exif_transpose(img).convert("RGB")
+        img = ImageOps.fit(img, (256, 256), Image.Resampling.LANCZOS)
+        img.save(path, "JPEG", quality=85)
+    except Exception:
+        with open(path, "wb") as fh:
+            fh.write(data)
+    execute("UPDATE users SET avatar = ? WHERE id = ?", (f"/uploads/{name}", u["id"]))
+    return ok({"url": f"/uploads/{name}"})
 
 
 @app.route("/api/me/password", methods=["POST"])
@@ -1077,18 +1626,147 @@ def change_password():
 
 @app.route("/api/seller/<int:uid>")
 def seller_profile(uid):
+    expire_overdue()
     row = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
     if not row:
         return err("Seller not found", 404)
     listings = query(listing_query_base() + " WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.created_at DESC", (uid,))
-    return ok({"seller": public_user(row), "listings": [serialize_listing(r) for r in listings]})
+    biz = query("SELECT * FROM businesses WHERE user_id = ?", (uid,), one=True)
+    ratings = query(
+        "SELECT r.*, u.name AS buyer_name FROM ratings r JOIN users u ON u.id = r.buyer_id WHERE r.seller_id = ? ORDER BY r.created_at DESC LIMIT 20",
+        (uid,))
+    return ok({
+        "seller": public_user(row),
+        "rating": seller_rating(uid),
+        "ratings": ratings,
+        "business": dict(biz) if biz else None,
+        "listings": [serialize_listing(r) for r in listings],
+    })
 
 
 @app.route("/api/me/listings")
 def my_listings():
     u = require_auth()
+    expire_overdue()
     rows = query(listing_query_base() + " WHERE l.user_id = ? ORDER BY l.created_at DESC", (u["id"],))
     return ok([serialize_listing(r) for r in rows])
+
+
+# ---------------------------------------------------------------------------
+# Seller analytics
+# ---------------------------------------------------------------------------
+@app.route("/api/me/analytics")
+def my_analytics():
+    u = require_auth()
+    listings = query("SELECT * FROM listings WHERE user_id = ? ORDER BY created_at DESC", (u["id"],))
+    ids = [l["id"] for l in listings]
+    views = sum(l["views"] or 0 for l in listings)
+    favorites = 0
+    if ids:
+        ph = ",".join("?" * len(ids))
+        favorites = query(f"SELECT COUNT(*) n FROM favorites WHERE listing_id IN ({ph})", ids, one=True)["n"]
+    messages = query("SELECT COUNT(*) n FROM messages WHERE receiver_id = ?", (u["id"],), one=True)["n"]
+    calls = query("SELECT COUNT(*) n FROM contact_events WHERE seller_id = ? AND kind = 'call'", (u["id"],), one=True)["n"]
+    whatsapp = query("SELECT COUNT(*) n FROM contact_events WHERE seller_id = ? AND kind = 'whatsapp'", (u["id"],), one=True)["n"]
+    offers = query("SELECT COUNT(*) n FROM offers WHERE seller_id = ?", (u["id"],), one=True)["n"]
+
+    per = []
+    for l in listings:
+        fav = query("SELECT COUNT(*) n FROM favorites WHERE listing_id = ?", (l["id"],), one=True)["n"]
+        msgs = query("SELECT COUNT(*) n FROM messages WHERE listing_id = ?", (l["id"],), one=True)["n"]
+        cl = query("SELECT COUNT(*) n FROM contact_events WHERE listing_id = ? AND kind = 'call'", (l["id"],), one=True)["n"]
+        wa = query("SELECT COUNT(*) n FROM contact_events WHERE listing_id = ? AND kind = 'whatsapp'", (l["id"],), one=True)["n"]
+        of = query("SELECT COUNT(*) n FROM offers WHERE listing_id = ?", (l["id"],), one=True)["n"]
+        img = json.loads(l["images"] or "[]")
+        per.append({
+            "id": l["id"], "title": l["title"], "status": l["status"],
+            "image": img[0] if img else None,
+            "views": l["views"] or 0, "favorites": fav, "messages": msgs,
+            "calls": cl, "whatsapp": wa, "offers": of,
+        })
+    return ok({
+        "summary": {"views": views, "favorites": favorites, "messages": messages,
+                    "calls": calls, "whatsapp": whatsapp, "offers": offers,
+                    "listings": len(listings)},
+        "listings": per,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Business sellers
+# ---------------------------------------------------------------------------
+def business_payload(b):
+    if not b:
+        return None
+    hours = b.get("opening_hours") or "{}"
+    try:
+        hours = json.loads(hours)
+    except Exception:
+        hours = {}
+    return {
+        "id": b["id"], "name": b["name"], "slug": b["slug"], "logo": b["logo"],
+        "description": b["description"], "province": b["province"], "district": b["district"],
+        "city": b["city"], "area": b["area"], "phone": b["phone"], "whatsapp": b["whatsapp"],
+        "opening_hours": hours, "verified": bool(b["verified"]),
+    }
+
+
+@app.route("/api/me/business", methods=["GET", "PUT"])
+def my_business():
+    u = require_auth()
+    if request.method == "GET":
+        b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
+        return ok(business_payload(b))
+    body = request.get_json(silent=True) or {}
+    name = (body.get("name") or "").strip()
+    if not name:
+        return err("Business name is required")
+    existing = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
+    if existing:
+        slug = existing["slug"]
+        if body.get("slug"):
+            slug = slugify(body["slug"])
+        execute(
+            """UPDATE businesses SET name=?, slug=?, logo=?, description=?, province=?, district=?, city=?, area=?,
+               phone=?, whatsapp=?, opening_hours=? WHERE user_id=?""",
+            (name, slug, body.get("logo") or existing["logo"], body.get("description") or existing["description"] or "",
+             body.get("province") or existing["province"] or "", body.get("district") or existing["district"] or "",
+             body.get("city") or existing["city"] or "", body.get("area") or existing["area"] or "",
+             body.get("phone") or existing["phone"] or "", body.get("whatsapp") or existing["whatsapp"] or "",
+             json.dumps(body.get("opening_hours") or {}), u["id"]))
+    else:
+        slug = slugify(body.get("slug") or name)
+        base = slug
+        i = 2
+        while query("SELECT id FROM businesses WHERE slug = ?", (slug,), one=True):
+            slug = f"{base}-{i}"
+            i += 1
+        execute(
+            """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
+               phone, whatsapp, opening_hours, verified, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
+            (u["id"], name, slug, body.get("logo") or "", body.get("description") or "",
+             body.get("province") or "", body.get("district") or "", body.get("city") or "",
+             body.get("area") or "", body.get("phone") or "", body.get("whatsapp") or "",
+             json.dumps(body.get("opening_hours") or {}), now()))
+        execute("UPDATE users SET seller_type = 'business' WHERE id = ?", (u["id"],))
+    b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
+    return ok(business_payload(b))
+
+
+@app.route("/api/business/<slug>")
+def business_page(slug):
+    b = query("SELECT * FROM businesses WHERE slug = ?", (slug,), one=True)
+    if not b:
+        return err("Shop not found", 404)
+    owner = query("SELECT id, name, phone, whatsapp, province, district, city, bio, avatar, verified, seller_type, created_at FROM users WHERE id = ?", (b["user_id"],), one=True)
+    listings = query(listing_query_base() + " WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.created_at DESC", (b["user_id"],))
+    return ok({
+        "business": business_payload(b),
+        "owner": public_user(owner) if owner else None,
+        "rating": seller_rating(b["user_id"]),
+        "listings": [serialize_listing(r) for r in listings],
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -1111,13 +1789,23 @@ def signup():
         return err("Password must be at least 6 characters")
     if query("SELECT id FROM users WHERE email = ?", (email,), one=True):
         return err("An account with this email already exists", 409)
+    seller_type = body.get("seller_type") or "individual"
+    if seller_type not in ("individual", "business"):
+        seller_type = "individual"
     uid = execute(
-        "INSERT INTO users (name, email, password_hash, phone, whatsapp, created_at) VALUES (?,?,?,?,?,?)",
-        (name, email, hash_password(password), (body.get("phone") or "").strip(), (body.get("whatsapp") or "").strip(), now()))
+        "INSERT INTO users (name, email, password_hash, phone, whatsapp, seller_type, email_verified, created_at) VALUES (?,?,?,?,?,?,0,?)",
+        (name, email, hash_password(password), (body.get("phone") or "").strip(),
+         (body.get("whatsapp") or "").strip(), seller_type, now()))
     token = secrets.token_hex(32)
     execute("INSERT INTO sessions (token, user_id, created_at) VALUES (?,?,?)", (token, uid, now()))
     u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
-    return ok({"token": token, "user": user_payload(u)})
+
+    # Email verification: token emailed in production; exposed in `dev` for local testing.
+    vtoken = make_token(uid, "email", ttl=86400)
+    return ok({
+        "token": token, "user": user_payload(u),
+        "dev": {"verify_email_token": vtoken, "verify_email_link": f"#/verify-email?token={vtoken}"},
+    })
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -1139,6 +1827,83 @@ def logout():
     if token.startswith("Bearer "):
         execute("DELETE FROM sessions WHERE token = ?", (token[7:],))
     return ok({"logged_out": True})
+
+
+@app.route("/api/auth/forgot", methods=["POST"])
+def forgot_password():
+    body = request.get_json(silent=True) or {}
+    email = (body.get("email") or "").strip().lower()
+    u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
+    if not u:
+        # Do not reveal whether the email exists.
+        return ok({"sent": True, "dev": None})
+    token = make_token(u["id"], "reset", ttl=3600)
+    return ok({"sent": True, "dev": {"reset_token": token, "reset_link": f"#/reset-password?token={token}"}})
+
+
+@app.route("/api/auth/reset", methods=["POST"])
+def reset_password():
+    body = request.get_json(silent=True) or {}
+    token = (body.get("token") or "").strip()
+    row = consume_token(token, "reset")
+    if not row:
+        return err("This reset link is invalid or has expired", 400)
+    new = (body.get("password") or "").strip()
+    if len(new) < 6:
+        return err("Password must be at least 6 characters")
+    execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(new), row["user_id"]))
+    execute("DELETE FROM tokens WHERE token = ?", (token,))
+    return ok({"reset": True})
+
+
+@app.route("/api/auth/verify-email", methods=["POST"])
+def verify_email():
+    body = request.get_json(silent=True) or {}
+    token = (body.get("token") or "").strip()
+    row = consume_token(token, "email")
+    if not row:
+        return err("This verification link is invalid or has expired", 400)
+    execute("UPDATE users SET email_verified = 1 WHERE id = ?", (row["user_id"],))
+    execute("DELETE FROM tokens WHERE token = ?", (token,))
+    return ok({"verified": True})
+
+
+@app.route("/api/auth/resend-verification", methods=["POST"])
+def resend_verification():
+    u = require_auth()
+    if u.get("email_verified"):
+        return ok({"verified": True, "dev": None})
+    token = make_token(u["id"], "email", ttl=86400)
+    return ok({"sent": True, "dev": {"verify_email_token": token, "verify_email_link": f"#/verify-email?token={token}"}})
+
+
+@app.route("/api/auth/verify-phone/request", methods=["POST"])
+def request_phone_code():
+    u = require_auth()
+    body = request.get_json(silent=True) or {}
+    phone = (body.get("phone") or "").strip()
+    if not phone:
+        return err("Please enter your phone number")
+    otp = f"{secrets.randbelow(1000000):06d}"
+    make_token(u["id"], "phone", value=otp, ttl=600)
+    execute("UPDATE users SET phone = ?, phone_verified = 0 WHERE id = ?", (phone, u["id"]))
+    # Production would send via SMS; expose in dev for local testing.
+    return ok({"sent": True, "dev": {"code": otp}})
+
+
+@app.route("/api/auth/verify-phone", methods=["POST"])
+def verify_phone():
+    u = require_auth()
+    body = request.get_json(silent=True) or {}
+    code = (body.get("code") or "").strip()
+    row = query("SELECT * FROM tokens WHERE user_id = ? AND kind = 'phone' ORDER BY created_at DESC LIMIT 1", (u["id"],), one=True)
+    if not row or row["value"] != code:
+        return err("Incorrect code")
+    if row["expires_at"] and row["expires_at"] < now():
+        return err("This code has expired")
+    execute("UPDATE users SET phone_verified = 1 WHERE id = ?", (u["id"],))
+    execute("DELETE FROM tokens WHERE user_id = ? AND kind = 'phone'", (u["id"],))
+    return ok({"verified": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1187,16 +1952,47 @@ def contact():
 
 
 # ---------------------------------------------------------------------------
-# Upload
+# Upload (with compression + thumbnails)
 # ---------------------------------------------------------------------------
+def process_image(data, ext, max_dim=1600, thumb_dim=420):
+    """Return (main_filename, thumb_filename). Falls back to raw bytes on error."""
+    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    name = uuid.uuid4().hex
+    main_name = f"{name}.jpg"
+    thumb_name = f"{name}_thumb.jpg"
+    try:
+        import io
+        from PIL import Image, ImageOps
+        img = Image.open(io.BytesIO(data))
+        img = ImageOps.exif_transpose(img)
+        if img.mode in ("RGBA", "P", "LA"):
+            img = img.convert("RGBA")
+            bg = Image.new("RGB", img.size, (255, 255, 255))
+            bg.paste(img, mask=img.split()[-1])
+            img = bg
+        else:
+            img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        img.save(os.path.join(UPLOAD_DIR, main_name), "JPEG", quality=82, optimize=True)
+        thumb = img.copy()
+        thumb.thumbnail((thumb_dim, thumb_dim), Image.Resampling.LANCZOS)
+        thumb.save(os.path.join(UPLOAD_DIR, thumb_name), "JPEG", quality=78, optimize=True)
+        return main_name, thumb_name
+    except Exception:
+        ext = ext if ext in ALLOWED_IMG else "jpg"
+        main_name = f"{name}.{ext}"
+        with open(os.path.join(UPLOAD_DIR, main_name), "wb") as fh:
+            fh.write(data)
+        return main_name, None
+
+
 @app.route("/api/upload", methods=["POST"])
 def upload():
     require_auth()
     files = request.files.getlist("files") or ([request.files["file"]] if "file" in request.files else [])
     if not files:
         return err("No file uploaded")
-    urls = []
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    items = []
     for f in files:
         ext = (f.filename or "").rsplit(".", 1)[-1].lower() if "." in (f.filename or "") else ""
         if ext not in ALLOWED_IMG:
@@ -1204,15 +2000,16 @@ def upload():
         data = f.read()
         if len(data) > MAX_IMG_BYTES:
             return err("Image too large (max 8MB)")
-        name = f"{uuid.uuid4().hex}.{ext}"
-        with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
-            fh.write(data)
-        urls.append(f"/uploads/{name}")
-    return ok({"urls": urls})
+        main_name, thumb_name = process_image(data, ext)
+        item = {"url": f"/uploads/{main_name}"}
+        if thumb_name:
+            item["thumb"] = f"/uploads/{thumb_name}"
+        items.append(item)
+    return ok({"items": items})
 
 
 # ---------------------------------------------------------------------------
-# Admin (categories — Part 2 will build the UI on top of these)
+# Admin (categories — Part 3 will build the UI on top of these)
 # ---------------------------------------------------------------------------
 @app.route("/api/admin/categories", methods=["POST"])
 def admin_add_category():
@@ -1258,7 +2055,7 @@ def seed():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    conn.commit()
+    migrate(conn)
 
     has_cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
     if has_cats == 0:
@@ -1289,26 +2086,43 @@ def seed():
     if conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
         users = [
             ("Nimalka Perera", "nimalka@lankalens.lk", "password123", "+94 77 123 4567", "Western Province", "Colombo", "Colombo", 1, 0,
-             "Camera enthusiast and part-time wedding photographer in Colombo."),
+             "individual", "Camera enthusiast and part-time wedding photographer in Colombo."),
             ("Kasun Fernando", "kasun@lankalens.lk", "password123", "+94 71 234 5678", "Central Province", "Kandy", "Kandy", 1, 0,
-             "Wildlife photographer based in Kandy. Buying and selling quality gear."),
+             "individual", "Wildlife photographer based in Kandy. Buying and selling quality gear."),
             ("Tharindu Silva", "tharindu@lankalens.lk", "password123", "+94 76 345 6789", "Southern Province", "Galle", "Galle", 0, 0,
-             "Travel photographer covering the south coast."),
+             "individual", "Travel photographer covering the south coast."),
             ("Ishara Jayasuriya", "ishara@lankalens.lk", "password123", "+94 70 456 7890", "Western Province", "Colombo", "Nugegoda", 1, 0,
-             "Owner of Colombo Camera House. Authorised dealer for major brands."),
+             "business", "Owner of Colombo Camera House. Authorised dealer for major brands."),
             ("Demo User", "demo@lankalens.lk", "demo1234", "+94 77 000 1111", "Western Province", "Colombo", "Colombo", 0, 0,
-             "Just browsing for my next camera."),
+             "individual", "Just browsing for my next camera."),
             ("Admin", "admin@lankalens.lk", "admin1234", "+94 77 999 8888", "Western Province", "Colombo", "Colombo", 1, 1,
-             "Lanka Lens administrator."),
+             "individual", "Lanka Lens administrator."),
         ]
         user_ids = {}
-        for name, email, pw, phone, prov, dist, city, verified, is_admin, bio in users:
+        for name, email, pw, phone, prov, dist, city, verified, is_admin, seller_type, bio in users:
             uid = conn.execute(
-                "INSERT INTO users (name, email, password_hash, phone, whatsapp, province, district, city, bio, verified, is_admin, created_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (name, email, hash_password(pw), phone, phone.replace(" ", ""), prov, dist, city, bio, verified, is_admin, now())).lastrowid
+                "INSERT INTO users (name, email, password_hash, phone, whatsapp, province, district, city, bio, verified, email_verified, phone_verified, seller_type, is_admin, created_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,1,1,?,?,?)",
+                (name, email, hash_password(pw), phone, phone.replace(" ", ""), prov, dist, city, bio, verified, seller_type, is_admin, now())).lastrowid
             user_ids[email] = uid
         conn.commit()
+
+    if conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0:
+        ish = conn.execute("SELECT id FROM users WHERE email = ?", ("ishara@lankalens.lk",)).fetchone()
+        if ish:
+            conn.execute(
+                """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
+                   phone, whatsapp, opening_hours, verified, created_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?)""",
+                (ish["id"], "Colombo Camera House", "colombo-camera-house", "/images/shops/shop-1.jpg",
+                 "Authorised dealer for Sony, Canon and Fujifilm. Trade-ins, repairs and rentals welcome.",
+                 "Western Province", "Colombo", "Colombo", "Colombo 04",
+                 "+94 11 250 4400", "94112504400",
+                 json.dumps({"mon": "9:00 AM – 6:00 PM", "tue": "9:00 AM – 6:00 PM", "wed": "9:00 AM – 6:00 PM",
+                             "thu": "9:00 AM – 6:00 PM", "fri": "9:00 AM – 6:00 PM", "sat": "9:00 AM – 4:00 PM",
+                             "sun": "Closed"}),
+                 now()))
+            conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0:
         users_map = {r["email"]: r["id"] for r in [dict(x) for x in conn.execute("SELECT id, email FROM users")]}
@@ -1541,10 +2355,10 @@ def seed():
             conn.execute(
                 """INSERT INTO listings
                    (user_id, category_id, title, slug, price, condition, description, brand, model, year,
-                    province, district, city, images, featured, status, views, specs, created_at, updated_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?)""",
+                    province, district, city, images, featured, status, views, specs, created_at, updated_at, expiry_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'active',?,?,?,?,?)""",
                 (l[0], l[1], l[2], slugify(l[2]), l[3], l[4], l[5], l[6], l[7], l[8],
-                 l[9], l[10], l[11], l[12], l[13], l[14], l[15], ts, ts))
+                 l[9], l[10], l[11], l[12], l[13], l[14], l[15], ts, ts, ts + EXPIRY_DAYS * 86400))
         conn.commit()
 
     if conn.execute("SELECT COUNT(*) FROM shops").fetchone()[0] == 0:

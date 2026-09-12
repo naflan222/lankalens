@@ -48,12 +48,75 @@
   }
   function avatarHtml(user, size) {
     var c = size === 'lg' ? 46 : size === 'sm' ? 30 : 40;
+    if (user && user.avatar) {
+      return '<span class="avatar"><img class="avatar-img" src="' + esc(user.avatar) + '" style="width:' + c + 'px;height:' + c + 'px" alt=""></span>';
+    }
     return '<span class="avatar"><span class="circle" style="background:' + avColor(user.name) + ';width:' + c + 'px;height:' + c + 'px;font-size:' + Math.round(c / 2.6) + 'px">' + esc(initials(user.name)) + '</span></span>';
   }
   function phoneDigits(p) {
     var d = (p || '').replace(/\D/g, '');
     if (d.indexOf('0') === 0) d = '94' + d.slice(1);
     return d;
+  }
+  var STATUS_META = {
+    active: { label: 'Active', color: '#0E7C66' },
+    pending: { label: 'Pending', color: '#C77D23' },
+    draft: { label: 'Draft', color: '#74817C' },
+    sold: { label: 'Sold', color: '#3A6FB0' },
+    expired: { label: 'Expired', color: '#B04A3A' },
+    paused: { label: 'Paused', color: '#9C4F96' }
+  };
+  function statusChip(status) {
+    var m = STATUS_META[status] || { label: status || '', color: '#74817C' };
+    return '<span class="status-chip" style="color:' + m.color + ';background:' + m.color + '1a">' + esc(m.label) + '</span>';
+  }
+  function starsHtml(avg, count) {
+    avg = Number(avg || 0);
+    var out = '<span class="stars">';
+    for (var i = 1; i <= 5; i++) {
+      out += '<span class="star' + (i <= Math.round(avg) ? ' on' : '') + '">' + (i <= Math.round(avg) ? icon('star') : icon('star-outline')) + '</span>';
+    }
+    out += '</span>';
+    if (count) out += '<span class="stars-count">' + esc(avg) + ' (' + esc(count) + ')</span>';
+    return out;
+  }
+  function locationSelectsHtml(prov, dist, city) {
+    var provs = state.locations || [];
+    var opts = function (sel) { return '<option value="">Select…</option>' + (sel || []).map(function (x) { return '<option value="' + esc(x) + '">' + esc(x) + '</option>'; }).join(''); };
+    return '<div class="form-group"><label>Province</label><select class="select" data-loc="province">' + opts(provs.map(function (p) { return p.name; })) + '</select></div>' +
+      '<div class="form-group"><label>District</label><select class="select" data-loc="district"><option value="">Select…</option></select></div>' +
+      '<div class="form-group"><label>City / Town</label><select class="select" data-loc="city"><option value="">Select…</option></select></div>';
+  }
+  function bindLocationSelects(root, data) {
+    // data = {province, district, city}
+    var provs = state.locations || [];
+    var selP = root.querySelector('[data-loc="province"]');
+    var selD = root.querySelector('[data-loc="district"]');
+    var selC = root.querySelector('[data-loc="city"]');
+    function setVal(sel, v) { if (sel && v) { for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === v) { sel.value = v; return; } } } }
+    setVal(selP, data.province);
+    function fillDistricts() {
+      selD.innerHTML = '<option value="">Select…</option>';
+      selC.innerHTML = '<option value="">Select…</option>';
+      var p = provs.find(function (x) { return x.name === selP.value; });
+      (p ? p.districts : []).forEach(function (d) {
+        selD.insertAdjacentHTML('beforeend', '<option value="' + esc(d.name) + '">' + esc(d.name) + '</option>');
+      });
+      setVal(selD, data.district);
+      fillCities();
+    }
+    function fillCities() {
+      selC.innerHTML = '<option value="">Select…</option>';
+      var p = provs.find(function (x) { return x.name === selP.value; });
+      var d = p && p.districts.find(function (x) { return x.name === selD.value; });
+      (d ? d.cities : []).forEach(function (c) {
+        selC.insertAdjacentHTML('beforeend', '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>');
+      });
+      setVal(selC, data.city);
+    }
+    selP.addEventListener('change', fillDistricts);
+    selD.addEventListener('change', fillCities);
+    if (data.province) fillDistricts();
   }
 
   /* ---------- state ---------- */
@@ -88,6 +151,7 @@
     get: function (p) { return api.req('GET', p); },
     post: function (p, b) { return api.req('POST', p, b); },
     patch: function (p, b) { return api.req('PATCH', p, b); },
+    put: function (p, b) { return api.req('PUT', p, b); },
     del: function (p) { return api.req('DELETE', p); }
   };
 
@@ -393,14 +457,19 @@
 
   views.browse = function (query) {
     var q = query.get('q') || '';
+    var filters = {
+      q: q, category: query.get('category') || '', brand: '', model: '',
+      condition: '', province: '', district: '', city: '', min: '', max: '',
+      sort: 'recommended', page: 1, specs: {}
+    };
     var html = header('Browse', { back: false, right: '<button class="icon-btn" data-nav="#/search">' + icon('search-outline') + '</button>' });
     html += '<form class="search-hero" id="browse-search" style="margin-top:14px"><span>' + icon('search-outline') + '</span>' +
       '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." value="' + esc(q) + '">' +
       '<button type="submit">Search</button></form>';
     html += '<div class="filter-row" id="browse-filters">' +
       '<button class="chip" id="btn-sort">' + icon('swap-vertical-outline') + 'Sort</button>' +
-      '<button class="chip" id="btn-cond">' + icon('filter-outline') + 'Condition</button>' +
-      '<button class="chip" id="btn-loc">' + icon('location-outline') + 'Location</button></div>';
+      '<button class="chip" id="btn-filter">' + icon('funnel-outline') + 'Filters</button>' +
+      '<span id="active-filter-chips" class="chips" style="padding-left:0"></span></div>';
     html += '<div class="section" style="padding-top:8px"><div class="section-head"><h2>' + icon('search-outline') + 'Results</h2>' +
       '<span class="muted fs12" id="browse-count"></span></div></div>';
     html += '<div id="browse-results"><div class="spinner"></div></div>';
@@ -408,53 +477,211 @@
     return {
       html: html,
       mount: function () {
-        var params = { q: q, sort: 'newest', page: 1 };
-        var total = 0;
-        function load() {
+        function buildQuery() {
           var qs = new URLSearchParams();
-          Object.keys(params).forEach(function (k) { if (params[k] !== '' && params[k] != null) qs.set(k, params[k]); });
+          if (filters.q) qs.set('q', filters.q);
+          if (filters.category) qs.set('category', filters.category);
+          if (filters.brand) qs.set('brand', filters.brand);
+          if (filters.model) qs.set('model', filters.model);
+          if (filters.condition) qs.set('condition', filters.condition);
+          if (filters.province) qs.set('province', filters.province);
+          if (filters.district) qs.set('district', filters.district);
+          if (filters.city) qs.set('city', filters.city);
+          if (filters.min) qs.set('min', filters.min);
+          if (filters.max) qs.set('max', filters.max);
+          Object.keys(filters.specs).forEach(function (k) {
+            var v = filters.specs[k];
+            if (typeof v === 'object') { // {min,max}
+              if (v.min) qs.set('spec_' + k + '_min', v.min);
+              if (v.max) qs.set('spec_' + k + '_max', v.max);
+            } else if (v) {
+              qs.set('spec_' + k, v);
+            }
+          });
+          qs.set('sort', filters.sort);
+          return qs;
+        }
+        function load() {
+          filters.page = 1;
+          var qs = buildQuery();
           $('#browse-results').innerHTML = '<div class="spinner"></div>';
           api.get('/listings?' + qs.toString()).then(function (d) {
-            total = d.total;
             var c = $('#browse-count'); if (c) c.textContent = d.total + ' found';
             var r = $('#browse-results');
             if (r) {
-              if (params.page === 1) r.innerHTML = listingGrid(d.items);
-              else r.querySelector('.listing-grid').insertAdjacentHTML('beforeend', d.items.map(lcard).join(''));
+              if (filters.page === 1) r.innerHTML = listingGrid(d.items);
             }
             var m = $('#browse-more');
-            if (m) m.innerHTML = (params.page < d.pages)
+            if (m) m.innerHTML = (filters.page < d.pages)
               ? '<button class="btn btn-outline btn-sm" id="load-more">Load more</button>' : '';
             var lm = $('#load-more');
-            if (lm) lm.addEventListener('click', function () { params.page++; load(); });
+            if (lm) lm.addEventListener('click', function () { filters.page++; loadMore(); });
+            renderActiveChips();
           }).catch(function (e) { $('#browse-results').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        function loadMore() {
+          var qs = buildQuery();
+          qs.set('page', filters.page);
+          api.get('/listings?' + qs.toString()).then(function (d) {
+            var r = $('#browse-results');
+            var grid = r.querySelector('.listing-grid');
+            if (grid) grid.insertAdjacentHTML('beforeend', d.items.map(lcard).join(''));
+            var m = $('#browse-more');
+            if (m) m.innerHTML = (filters.page < d.pages)
+              ? '<button class="btn btn-outline btn-sm" id="load-more">Load more</button>' : '';
+            var lm = $('#load-more');
+            if (lm) lm.addEventListener('click', function () { filters.page++; loadMore(); });
+          });
+        }
+        function renderActiveChips() {
+          var host = $('#active-filter-chips');
+          if (!host) return;
+          var chips = [];
+          if (filters.category) chips.push(['Category: ' + catName(filters.category), function () { filters.category = ''; load(); }]);
+          if (filters.brand) chips.push([filters.brand, function () { filters.brand = ''; load(); }]);
+          if (filters.model) chips.push(['Model: ' + filters.model, function () { filters.model = ''; load(); }]);
+          if (filters.condition) chips.push([filters.condition, function () { filters.condition = ''; load(); }]);
+          if (filters.province) chips.push([filters.province, function () { filters.province = ''; filters.district = ''; filters.city = ''; load(); }]);
+          if (filters.min || filters.max) chips.push(['Rs ' + (filters.min || '0') + '–' + (filters.max || '∞'), function () { filters.min = ''; filters.max = ''; load(); }]);
+          Object.keys(filters.specs).forEach(function (k) {
+            var v = filters.specs[k];
+            if (v) chips.push([pretty(k) + ': ' + (typeof v === 'object' ? ((v.min || '') + '–' + (v.max || '')) : v), function () { delete filters.specs[k]; load(); }]);
+          });
+          host.innerHTML = chips.map(function (c) {
+            return '<a class="chip active" style="padding:6px 11px">' + esc(c[0]) + ' ' + icon('close-outline') + '</a>';
+          }).join('');
+          $$('#active-filter-chips .chip').forEach(function (c, i) {
+            c.addEventListener('click', function () { chips[i][1](); });
+          });
+        }
+        function catName(slug) {
+          var cats = state.meta ? state.meta.categories : [];
+          for (var i = 0; i < cats.length; i++) if (cats[i].slug === slug) return cats[i].name;
+          return slug;
         }
         load();
         var f = $('#browse-search');
-        f.addEventListener('submit', function (e) { e.preventDefault(); params.q = $('input', f).value.trim(); params.page = 1; load(); });
+        f.addEventListener('submit', function (e) { e.preventDefault(); filters.q = $('input', f).value.trim(); load(); });
         $('#btn-sort').addEventListener('click', function () {
           openSheet('Sort by', [
-            { icon: 'time-outline', label: 'Newest first', onClick: function () { params.sort = 'newest'; params.page = 1; load(); } },
-            { icon: 'eye-outline', label: 'Most viewed', onClick: function () { params.sort = 'popular'; params.page = 1; load(); } },
-            { icon: 'arrow-up-outline', label: 'Price: low to high', onClick: function () { params.sort = 'price_asc'; params.page = 1; load(); } },
-            { icon: 'arrow-down-outline', label: 'Price: high to low', onClick: function () { params.sort = 'price_desc'; params.page = 1; load(); } }
+            { icon: 'flash-outline', label: 'Recommended', onClick: function () { filters.sort = 'recommended'; load(); } },
+            { icon: 'time-outline', label: 'Newest first', onClick: function () { filters.sort = 'newest'; load(); } },
+            { icon: 'eye-outline', label: 'Most viewed', onClick: function () { filters.sort = 'popular'; load(); } },
+            { icon: 'arrow-up-outline', label: 'Price: low to high', onClick: function () { filters.sort = 'price_asc'; load(); } },
+            { icon: 'arrow-down-outline', label: 'Price: high to low', onClick: function () { filters.sort = 'price_desc'; load(); } }
           ]);
         });
-        $('#btn-cond').addEventListener('click', function () {
-          var conds = state.meta ? state.meta.conditions : [];
-          openSheet('Condition', conds.map(function (c) {
-            return { label: c, onClick: function () { params.condition = (params.condition === c ? '' : c); params.page = 1; load(); } };
-          }));
-        });
-        $('#btn-loc').addEventListener('click', function () {
-          var provs = state.locations || [];
-          openSheet('Province', provs.map(function (p) {
-            return { icon: 'location-outline', label: p.name, onClick: function () {
-              params.province = (params.province === p.name ? '' : p.name);
-              params.district = ''; params.city = ''; params.page = 1; load();
-            } };
-          }));
-        });
+        $('#btn-filter').addEventListener('click', function () { showFilterSheet(); });
+
+        function showFilterSheet() {
+          var host = $('#sheet-host');
+          host.innerHTML = '<div class="sheet-mask" data-close-sheet><div class="sheet" data-stop><div class="grab"></div>' +
+            '<div class="sheet-title">Filters</div><div class="filter-sheet" id="filter-sheet"><div class="spinner"></div></div>' +
+            '<div class="filter-foot"><button class="btn btn-outline" id="fs-clear" style="flex:1">Clear</button>' +
+            '<button class="btn btn-primary" id="fs-apply" style="flex:2">Apply filters</button></div>' +
+            '</div></div>';
+          requestAnimationFrame(function () { $('.sheet-mask', host).classList.add('open'); });
+          function facetFor(cat) {
+            api.get('/facets?category=' + encodeURIComponent(cat)).then(function (fd) {
+              renderSheet(fd);
+            }).catch(function () { renderSheet({ brands: [], models: [], specs: {} }); });
+          }
+          function renderSheet(fd) {
+            var cats = state.meta ? state.meta.categories : [];
+            var conds = state.meta ? state.meta.conditions : [];
+            var provs = state.locations || [];
+            var h = '';
+            h += '<div class="f-label">Category</div><div class="chips" style="padding:0 16px">' +
+              '<a class="chip' + (!filters.category ? ' active' : '') + '" data-fcat="">All</a>' +
+              cats.map(function (c) {
+                return '<a class="chip' + (filters.category === c.slug ? ' active' : '') + '" data-fcat="' + esc(c.slug) + '">' + esc(c.name) + '</a>';
+              }).join('') + '</div>';
+            h += '<div class="f-label">Brand</div><div class="form-group" style="padding:0 16px">' +
+              '<select class="select" id="fs-brand"><option value="">All brands</option>' +
+              (fd.brands || []).map(function (b) { return '<option value="' + esc(b) + '"' + (filters.brand === b ? ' selected' : '') + '>' + esc(b) + '</option>'; }).join('') + '</select></div>';
+            h += '<div class="f-label">Model</div><div class="form-group" style="padding:0 16px">' +
+              '<input class="input" id="fs-model" value="' + esc(filters.model) + '" placeholder="e.g. A7 III"></div>';
+            h += '<div class="f-label">Condition</div><div class="chips" style="padding:0 16px">' +
+              conds.map(function (c) {
+                return '<a class="chip' + (filters.condition === c ? ' active' : '') + '" data-fcond="' + esc(c) + '">' + esc(c) + '</a>';
+              }).join('') + '</div>';
+            h += '<div class="f-label">Price (LKR)</div><div class="flex gap8" style="padding:0 16px">' +
+              '<input class="input" id="fs-min" inputmode="numeric" placeholder="Min" value="' + esc(filters.min) + '">' +
+              '<input class="input" id="fs-max" inputmode="numeric" placeholder="Max" value="' + esc(filters.max) + '"></div>';
+            h += '<div class="f-label">Location</div><div style="padding:0 16px">' +
+              '<div class="form-group"><select class="select" id="fs-prov"><option value="">All provinces</option>' +
+              provs.map(function (p) { return '<option value="' + esc(p.name) + '"' + (filters.province === p.name ? ' selected' : '') + '>' + esc(p.name) + '</option>'; }).join('') + '</select></div></div>';
+            // category-specific spec filters
+            Object.keys(fd.specs || {}).forEach(function (key) {
+              var vals = fd.specs[key];
+              if (!vals.length) return;
+              if (key === 'shutter_count' && filters.category === 'cameras') return; // handled by numeric input below
+              var cur = filters.specs[key];
+              h += '<div class="f-label">' + esc(pretty(key)) + '</div><div class="chips" style="padding:0 16px">' +
+                '<a class="chip' + (!cur ? ' active' : '') + '" data-fspec="' + esc(key) + '" data-fspecval="">Any</a>' +
+                vals.map(function (v) {
+                  return '<a class="chip' + (cur === v ? ' active' : '') + '" data-fspec="' + esc(key) + '" data-fspecval="' + esc(v) + '">' + esc(v) + '</a>';
+                }).join('') + '</div>';
+            });
+            // numeric spec range (shutter count for cameras)
+            if (filters.category === 'cameras') {
+              var sc = filters.specs.shutter_count;
+              var curMin = (sc && typeof sc === 'object') ? sc.min : '';
+              var curMax = (sc && typeof sc === 'object') ? sc.max : '';
+              h += '<div class="f-label">Max shutter count</div><div style="padding:0 16px">' +
+                '<input class="input" id="fs-shutter" inputmode="numeric" placeholder="e.g. 50000" value="' + esc(curMax) + '"></div>';
+            }
+            var sheet = $('#filter-sheet');
+            sheet.innerHTML = h;
+            // category chip click -> refetch facets
+            $$('#filter-sheet [data-fcat]').forEach(function (a) {
+              a.addEventListener('click', function () {
+                filters.category = a.getAttribute('data-fcat');
+                facetFor(filters.category);
+              });
+            });
+            $$('#filter-sheet [data-fcond]').forEach(function (a) {
+              a.addEventListener('click', function () {
+                $$('#filter-sheet [data-fcond]').forEach(function (x) { x.classList.remove('active'); });
+                a.classList.add('active');
+                filters.condition = filters.condition === a.getAttribute('data-fcond') ? '' : a.getAttribute('data-fcond');
+                a.classList.toggle('active', !!filters.condition);
+              });
+            });
+            $$('#filter-sheet [data-fspec]').forEach(function (a) {
+              a.addEventListener('click', function () {
+                var key = a.getAttribute('data-fspec');
+                var val = a.getAttribute('data-fspecval');
+                filters.specs[key] = val || undefined;
+                renderSheet(fd);
+              });
+            });
+          }
+          facetFor(filters.category);
+
+          $('#fs-apply').addEventListener('click', function () {
+            filters.brand = ($('#fs-brand') ? $('#fs-brand').value : '');
+            filters.model = ($('#fs-model') ? $('#fs-model').value.trim() : '');
+            filters.min = ($('#fs-min') ? $('#fs-min').value.trim() : '');
+            filters.max = ($('#fs-max') ? $('#fs-max').value.trim() : '');
+            filters.province = ($('#fs-prov') ? $('#fs-prov').value : '');
+            filters.district = ''; filters.city = '';
+            if ($('#fs-shutter')) {
+              var smax = $('#fs-shutter').value.trim();
+              if (smax) filters.specs.shutter_count = { max: smax };
+              else if (filters.specs.shutter_count && typeof filters.specs.shutter_count === 'object') delete filters.specs.shutter_count;
+            }
+            closeSheet();
+            load();
+          });
+          $('#fs-clear').addEventListener('click', function () {
+            filters.brand = ''; filters.model = ''; filters.condition = '';
+            filters.province = ''; filters.district = ''; filters.city = '';
+            filters.min = ''; filters.max = ''; filters.specs = {};
+            closeSheet();
+            load();
+          });
+        }
       }
     };
   };
@@ -550,10 +777,13 @@
     var s = l.seller || {};
     var seller = '<div class="detail-wrap" style="padding-top:0"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('person-outline') + 'Seller Information</h2></div>' +
       '<div class="seller-card" data-nav="#/seller/' + s.id + '">' + avatarHtml(s, 'lg') +
-      '<div class="info"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
+      '<div class="info"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') +
+      (s.seller_type === 'business' ? '<span class="vbadge" style="background:#EAF1FD;color:#3A6FB0">' + icon('briefcase-outline') + 'Business</span>' : '') + '</div>' +
       '<div class="loc">' + icon('location-outline') + esc([s.city, s.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</div>' +
       '<div class="loc">' + icon('time-outline') + 'Member since ' + fmtDate(s.created_at) + '</div></div>' +
-      '<div class="chev">' + icon('chevron-forward-outline') + '</div></div></div>';
+      '<div class="chev">' + icon('chevron-forward-outline') + '</div></div>' +
+      (s.business ? '<a class="biz-link" data-nav="#/shop/' + esc(s.business.slug) + '">' + icon('briefcase-outline') + ' Visit shop: ' + esc(s.business.name) + icon('chevron-forward-outline') + '</a>' : '') +
+      '</div>';
 
     var related = (l.related || []).length ? '<div class="section"><div class="section-head"><h2>' + icon('albums-outline') + 'Related Listings</h2></div>' +
       '<div class="hscroll">' + l.related.map(lcard).join('') + '</div></div>' : '';
@@ -563,10 +793,12 @@
       '<span style="color:var(--brand);font-size:24px">' + icon('shield-checkmark') + '</span>' +
       '<div style="font-size:12.5px;color:var(--ink-2)"><b style="color:var(--ink)">Stay safe.</b> Meet in a public place, test before you pay, and never send money in advance. <a data-nav="#/safety" style="font-weight:700">Safety tips</a></div></div></div>';
 
+    var prefs = l.contact_prefs || {};
     var actionBar = '<div class="action-bar">' +
       '<button class="icon-action" data-fav="' + l.id + '" id="ab-fav">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
-      '<button class="btn btn-wa" id="btn-wa">' + icon('logo-whatsapp') + 'WhatsApp</button>' +
-      '<button class="btn btn-primary" id="btn-call">' + icon('call-outline') + 'Call</button>' +
+      (prefs.chat !== false ? '<button class="icon-action" id="btn-chat" aria-label="Chat">' + icon('chatbubble-ellipses-outline') + '</button>' : '') +
+      (prefs.whatsapp !== false ? '<button class="btn btn-wa" id="btn-wa">' + icon('logo-whatsapp') + 'WhatsApp</button>' : '') +
+      (prefs.phone !== false ? '<button class="btn btn-primary" id="btn-call">' + icon('call-outline') + 'Call</button>' : '') +
       '<button class="icon-action" id="btn-more">' + icon('ellipsis-horizontal-outline') + '</button></div>';
 
     $('#detail-root').innerHTML = ghtml + meta + specs + desc + seller + related + safe + '<div style="height:20px"></div>' + actionBar;
@@ -585,18 +817,27 @@
       });
     });
 
+    function recordContact(kind) {
+      api.post('/listings/' + l.id + '/contact', { kind: kind }).catch(function () {});
+    }
+    if ($('#btn-chat')) $('#btn-chat').addEventListener('click', function () {
+      recordContact('chat');
+      if (requireAuth()) location.hash = '#/chat/' + s.id + '?listing=' + l.id;
+    });
     $('#btn-wa').addEventListener('click', function () {
       var num = phoneDigits(s.whatsapp || s.phone);
       if (!num) return toast('Seller did not share a number', 'error');
+      recordContact('whatsapp');
       window.open('https://wa.me/' + num + '?text=' + encodeURIComponent('Hi, I\'m interested in your listing "' + l.title + '" on Lanka Lens.'), '_blank');
     });
     $('#btn-call').addEventListener('click', function () {
       if (!s.phone) return toast('Seller did not share a number', 'error');
+      recordContact('call');
       window.location.href = 'tel:' + phoneDigits(s.phone);
     });
     $('#btn-more').addEventListener('click', function () {
       openSheet(null, [
-        { icon: 'chatbubble-ellipses-outline', label: 'Chat with seller', onClick: function () { if (requireAuth()) location.hash = '#/chat/' + s.id; } },
+        { icon: 'chatbubble-ellipses-outline', label: 'Chat with seller', onClick: function () { recordContact('chat'); if (requireAuth()) location.hash = '#/chat/' + s.id + '?listing=' + l.id; } },
         { icon: 'cash-outline', label: 'Make an offer', onClick: function () { openOfferDialog(l); } },
         { icon: 'share-social-outline', label: 'Share listing', onClick: function () { shareListing(l); } },
         { icon: 'flag-outline', label: 'Report listing', danger: true, onClick: function () { openReportSheet(l); } }
@@ -620,7 +861,7 @@
   }
 
   function openReportSheet(l) {
-    var reasons = ['Scam or fraud', 'Wrong price', 'Duplicate listing', 'Prohibited item', 'Misleading description', 'Other'];
+    var reasons = (state.meta && state.meta.report_reasons) || ['Scam', 'Fake product', 'Wrong information', 'Duplicate', 'Wrong category', 'Prohibited item', 'Other'];
     openSheet('Report this listing', reasons.map(function (r) {
       return { icon: 'flag-outline', label: r, danger: true, onClick: function () {
         if (!requireAuth()) return;
@@ -659,169 +900,416 @@
     return { html: html, mount: function () {} };
   };
 
-  views.sellForm = function (params) {
-    if (!requireAuth()) return { html: '' };
-    var slug = params.slug;
-    var cats = (state.meta && state.meta.categories) || [];
-    var found = null;
-    cats.forEach(function (c) { (c.children || []).forEach(function (s) { if (s.slug === slug) found = { parent: c, sub: s }; }); });
-    if (!found) { location.hash = '#/sell'; return { html: '' }; }
-    var fields = found.sub.fields && found.sub.fields.length ? found.sub.fields : found.parent.fields;
-
-    var html = header(found.sub.name, {});
-    html += '<div class="detail-wrap"><form id="sell-form">';
-    html += '<div class="form-card">';
-    html += '<div class="form-group"><label>Listing title <span class="req">*</span></label>' +
-      '<input class="input" name="title" placeholder="e.g. Sony A7 III body, excellent condition" required></div>';
-    html += '<div class="form-group"><label>Price (LKR) <span class="req">*</span></label>' +
-      '<input class="input" name="price" inputmode="numeric" placeholder="e.g. 325000" required></div>';
-    html += '<div class="switch-row form-group"><div><label style="margin:0">Negotiable</label><div class="form-hint">Let buyers know you’re open to offers</div></div>' +
-      '<label class="switch"><input type="checkbox" name="negotiable" checked><span class="slider"></span></label></div>';
-    html += '</div>';
-
-    // condition
-    html += '<div class="form-group mt16"><label>Condition <span class="req">*</span></label><div class="seg" id="cond-seg">' +
-      (state.meta ? state.meta.conditions : []).map(function (c, i) {
-        return '<div class="opt' + (c === 'Good' ? ' active' : '') + '" data-cond="' + esc(c) + '">' + esc(c) + '</div>';
-      }).join('') + '</div><input type="hidden" name="condition" value="Good"></div>';
-
-    // dynamic fields
-    html += '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('list-outline') + esc(found.sub.name) + ' Details</h2></div>';
-    (fields || []).forEach(function (f) {
-      html += '<div class="form-group"><label>' + esc(f.label) + (f.required ? ' <span class="req">*</span>' : '') + '</label>';
-      if (f.type === 'select') {
-        html += '<select class="select" data-spec="' + esc(f.name) + '"' + (f.required ? ' required' : '') + '><option value="">Select…</option>' +
-          (f.options || []).map(function (o) { return '<option value="' + esc(o) + '">' + esc(o) + '</option>'; }).join('') + '</select>';
-      } else if (f.type === 'textarea') {
-        html += '<textarea class="textarea" data-spec="' + esc(f.name) + '" placeholder="' + esc(f.label) + '"></textarea>';
-      } else if (f.type === 'number') {
-        html += '<input class="input" type="number" data-spec="' + esc(f.name) + '" placeholder="' + esc(f.label) + '">';
-      } else {
-        html += '<input class="input" data-spec="' + esc(f.name) + '" placeholder="' + esc(f.label) + '"' + (f.required ? ' required' : '') + '>';
-      }
-      html += '</div>';
+  /* ============================================================
+     Multi-step post-an-ad wizard (also powers edit)
+     ============================================================ */
+  function catFlatten() {
+    var out = [];
+    (state.meta ? state.meta.categories : []).forEach(function (c) {
+      (c.children || []).forEach(function (s) { out.push({ parent: c, sub: s }); });
     });
-    html += '</div>';
+    return out;
+  }
+  function findSub(slug) {
+    var list = catFlatten();
+    for (var i = 0; i < list.length; i++) if (list[i].sub.slug === slug) return list[i];
+    return null;
+  }
+  function findSubById(id) {
+    var list = catFlatten();
+    for (var i = 0; i < list.length; i++) if (list[i].sub.id === id) return list[i];
+    return null;
+  }
 
-    // location
-    html += '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('location-outline') + 'Location</h2></div>';
-    html += '<div class="form-group"><label>Province <span class="req">*</span></label><select class="select" id="sel-prov" required><option value="">Select province…</option></select></div>';
-    html += '<div class="form-group"><label>District <span class="req">*</span></label><select class="select" id="sel-dist" required><option value="">Select district…</option></select></div>';
-    html += '<div class="form-group"><label>City / Town <span class="req">*</span></label><select class="select" id="sel-city" required><option value="">Select city…</option></select></div></div>';
+  var WZ_STEPS = ['Brand & Model', 'Product Details', 'Condition', 'Price', 'Title & Description', 'Photos', 'Location', 'Contact', 'Preview'];
 
-    // description
-    html += '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('document-text-outline') + 'Description</h2></div>' +
-      '<div class="form-group"><textarea class="textarea" name="description" placeholder="Describe condition, usage history, what’s included…"></textarea></div></div>';
+  function listingWizard(initial) {
+    initial = initial || {};
+    var edit = initial.edit || null;
+    var wz = {
+      step: 0,
+      cat: initial.cat || null,
+      title: edit ? edit.title : '',
+      price: edit ? String(edit.price || '') : '',
+      negotiable: edit ? !!edit.negotiable : true,
+      condition: edit ? (edit.condition || 'Good') : 'Good',
+      description: edit ? (edit.description || '') : '',
+      specs: edit ? (edit.specs || {}) : {},
+      province: edit ? (edit.province || '') : '',
+      district: edit ? (edit.district || '') : '',
+      city: edit ? (edit.city || '') : '',
+      contact: (edit && edit.contact_prefs && Object.keys(edit.contact_prefs).length)
+        ? { phone: !!edit.contact_prefs.phone, whatsapp: !!edit.contact_prefs.whatsapp, chat: !!edit.contact_prefs.chat }
+        : { phone: true, whatsapp: true, chat: true },
+      images: (edit && edit.images) ? edit.images.map(function (u) { return { url: u }; }) : []
+    };
 
-    // images
-    html += '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('image-outline') + 'Photos</h2></div>' +
-      '<p class="form-hint" style="margin-bottom:10px">Add up to 15 photos. First photo is the cover.</p>' +
-      '<div class="upload-grid" id="upload-grid">' +
-      '<label class="upload-tile" id="upload-add">' + icon('add-outline') + '<input type="file" id="upload-input" accept="image/*" multiple hidden></label>' +
-      '</div></div>';
+    function fields() {
+      if (!wz.cat) return [];
+      return (wz.cat.sub.fields && wz.cat.sub.fields.length) ? wz.cat.sub.fields : wz.cat.parent.fields;
+    }
+    function field(name) {
+      var fs = fields();
+      for (var i = 0; i < fs.length; i++) if (fs[i].name === name) return fs[i];
+      return null;
+    }
+    function brandOptions() {
+      var f = field('brand');
+      if (f && f.options && f.options.length) return f.options;
+      return (state.meta ? state.meta.brands : []);
+    }
 
-    html += '<button class="btn btn-primary" style="margin-top:18px" type="submit">' + icon('checkmark-circle-outline') + 'Publish Listing</button>';
-    html += '</form></div><div style="height:16px"></div>';
+    function fieldInput(f) {
+      var v = wz.specs[f.name] || '';
+      var req = f.required ? ' required' : '';
+      if (f.type === 'select') {
+        return '<select class="select" data-spec="' + esc(f.name) + '"' + req + '><option value="">Select…</option>' +
+          (f.options || []).map(function (o) { return '<option value="' + esc(o) + '"' + (String(v) === String(o) ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select>';
+      }
+      if (f.type === 'textarea') {
+        return '<textarea class="textarea" data-spec="' + esc(f.name) + '" placeholder="' + esc(f.label) + '" style="min-height:80px">' + esc(v) + '</textarea>';
+      }
+      if (f.type === 'number') {
+        return '<input class="input" type="number" data-spec="' + esc(f.name) + '" value="' + esc(v) + '" placeholder="' + esc(f.label) + '">';
+      }
+      return '<input class="input" data-spec="' + esc(f.name) + '" value="' + esc(v) + '" placeholder="' + esc(f.label) + '"' + req + '>';
+    }
 
-    return {
-      html: html,
-      hideTabbar: false,
-      mount: function () {
-        // condition
-        $$('#cond-seg .opt').forEach(function (o) {
-          o.addEventListener('click', function () {
-            $$('#cond-seg .opt').forEach(function (x) { x.classList.remove('active'); });
-            o.classList.add('active');
-            $('[name="condition"]').value = o.getAttribute('data-cond');
-          });
-        });
-        // location selects
-        var provs = state.locations || [];
-        var selP = $('#sel-prov'), selD = $('#sel-dist'), selC = $('#sel-city');
-        provs.forEach(function (p) {
-          selP.insertAdjacentHTML('beforeend', '<option value="' + esc(p.name) + '">' + esc(p.name) + '</option>');
-        });
-        selP.addEventListener('change', function () {
-          selD.innerHTML = '<option value="">Select district…</option>';
-          selC.innerHTML = '<option value="">Select city…</option>';
-          var p = provs.find(function (x) { return x.name === selP.value; });
-          (p ? p.districts : []).forEach(function (d) {
-            selD.insertAdjacentHTML('beforeend', '<option value="' + esc(d.name) + '">' + esc(d.name) + '</option>');
-          });
-        });
-        selD.addEventListener('change', function () {
-          selC.innerHTML = '<option value="">Select city…</option>';
-          var p = provs.find(function (x) { return x.name === selP.value; });
-          var d = p && p.districts.find(function (x) { return x.name === selD.value; });
-          (d ? d.cities : []).forEach(function (c) {
-            selC.insertAdjacentHTML('beforeend', '<option value="' + esc(c.name) + '">' + esc(c.name) + '</option>');
-          });
-        });
-        // uploads
-        var files = [];
-        $('#upload-input').addEventListener('change', function () {
-          var picked = Array.prototype.slice.call(this.files || []);
-          picked.forEach(function (f) { if (files.length < 15) files.push(f); });
-          renderUploads();
-          this.value = '';
-        });
-        function renderUploads() {
-          var grid = $('#upload-grid');
-          var html = files.map(function (f, i) {
-            var url = URL.createObjectURL(f);
-            return '<div class="upload-tile" style="border-style:solid"><img src="' + url + '" alt="">' +
-              '<span class="rm" data-rm="' + i + '">' + icon('close-outline') + '</span></div>';
-          }).join('');
-          grid.innerHTML = html + '<label class="upload-tile" id="upload-add">' + icon('add-outline') + '<input type="file" id="upload-input" accept="image/*" multiple hidden></label>';
-          $$('#upload-grid [data-rm]').forEach(function (b) {
-            b.addEventListener('click', function (e) {
-              e.preventDefault(); e.stopPropagation();
-              files.splice(parseInt(b.getAttribute('data-rm'), 10), 1); renderUploads();
-            });
-          });
-          var inp = $('#upload-input');
-          if (inp) inp.addEventListener('change', function () {
-            var picked = Array.prototype.slice.call(this.files || []);
-            picked.forEach(function (f) { if (files.length < 15) files.push(f); });
-            renderUploads(); this.value = '';
+    function progressHtml() {
+      var pct = Math.round((wz.step + 1) / WZ_STEPS.length * 100);
+      return '<div class="wizard-top"><div class="wizard-track"><div class="wizard-fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="wizard-label">' + esc(wz.cat ? wz.cat.sub.name : '') + ' · Step ' + (wz.step + 1) + ' of ' + WZ_STEPS.length + '</div></div>';
+    }
+
+    function stepBody() {
+      var i = wz.step;
+      var b = '';
+      if (i === 0) {
+        // Brand & model (+ year when present)
+        var brands = brandOptions();
+        var bf = field('brand');
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('pricetag-outline') + 'Brand &amp; Model</h2></div>';
+        b += '<div class="form-group"><label>Brand' + (bf && bf.required ? ' <span class="req">*</span>' : '') + '</label>' +
+          '<select class="select" data-spec="brand"' + (bf && bf.required ? ' required' : '') + '><option value="">Select…</option>' +
+          brands.map(function (o) { return '<option value="' + esc(o) + '"' + (String(wz.specs.brand || '') === String(o) ? ' selected' : '') + '>' + esc(o) + '</option>'; }).join('') + '</select></div>';
+        b += '<div class="form-group"><label>Model <span class="req">*</span></label><input class="input" data-spec="model" value="' + esc(wz.specs.model || '') + '" placeholder="e.g. A7 III" required></div>';
+        if (field('year')) {
+          b += '<div class="form-group"><label>Year</label><input class="input" data-spec="year" value="' + esc(wz.specs.year || '') + '" placeholder="e.g. 2021"></div>';
+        }
+        b += '</div>';
+      } else if (i === 1) {
+        // Remaining dynamic fields
+        var rest = fields().filter(function (f) { return f.name !== 'brand' && f.name !== 'model' && f.name !== 'year'; });
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('list-outline') + esc(wz.cat ? wz.cat.sub.name : '') + ' Details</h2></div>';
+        if (!rest.length) {
+          b += '<p class="form-hint">No extra specifications for this category.</p>';
+        } else {
+          rest.forEach(function (f) {
+            b += '<div class="form-group"><label>' + esc(f.label) + (f.required ? ' <span class="req">*</span>' : '') + '</label>' + fieldInput(f) + '</div>';
           });
         }
-        // submit
-        $('#sell-form').addEventListener('submit', function (e) {
-          e.preventDefault();
-          var title = $('[name="title"]', this).value.trim();
-          var price = parseInt($('[name="price"]', this).value.trim(), 10);
-          if (!title) return toast('Please add a title', 'error');
-          if (!price || price <= 0) return toast('Please add a valid price', 'error');
-          if (!selP.value || !selD.value) return toast('Please choose a location', 'error');
-          var specs = {};
-          $$('[data-spec]', this).forEach(function (inp) { if (inp.value) specs[inp.getAttribute('data-spec')] = inp.value; });
-          var payload = {
-            category_id: found.sub.id,
-            title: title,
-            price: price,
-            negotiable: $('[name="negotiable"]', this).checked,
-            condition: $('[name="condition"]', this).value,
-            description: $('[name="description"]', this).value.trim(),
-            province: selP.value, district: selD.value, city: selC.value || selD.value,
-            specs: specs, images: []
-          };
-          var btn = $('button[type="submit"]', this);
-          btn.disabled = true; btn.textContent = 'Publishing…';
-          function finish() {
-            api.post('/listings', payload).then(function (r) {
-              toast('Listing published!', 'success');
-              location.hash = '#/ads/' + r.id;
-            }).catch(function (er) { toast(er.message, 'error'); btn.disabled = false; btn.innerHTML = icon('checkmark-circle-outline') + 'Publish Listing'; });
+        b += '</div>';
+      } else if (i === 2) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('checkmark-circle-outline') + 'Condition</h2></div>' +
+          '<div class="seg seg-2" id="wz-cond">' +
+          (state.meta ? state.meta.conditions : []).map(function (c) {
+            return '<div class="opt' + (wz.condition === c ? ' active' : '') + '" data-cond="' + esc(c) + '">' + esc(c) + '</div>';
+          }).join('') + '</div></div>';
+      } else if (i === 3) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('cash-outline') + 'Price</h2></div>' +
+          '<div class="form-group"><label>Price (LKR) <span class="req">*</span></label>' +
+          '<input class="input" id="wz-price" inputmode="numeric" value="' + esc(wz.price) + '" placeholder="e.g. 325000"></div>' +
+          '<div class="switch-row"><div><label style="margin:0">Negotiable</label><div class="form-hint">Let buyers send you offers</div></div>' +
+          '<label class="switch"><input type="checkbox" id="wz-neg"' + (wz.negotiable ? ' checked' : '') + '><span class="slider"></span></label></div></div>';
+      } else if (i === 4) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('document-text-outline') + 'Title &amp; Description</h2></div>' +
+          '<div class="form-group"><label>Listing title <span class="req">*</span></label>' +
+          '<input class="input" id="wz-title" value="' + esc(wz.title) + '" placeholder="e.g. Sony A7 III body, excellent condition" maxlength="90"></div>' +
+          '<div class="form-group"><label>Description</label>' +
+          '<textarea class="textarea" id="wz-desc" placeholder="Condition, usage history, what’s included…" style="min-height:130px">' + esc(wz.description) + '</textarea></div></div>';
+      } else if (i === 5) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('images-outline') + 'Photos</h2></div>' +
+          '<p class="form-hint" style="margin-bottom:10px">Add up to 15 photos. The first photo is your cover. Use ★ to set a cover, arrows to reorder.</p>' +
+          '<div class="upload-grid" id="wz-upload"></div></div>' +
+          '<p class="form-hint" style="padding:0 16px;margin-top:10px">Tip for used gear: shoot the front, back, top, LCD, lens mount and accessories. Never show serial numbers publicly.</p>';
+      } else if (i === 6) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('location-outline') + 'Location</h2></div>' +
+          locationSelectsHtml() + '</div>';
+      } else if (i === 7) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('call-outline') + 'Contact Options</h2></div>' +
+          '<p class="form-hint" style="margin-bottom:6px">Choose how buyers can reach you. Your number is taken from your profile.</p>' +
+          '<div class="switch-row form-group"><div><label style="margin:0">Phone calls</label></div>' +
+          '<label class="switch"><input type="checkbox" id="wz-phone"' + (wz.contact.phone ? ' checked' : '') + '><span class="slider"></span></label></div>' +
+          '<div class="switch-row form-group"><div><label style="margin:0">WhatsApp</label></div>' +
+          '<label class="switch"><input type="checkbox" id="wz-wa"' + (wz.contact.whatsapp ? ' checked' : '') + '><span class="slider"></span></label></div>' +
+          '<div class="switch-row form-group"><div><label style="margin:0">In-app chat</label></div>' +
+          '<label class="switch"><input type="checkbox" id="wz-chat"' + (wz.contact.chat ? ' checked' : '') + '><span class="slider"></span></label></div></div>';
+      } else if (i === 8) {
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('eye-outline') + 'Preview</h2></div>' + previewHtml() + '</div>';
+      }
+      return b;
+    }
+
+    function previewHtml() {
+      var img = wz.images.length ? (wz.images[0].url || (wz.images[0].file ? '' : '')) : '';
+      if (!img && wz.images.length && wz.images[0].file) img = 'file://pending';
+      var showImg = wz.images.length ? wz.images[0].url : null;
+      var imgsrc = showImg ? '<img src="' + esc(showImg) + '" alt="">' : '';
+      if (!showImg && wz.images.length && wz.images[0].file) {
+        // can't preview a local file easily after re-render; show placeholder
+        imgsrc = '<span class="ph">' + icon('image-outline') + '</span>';
+      }
+      var specRows = fields().map(function (f) {
+        var v = wz.specs[f.name];
+        return v ? '<div class="spec-row"><span class="k">' + esc(f.label) + '</span><span class="v">' + esc(v) + '</span></div>' : '';
+      }).join('');
+      return '<div class="preview-card">' +
+        '<div class="pc-thumb">' + (imgsrc || '<span class="ph">' + icon('camera-outline') + '</span>') +
+        (wz.images.length ? '<span class="cond-chip">' + wz.images.length + ' photo(s)</span>' : '') + '</div>' +
+        '<div class="pc-body"><div class="title">' + esc(wz.title || 'Your listing title') + '</div>' +
+        '<div class="price">' + fmtLKR(wz.price || 0) + (wz.negotiable ? ' <span class="neg">negotiable</span>' : '') + '</div>' +
+        '<div class="meta"><span>' + icon('location-outline') + esc(wz.city || wz.district || wz.province || 'Location') + '</span>' +
+        '<span class="sep">·</span><span>' + esc(wz.condition || 'Condition') + '</span></div></div></div>' +
+        (specRows ? '<div class="info-card mt16">' + specRows + '</div>' : '') +
+        (wz.description ? '<div class="fs13 muted mt16" style="line-height:1.6">' + esc(wz.description) + '</div>' : '');
+    }
+
+    function renderUploads() {
+      var grid = $('#wz-upload');
+      if (!grid) return;
+      var tiles = wz.images.map(function (it, i) {
+        var src = it.file ? (it._url || '') : it.url;
+        var thumb = it.file
+          ? '<div class="ph">' + icon('image-outline') + '</div>'
+          : '<img src="' + esc(it.url) + '" alt="">';
+        return '<div class="upload-tile has-img">' + (src && it.file ? '<img src="' + src + '" alt="">' : thumb) +
+          (i === 0 ? '<span class="cover-badge">Cover</span>' : '') +
+          '<span class="rm" data-wz-rm="' + i + '">' + icon('close-outline') + '</span>' +
+          '<div class="tile-tools">' +
+          '<button type="button" data-wz-left="' + i + '"' + (i === 0 ? ' disabled' : '') + '>' + icon('arrow-back-outline') + '</button>' +
+          '<button type="button" data-wz-cover="' + i + '">' + icon('star-outline') + '</button>' +
+          '<button type="button" data-wz-right="' + i + '"' + (i === wz.images.length - 1 ? ' disabled' : '') + '>' + icon('arrow-forward-outline') + '</button>' +
+          '</div></div>';
+      }).join('');
+      grid.innerHTML = tiles + (wz.images.length < 15
+        ? '<label class="upload-tile" id="wz-add">' + icon('add-outline') + '<input type="file" accept="image/*" multiple hidden></label>'
+        : '');
+      var inp = $('#wz-add input');
+      if (inp) inp.addEventListener('change', function () {
+        var picked = Array.prototype.slice.call(this.files || []);
+        picked.forEach(function (f) {
+          if (wz.images.length >= 15) return;
+          var item = { file: f, _url: URL.createObjectURL(f) };
+          wz.images.push(item);
+        });
+        renderUploads();
+      });
+      $$('#wz-upload [data-wz-rm]').forEach(function (btn) {
+        btn.addEventListener('click', function (e) {
+          e.preventDefault(); e.stopPropagation();
+          wz.images.splice(parseInt(btn.getAttribute('data-wz-rm'), 10), 1);
+          renderUploads();
+        });
+      });
+      $$('#wz-upload [data-wz-left]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var i = parseInt(btn.getAttribute('data-wz-left'), 10);
+          if (i > 0) { var t = wz.images[i - 1]; wz.images[i - 1] = wz.images[i]; wz.images[i] = t; renderUploads(); }
+        });
+      });
+      $$('#wz-upload [data-wz-right]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var i = parseInt(btn.getAttribute('data-wz-right'), 10);
+          if (i < wz.images.length - 1) { var t = wz.images[i + 1]; wz.images[i + 1] = wz.images[i]; wz.images[i] = t; renderUploads(); }
+        });
+      });
+      $$('#wz-upload [data-wz-cover]').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var i = parseInt(btn.getAttribute('data-wz-cover'), 10);
+          if (i > 0) { var it = wz.images.splice(i, 1)[0]; wz.images.unshift(it); renderUploads(); }
+        });
+      });
+    }
+
+    function readStep() {
+      var i = wz.step;
+      if (i === 0) {
+        $$('[data-spec]', $('#wizard-root')).forEach(function (inp) { wz.specs[inp.getAttribute('data-spec')] = inp.value; });
+      } else if (i === 1) {
+        $$('[data-spec]', $('#wizard-root')).forEach(function (inp) { if (inp.value) wz.specs[inp.getAttribute('data-spec')] = inp.value; });
+      } else if (i === 2) {
+        // condition handled via click handlers
+      } else if (i === 3) {
+        wz.price = $('#wz-price').value.trim();
+        wz.negotiable = $('#wz-neg').checked;
+      } else if (i === 4) {
+        wz.title = $('#wz-title').value.trim();
+        wz.description = $('#wz-desc').value.trim();
+      } else if (i === 6) {
+        var p = $('#wizard-root').querySelector('[data-loc="province"]');
+        var d = $('#wizard-root').querySelector('[data-loc="district"]');
+        var c = $('#wizard-root').querySelector('[data-loc="city"]');
+        wz.province = p ? p.value : '';
+        wz.district = d ? d.value : '';
+        wz.city = c ? c.value : '';
+      } else if (i === 7) {
+        wz.contact = { phone: $('#wz-phone').checked, whatsapp: $('#wz-wa').checked, chat: $('#wz-chat').checked };
+      }
+    }
+
+    function validate() {
+      var i = wz.step;
+      if (i === 0) {
+        if (field('model') && !wz.specs.model) return 'Please enter the model';
+      } else if (i === 1) {
+        var bad = fields().filter(function (f) { return f.required && f.name !== 'brand' && f.name !== 'model' && f.name !== 'year' && !wz.specs[f.name]; });
+        if (bad.length) return 'Please fill in ' + bad[0].label;
+      } else if (i === 3) {
+        if (!wz.price || parseInt(wz.price, 10) <= 0) return 'Please enter a valid price';
+      } else if (i === 4) {
+        if (!wz.title) return 'Please add a title';
+      } else if (i === 6) {
+        if (!wz.province || !wz.district) return 'Please choose a location';
+      }
+      return null;
+    }
+
+    function navHtml() {
+      var last = wz.step === WZ_STEPS.length - 1;
+      var backLabel = wz.step === 0 ? 'Back' : 'Back';
+      var backAction = wz.step === 0 ? (edit ? '#/my-ads' : '#/sell') : null;
+      return '<div class="wizard-nav">' +
+        '<button class="btn btn-outline" id="wz-back" style="flex:1">' + icon('arrow-back-outline') + esc(backLabel) + '</button>' +
+        (last
+          ? '<button class="btn btn-primary" id="wz-publish" style="flex:2">' + icon('checkmark-circle-outline') + 'Publish Listing</button>'
+          : '<button class="btn btn-primary" id="wz-next" style="flex:2">' + esc('Next') + icon('arrow-forward-outline') + '</button>') +
+        '</div>';
+    }
+
+    function render() {
+      var root = $('#wizard-root');
+      root.innerHTML = progressHtml() + '<div class="wizard-body">' + stepBody() + '</div>' + navHtml();
+      if (wz.step === 2) {
+        $$('#wz-cond .opt').forEach(function (o) {
+          o.addEventListener('click', function () {
+            $$('#wz-cond .opt').forEach(function (x) { x.classList.remove('active'); });
+            o.classList.add('active');
+            wz.condition = o.getAttribute('data-cond');
+          });
+        });
+      }
+      if (wz.step === 5) renderUploads();
+      if (wz.step === 6) bindLocationSelects($('#wizard-root'), { province: wz.province, district: wz.district, city: wz.city });
+      if (wz.step === 8) {
+        $('#wz-publish').addEventListener('click', function () { submit('active'); });
+        // also offer draft save
+        var body = $('.wizard-body');
+        if (body && !$('#wz-draft')) {
+          body.insertAdjacentHTML('beforeend', '<button class="btn btn-outline mt16" id="wz-draft" style="width:100%">' + icon('document-outline') + 'Save as Draft</button>');
+          $('#wz-draft').addEventListener('click', function () { submit('draft'); });
+        }
+      }
+      $('#wz-back').addEventListener('click', function () {
+        if (wz.step === 0) { location.hash = backAction; return; }
+        readStep();
+        wz.step--;
+        render();
+      });
+      var next = $('#wz-next');
+      if (next) next.addEventListener('click', function () {
+        readStep();
+        var problem = validate();
+        if (problem) return toast(problem, 'error');
+        wz.step++;
+        render();
+        window.scrollTo(0, 0);
+      });
+    }
+
+    function submit(status) {
+      readStep();
+      var problem = validate();
+      if (status === 'active' && problem) return toast(problem, 'error');
+      var btn = $('#wz-publish') || $('#wz-draft');
+      var files = wz.images.filter(function (it) { return it.file; }).map(function (it) { return it.file; });
+      function enable() { if (btn) { btn.disabled = false; } }
+      function finish(uploadedUrls) {
+        var idx = 0;
+        var imgs = wz.images.map(function (it) { return it.file ? uploadedUrls[idx++] : it.url; });
+        var payload = {
+          category_id: wz.cat.sub.id,
+          title: wz.title,
+          price: parseInt(wz.price, 10) || 0,
+          negotiable: wz.negotiable,
+          condition: wz.condition,
+          description: wz.description,
+          province: wz.province, district: wz.district, city: wz.city || wz.district,
+          specs: wz.specs, images: imgs,
+          contact_prefs: wz.contact, status: status
+        };
+        if (btn) { btn.disabled = true; }
+        var req = edit ? api.patch('/listings/' + edit.id, payload) : api.post('/listings', payload);
+        req.then(function (r) {
+          toast(status === 'draft' ? 'Draft saved' : (edit ? 'Listing updated' : 'Listing published!'), 'success');
+          location.hash = status === 'draft' ? '#/my-ads' : '#/ads/' + r.id;
+        }).catch(function (er) { toast(er.message, 'error'); enable(); });
+      }
+      if (files.length) {
+        var fd = new FormData();
+        files.forEach(function (f) { fd.append('files', f); });
+        fetch('/api/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!d.ok) throw new Error(d.error || 'Upload failed');
+            finish(d.data.items.map(function (x) { return x.url; }));
+          })
+          .catch(function (er) { toast(er.message, 'error'); enable(); });
+      } else finish([]);
+    }
+
+    return {
+      get html() {
+        return header(edit ? 'Edit Listing' : 'Post an Ad', {}) + '<div id="wizard-root"></div>';
+      },
+      mount: function () { render(); },
+      hideTabbar: true,
+      render: render
+    };
+  }
+
+  views.sellForm = function (params) {
+    if (!requireAuth()) return { html: '' };
+    var found = findSub(params.slug);
+    if (!found) { location.hash = '#/sell'; return { html: '' }; }
+    return listingWizardView(listingWizard({ cat: found }));
+  };
+
+  function listingWizardView(wz) {
+    return { html: wz.html, mount: wz.mount, hideTabbar: true };
+  }
+
+  views.editAd = function (params) {
+    if (!requireAuth()) return { html: '' };
+    return {
+      html: '<div class="spinner" style="margin-top:80px"></div>',
+      hideTabbar: true,
+      mount: function () {
+        api.get('/listings/' + params.id).then(function (l) {
+          if (l.seller && l.seller.id !== state.user.id && !state.user.is_admin) {
+            $('#page').innerHTML = header('Edit Listing', {}) + '<div class="empty"><div class="e-icon">' + icon('alert-circle-outline') + '</div><h3>Not allowed</h3><p>You can only edit your own listings.</p></div>';
+            return;
           }
-          if (files.length) {
-            var fd = new FormData();
-            files.forEach(function (f) { fd.append('files', f); });
-            fetch('/api/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
-              .then(function (r) { return r.json(); })
-              .then(function (d) { if (!d.ok) throw new Error(d.error || 'Upload failed'); payload.images = d.data.urls; finish(); })
-              .catch(function (er) { toast(er.message, 'error'); btn.disabled = false; btn.innerHTML = icon('checkmark-circle-outline') + 'Publish Listing'; });
-          } else finish();
+          var cat = findSubById(l.category_id);
+          if (!cat) {
+            $('#page').innerHTML = header('Edit Listing', {}) + '<div class="empty"><p>Unknown category.</p></div>';
+            return;
+          }
+          var wz = listingWizard({ cat: cat, edit: l });
+          $('#page').innerHTML = wz.html;
+          document.getElementById('app').classList.toggle('hide-tabbar', true);
+          wz.mount();
+        }).catch(function (e) {
+          $('#page').innerHTML = header('Edit Listing', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
         });
       }
     };
@@ -829,54 +1317,118 @@
 
   views.myAds = function () {
     if (!requireAuth()) return { html: '' };
-    var html = header('My Ads', {});
+    var html = header('My Ads', { right: '<a class="icon-btn" data-nav="#/analytics" aria-label="Analytics">' + icon('bar-chart-outline') + '</a>' });
+    html += '<div class="subcats" style="padding-top:12px" id="myads-tabs">' +
+      ['All', 'Active', 'Pending', 'Draft', 'Sold', 'Expired', 'Paused'].map(function (s, i) {
+        return '<a class="chip' + (i === 0 ? ' active' : '') + '" data-adtab="' + s.toLowerCase() + '">' + s + '</a>';
+      }).join('') + '</div>';
     html += '<div class="stat-strip"><div class="stat-box"><b id="st-active">–</b><span>Active</span></div>' +
-      '<div class="stat-box"><b id="st-sold">–</b><span>Sold</span></div>' +
-      '<div class="stat-box"><b id="st-views">–</b><span>Total views</span></div></div>';
-    html += '<div class="section"><div class="section-head"><h2>' + icon('duplicate-outline') + 'My Listings</h2></div></div>';
+      '<div class="stat-box"><b id="st-views">–</b><span>Total views</span></div>' +
+      '<div class="stat-box"><b id="st-favs">–</b><span>Favorites</span></div></div>';
     html += '<div id="myads-list"><div class="spinner"></div></div>';
     return {
       html: html,
       mount: function () {
-        api.get('/me/listings').then(function (items) {
-          var active = items.filter(function (x) { return x.status === 'active'; });
-          var sold = items.filter(function (x) { return x.status !== 'active'; });
-          var views = items.reduce(function (a, b) { return a + (b.views || 0); }, 0);
-          $('#st-active').textContent = active.length;
-          $('#st-sold').textContent = sold.length;
-          $('#st-views').textContent = views;
-          var el = $('#myads-list');
-          if (!items.length) {
-            el.innerHTML = '<div class="empty"><div class="e-icon">' + icon('duplicate-outline') + '</div><h3>No listings yet</h3><p>Post your first camera or lens in minutes.</p><a class="btn btn-primary btn-sm" data-nav="#/sell" style="margin-top:12px">Sell an item</a></div>';
-            return;
-          }
-          el.innerHTML = items.map(function (l) {
-            return '<div class="row-item"><div style="width:64px;height:52px;border-radius:10px;overflow:hidden;flex-shrink:0;background:#eef1ef">' +
-              (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" style="width:100%;height:100%;object-fit:cover">' : '') + '</div>' +
-              '<div class="ri-main" data-nav="#/ads/' + l.id + '"><b>' + esc(l.title) + '</b>' +
-              '<span>' + fmtLKR(l.price) + ' · ' + esc(l.status) + ' · ' + l.views + ' views</span></div>' +
-              '<div style="display:flex;flex-direction:column;gap:6px">' +
-              (l.status === 'active' ? '<button class="btn btn-outline btn-sm" data-mark-sold="' + l.id + '">Sold</button>' : '') +
-              '<button class="btn btn-danger btn-sm" data-del-listing="' + l.id + '">' + icon('trash-outline') + '</button></div></div>';
-          }).join('');
-          $$('#myads-list [data-del-listing]').forEach(function (b) {
-            b.addEventListener('click', function () {
-              var id = b.getAttribute('data-del-listing');
-              openDialog('Delete listing', '<p>This will permanently remove your listing. This cannot be undone.</p>', 'Delete', true, function () {
-                api.del('/listings/' + id).then(function () { closeDialog(); toast('Listing deleted', 'success'); views.myAdsRemount(); });
-              });
-            });
+        var tab = 'all';
+        function load() {
+          api.get('/me/listings').then(function (items) {
+            var active = items.filter(function (x) { return x.status === 'active'; });
+            var views = items.reduce(function (a, b) { return a + (b.views || 0); }, 0);
+            var a = $('#st-active'), v = $('#st-views');
+            if (a) a.textContent = active.length;
+            if (v) v.textContent = views;
+            api.get('/me/analytics').then(function (an) { var f = $('#st-favs'); if (f) f.textContent = an.summary.favorites; })
+              .catch(function () { var f = $('#st-favs'); if (f) f.textContent = '–'; });
+
+            var shown = tab === 'all' ? items : items.filter(function (x) { return x.status === tab; });
+            var el = $('#myads-list');
+            if (!shown.length) {
+              el.innerHTML = '<div class="empty"><div class="e-icon">' + icon('duplicate-outline') + '</div><h3>' +
+                (items.length ? 'No ' + tab + ' listings' : 'No listings yet') + '</h3>' +
+                (items.length ? '' : '<p>Post your first camera or lens in minutes.</p><a class="btn btn-primary btn-sm" data-nav="#/sell" style="margin-top:12px">Sell an item</a>') + '</div>';
+              return;
+            }
+            el.innerHTML = shown.map(adRow).join('');
+            bindAdActions(el);
+          }).catch(function (e) { $('#myads-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        }
+        load();
+        $$('#myads-tabs [data-adtab]').forEach(function (t) {
+          t.addEventListener('click', function () {
+            $$('#myads-tabs [data-adtab]').forEach(function (x) { x.classList.remove('active'); });
+            t.classList.add('active');
+            tab = t.getAttribute('data-adtab');
+            load();
           });
-          $$('#myads-list [data-mark-sold]').forEach(function (b) {
-            b.addEventListener('click', function () {
-              var id = b.getAttribute('data-mark-sold');
-              api.patch('/listings/' + id, { status: 'sold' }).then(function () { toast('Marked as sold', 'success'); views.myAdsRemount(); });
-            });
-          });
-        }).catch(function (e) { $('#myads-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+        });
       }
     };
   };
+
+  function adRow(l) {
+    var expiring = l.status === 'active' && l.expiry_at && (l.expiry_at - Math.floor(Date.now() / 1000)) < 3 * 86400;
+    var expiryLine = l.expiry_at ? (l.status === 'active'
+      ? 'Expires ' + fmtDate(l.expiry_at) : 'Expired ' + fmtDate(l.expiry_at)) : '';
+    return '<div class="ad-row">' +
+      '<div class="ad-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="">' : icon('camera-outline')) + '</div>' +
+      '<div class="ad-main">' +
+      '<div class="ad-title" data-nav="#/ads/' + l.id + '">' + esc(l.title) + '</div>' +
+      '<div class="ad-sub">' + fmtLKR(l.price) + (l.negotiable ? ' · negotiable' : '') + ' · ' + l.views + ' views</div>' +
+      '<div class="ad-meta">' + statusChip(l.status) +
+      (expiring ? '<span class="status-chip" style="color:#C77D23;background:#C77D231a">Expiring soon</span>' : '') +
+      (expiryLine ? '<span class="muted fs12">' + esc(expiryLine) + '</span>' : '') + '</div>' +
+      '</div>' +
+      '<div class="ad-actions">' +
+      '<button class="btn btn-outline btn-sm" data-ad-act="edit" data-id="' + l.id + '">' + icon('create-outline') + 'Edit</button>' +
+      (l.status === 'active'
+        ? '<button class="btn btn-outline btn-sm" data-ad-act="pause" data-id="' + l.id + '">' + icon('pause-outline') + 'Pause</button>' +
+          '<button class="btn btn-outline btn-sm" data-ad-act="sold" data-id="' + l.id + '">' + icon('checkmark-circle-outline') + 'Sold</button>'
+        : '') +
+      (l.status === 'paused'
+        ? '<button class="btn btn-primary btn-sm" data-ad-act="resume" data-id="' + l.id + '">' + icon('play-outline') + 'Resume</button>' : '') +
+      (l.status === 'expired' || (l.status === 'active' && expiring)
+        ? '<button class="btn btn-outline btn-sm" data-ad-act="renew" data-id="' + l.id + '">' + icon('refresh-outline') + 'Renew</button>' : '') +
+      (l.status === 'draft'
+        ? '<button class="btn btn-primary btn-sm" data-ad-act="publish" data-id="' + l.id + '">' + icon('checkmark-circle-outline') + 'Publish</button>' : '') +
+      (l.status === 'active' && !l.featured
+        ? '<button class="btn btn-accent btn-sm" data-ad-act="promote" data-id="' + l.id + '">' + icon('flash-outline') + 'Promote</button>' : '') +
+      '<button class="btn btn-danger btn-sm" data-ad-act="delete" data-id="' + l.id + '">' + icon('trash-outline') + '</button>' +
+      '</div></div>';
+  }
+
+  function bindAdActions(root) {
+    $$('[data-ad-act]', root).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var id = b.getAttribute('data-id');
+        var act = b.getAttribute('data-ad-act');
+        if (act === 'edit') { location.hash = '#/edit-ad/' + id; return; }
+        if (act === 'delete') {
+          openDialog('Delete listing', '<p>This will permanently remove your listing. This cannot be undone.</p>', 'Delete', true, function () {
+            api.del('/listings/' + id).then(function () { closeDialog(); toast('Listing deleted', 'success'); views.myAdsRemount(); });
+          });
+          return;
+        }
+        var statusMap = { pause: 'paused', resume: 'active', sold: 'sold', publish: 'active' };
+        if (statusMap[act]) {
+          api.patch('/listings/' + id, { status: statusMap[act] }).then(function () {
+            toast('Listing ' + (act === 'sold' ? 'marked as sold' : act + 'd'), 'success');
+            views.myAdsRemount();
+          }).catch(function (e) { toast(e.message, 'error'); });
+          return;
+        }
+        if (act === 'renew') {
+          api.post('/listings/' + id + '/renew').then(function () { toast('Listing renewed for 30 days', 'success'); views.myAdsRemount(); });
+          return;
+        }
+        if (act === 'promote') {
+          openDialog('Promote listing', '<p>Promote this listing to the featured section on the homepage for more visibility.</p>', 'Promote', false, function () {
+            api.post('/listings/' + id + '/promote').then(function () { closeDialog(); toast('Listing promoted', 'success'); views.myAdsRemount(); });
+          });
+          return;
+        }
+      });
+    });
+  }
   views.myAdsRemount = function () { var v = views.myAds(); if (v.mount) v.mount(); };
 
   views.favorites = function () {
@@ -913,10 +1465,14 @@
             return;
           }
           el.innerHTML = rows.map(function (r) {
+            var mine = r.last_sender === state.user.id;
             return '<div class="chat-list-item" data-nav="#/chat/' + r.other_id + '">' +
-              avatarHtml({ name: r.other_name }, 'lg') +
-              '<div class="meta"><b>' + esc(r.other_name) + '</b><p>' + (r.listing_title ? 'Re: ' + esc(r.listing_title) : esc(r.body)) + '</p></div>' +
-              '<div class="time">' + timeAgo(r.created_at) + '</div></div>';
+              avatarHtml({ name: r.other_name, avatar: r.other_avatar }, 'lg') +
+              '<div class="meta"><b>' + esc(r.other_name) + '</b>' +
+              '<p>' + (mine ? 'You: ' : '') + (r.listing_title ? 'Re: ' + esc(r.listing_title) : esc(r.last_body)) + '</p></div>' +
+              '<div class="c-right">' +
+              (r.unread ? '<span class="unread">' + r.unread + '</span>' : '') +
+              '<div class="time">' + timeAgo(r.last_at || r.created_at) + '</div></div></div>';
           }).join('');
         }).catch(function (e) { $('#conv-list').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
       }
@@ -926,7 +1482,9 @@
   views.chatThread = function (params) {
     if (!requireAuth()) return { html: '' };
     var otherId = params.id;
-    var html = header('Chat', { right: '<span style="width:40px"></span>' });
+    var listingId = (params.q && params.q.get('listing')) || '';
+    var html = header('Chat', { right: '<button class="icon-btn" id="thr-more" aria-label="More">' + icon('ellipsis-horizontal-outline') + '</button>' });
+    html += '<div id="thr-head"></div>';
     html += '<div class="chat-thread" id="thread"></div>';
     html += '<div class="chat-input"><input id="msg-input" placeholder="Type a message…"><button class="send" id="msg-send">' + icon('send-outline') + '</button></div>';
     return {
@@ -934,25 +1492,63 @@
       hideTabbar: true,
       mount: function () {
         var threadEl = $('#thread');
+        var blockedBy = false;
         function load() {
           api.get('/chat/' + otherId).then(function (d) {
+            blockedBy = d.blocked_by;
             var u = state.user;
             var h = (d.messages || []).map(function (m) {
               var mine = m.sender_id === u.id;
               return '<div class="bubble ' + (mine ? 'me' : 'other') + '">' + esc(m.body) + '<span class="t">' + timeAgo(m.created_at) + '</span></div>';
             }).join('');
             threadEl.innerHTML = h || '<div class="empty"><p>Say hello to start the conversation.</p></div>';
+            var head = $('#thr-head');
+            var hh = '';
+            if (d.listing) {
+              hh += '<div class="thr-listing" data-nav="#/ads/' + d.listing.id + '">' +
+                (d.listing.image ? '<img src="' + esc(d.listing.image) + '" alt="">' : '<span class="ph">' + icon('camera-outline') + '</span>') +
+                '<div class="tl-main"><b>' + esc(d.listing.title) + '</b><span>' + fmtLKR(d.listing.price) + '</span></div>' +
+                icon('chevron-forward-outline') + '</div>';
+            }
+            if (d.blocked_by) hh += '<div class="thr-notice">' + icon('ban-outline') + 'This user has blocked messaging.</div>';
+            else if (d.blocked) hh += '<div class="thr-notice">' + icon('ban-outline') + 'You blocked this user. <a id="thr-unblock">Unblock</a></div>';
+            head.innerHTML = hh;
+            var ub = $('#thr-unblock');
+            if (ub) ub.addEventListener('click', function () { api.del('/chat/' + otherId + '/block').then(function () { load(); }); });
+            var inp = $('#msg-input'), btn = $('#msg-send');
+            if (inp) inp.disabled = blockedBy;
+            if (btn) btn.disabled = blockedBy;
             window.scrollTo(0, document.body.scrollHeight);
           });
         }
         load();
         function send() {
           var inp = $('#msg-input'); var t = inp.value.trim();
-          if (!t) return;
-          api.post('/chat/' + otherId, { body: t }).then(function () { inp.value = ''; load(); });
+          if (!t || blockedBy) return;
+          var payload = { body: t };
+          if (listingId) payload.listing_id = parseInt(listingId, 10);
+          api.post('/chat/' + otherId, payload).then(function () { inp.value = ''; listingId = ''; load(); })
+            .catch(function (e) { toast(e.message, 'error'); });
         }
         $('#msg-send').addEventListener('click', send);
         $('#msg-input').addEventListener('keydown', function (e) { if (e.key === 'Enter') send(); });
+        $('#thr-more').addEventListener('click', function () {
+          openSheet(null, [
+            { icon: 'ban-outline', label: 'Block user', onClick: function () {
+              openDialog('Block user', '<p>They won’t be able to message you anymore.</p>', 'Block', true, function () {
+                api.post('/chat/' + otherId + '/block').then(function () { closeDialog(); load(); });
+              });
+            } },
+            { icon: 'flag-outline', label: 'Report user', danger: true, onClick: function () {
+              var reasons = (state.meta && state.meta.report_reasons) || ['Scam', 'Fake product', 'Wrong information', 'Other'];
+              openSheet('Report user', reasons.map(function (r) {
+                return { icon: 'flag-outline', label: r, danger: true, onClick: function () {
+                  api.post('/chat/' + otherId + '/report', { reason: r }).then(function () { toast('Reported — thanks', 'success'); });
+                } };
+              }));
+            } }
+          ]);
+        });
         setInterval(load, 6000);
       }
     };
@@ -969,8 +1565,8 @@
           var el = $('#notif-list');
           if (!d.items.length) { el.innerHTML = '<div class="empty"><div class="e-icon">' + icon('notifications-outline') + '</div><h3>No notifications</h3></div>'; return; }
           el.innerHTML = d.items.map(function (n) {
-            var colors = { offer: '#C77D23', message: '#3A6FB0', listing: '#0E7C66', info: '#74817C' };
-            var ic = { offer: 'cash-outline', message: 'chatbubble-ellipses-outline', listing: 'camera-outline', info: 'notifications-outline' };
+            var colors = { offer: '#C77D23', message: '#3A6FB0', listing: '#0E7C66', favorite: '#E5484D', promotion: '#F0A500', expiring: '#B04A3A', rating: '#9C4F96', info: '#74817C' };
+            var ic = { offer: 'cash-outline', message: 'chatbubble-ellipses-outline', listing: 'camera-outline', favorite: 'heart-outline', promotion: 'flash-outline', expiring: 'hourglass-outline', rating: 'star-outline', info: 'notifications-outline' };
             return '<div class="notif-item' + (n.read ? '' : ' unread') + '"' + (n.link ? ' data-nav="' + esc(n.link) + '"' : '') + '>' +
               '<span class="ni-icon" style="background:' + (colors[n.type] || '#74817C') + '1a;color:' + (colors[n.type] || '#74817C') + '">' + icon(ic[n.type] || 'notifications-outline') + '</span>' +
               '<div class="ni-main"><b>' + esc(n.title) + '</b><p>' + esc(n.body) + '</p></div>' +
@@ -1005,6 +1601,8 @@
     html += menuRow('heart-outline', '#E5484D', 'Favorites', 'Saved listings', '#/favorites');
     html += menuRow('chatbubble-ellipses-outline', '#3A6FB0', 'Messages', 'Chat with buyers and sellers', '#/chat');
     html += menuRow('cash-outline', '#C77D23', 'My Offers', 'Offers made and received', '#/my-offers');
+    html += menuRow('bar-chart-outline', '#0E7C66', 'Analytics', 'Views, calls & offers', '#/analytics');
+    html += menuRow('briefcase-outline', '#3A6FB0', 'My Shop', 'Business page & hours', '#/my-shop');
     html += menuRow('notifications-outline', '#9C4F96', 'Notifications', 'Updates on your activity', '#/notifications');
     html += '<div class="divider-label">Explore</div>';
     html += menuRow('cart-outline', '#0E7C66', 'Camera Shops', 'Dealers across Sri Lanka', '#/shops');
@@ -1049,20 +1647,62 @@
       mount: function () {
         api.get('/seller/' + params.id).then(function (d) {
           var s = d.seller;
+          var isSelf = state.user && state.user.id === s.id;
+          var ratingLine = d.rating && d.rating.count ? starsHtml(d.rating.avg, d.rating.count) : '<span class="muted fs12">No ratings yet</span>';
+          var bizChip = d.business ? '<a class="biz-link" style="margin-top:12px" data-nav="#/shop/' + esc(d.business.slug) + '">' + icon('briefcase-outline') + ' Visit shop: ' + esc(d.business.name) + icon('chevron-forward-outline') + '</a>' : '';
           $('#seller-root').innerHTML = header(s.name, {}) +
             '<div class="hero-page" style="text-align:center"><div style="display:flex;justify-content:center;margin-bottom:10px">' + avatarHtml(s, 'lg') + '</div>' +
-            '<h1>' + esc(s.name) + '</h1><p>' + (s.verified ? icon('shield-checkmark') + ' Verified seller · ' : '') + esc([s.city, s.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</p>' +
+            '<h1>' + esc(s.name) + '</h1>' +
+            '<p>' + (s.verified ? icon('shield-checkmark') + ' Verified seller · ' : '') +
+            (s.seller_type === 'business' ? icon('briefcase-outline') + ' Business · ' : '') +
+            esc([s.city, s.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</p>' +
+            '<p style="margin-top:6px">' + ratingLine + '</p>' +
             (s.bio ? '<p style="margin-top:8px;max-width:420px;margin-left:auto;margin-right:auto">' + esc(s.bio) + '</p>' : '') +
-            '<div class="flex gap8" style="justify-content:center;margin-top:16px">' +
+            '<div class="flex gap8" style="justify-content:center;margin-top:14px">' +
             '<button class="btn btn-wa btn-sm" data-wa-user="' + esc(s.phone) + '">' + icon('logo-whatsapp') + 'WhatsApp</button>' +
-            '<button class="btn btn-outline btn-sm" data-nav="#/chat/' + s.id + '">' + icon('chatbubble-ellipses-outline') + 'Chat</button></div></div>' +
+            '<button class="btn btn-outline btn-sm" data-nav="#/chat/' + s.id + '">' + icon('chatbubble-ellipses-outline') + 'Chat</button>' +
+            (!isSelf ? '<button class="btn btn-accent btn-sm" id="rate-btn">' + icon('star-outline') + 'Rate</button>' : '') +
+            '</div>' + bizChip + '</div>' +
             '<div class="section"><div class="section-head"><h2>' + icon('camera-outline') + 'Listings (' + (d.listings || []).length + ')</h2></div></div>' +
-            '<div>' + listingGrid(d.listings) + '</div><div style="height:16px"></div>';
+            '<div>' + listingGrid(d.listings) + '</div>' +
+            ((d.ratings && d.ratings.length)
+              ? '<div class="section"><div class="section-head"><h2>' + icon('star-outline') + 'Reviews (' + d.ratings.length + ')</h2></div></div>' +
+                d.ratings.slice(0, 8).map(function (r) {
+                  return '<div class="row-item"><span class="ri-icon" style="background:#FDF1D8;color:#C77D23">' + icon('star') + '</span>' +
+                    '<div class="ri-main"><b>' + esc(r.buyer_name) + ' · ' + r.stars + '/5</b><span>' + esc(r.comment || '') + '</span></div>' +
+                    '<span class="muted fs12">' + timeAgo(r.created_at) + '</span></div>';
+                }).join('')
+              : '') + '<div style="height:16px"></div>';
+          var rb = $('#rate-btn');
+          if (rb) rb.addEventListener('click', function () {
+            if (!requireAuth()) return;
+            openDialog('Rate this seller', '<div class="form-group"><label>Stars</label><div class="seg" id="rate-seg">' +
+              [1, 2, 3, 4, 5].map(function (n) { return '<div class="opt' + (n === 5 ? ' active' : '') + '" data-star="' + n + '">' + n + '</div>'; }).join('') + '</div></div>' +
+              '<div class="form-group"><label>Comment (optional)</label><textarea class="textarea" id="rate-comment" style="min-height:60px"></textarea></div>',
+              'Submit rating', false, function () {
+                var star = 5;
+                $$('#rate-seg .opt').forEach(function (o) { if (o.classList.contains('active')) star = parseInt(o.getAttribute('data-star'), 10); });
+                api.post('/seller/' + s.id + '/rate', { stars: star, comment: $('#rate-comment').value }).then(function () {
+                  closeDialog(); toast('Thanks for rating!', 'success'); views.sellerRemount(params);
+                }).catch(function (e) { toast(e.message, 'error'); });
+              });
+            $$('#rate-seg .opt').forEach(function (o) {
+              o.addEventListener('click', function () {
+                $$('#rate-seg .opt').forEach(function (x) { x.classList.remove('active'); });
+                o.classList.add('active');
+              });
+            });
+          });
         }).catch(function (e) {
           $('#seller-root').innerHTML = header('Seller', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
         });
       }
     };
+  };
+  views.sellerRemount = function (params) {
+    var root = $('#seller-root');
+    if (!root) return;
+    views.seller(params).mount();
   };
 
   views.myOffers = function () {
@@ -1083,12 +1723,24 @@
           $('#offers-root').innerHTML = h;
           $$('#offers-root [data-accept]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.post('/offers/' + b.getAttribute('data-accept'), { status: 'accepted' }).then(function () { toast('Offer accepted', 'success'); views.myOffersRemount(); });
+              api.post('/offers/' + b.getAttribute('data-accept'), { action: 'accept' }).then(function () { toast('Offer accepted', 'success'); views.myOffersRemount(); });
             });
           });
           $$('#offers-root [data-decline]').forEach(function (b) {
             b.addEventListener('click', function () {
-              api.post('/offers/' + b.getAttribute('data-decline'), { status: 'declined' }).then(function () { toast('Offer declined'); views.myOffersRemount(); });
+              api.post('/offers/' + b.getAttribute('data-decline'), { action: 'decline' }).then(function () { toast('Offer declined'); views.myOffersRemount(); });
+            });
+          });
+          $$('#offers-root [data-counter]').forEach(function (b) {
+            b.addEventListener('click', function () {
+              var id = b.getAttribute('data-counter');
+              openDialog('Counter offer', '<div class="form-group"><label>Your counter (LKR)</label><input class="input" id="counter-amt" inputmode="numeric" placeholder="e.g. 275000"></div>',
+                'Send counter', false, function () {
+                  var amt = parseInt($('#counter-amt').value, 10);
+                  if (!amt || amt <= 0) return toast('Enter a valid amount', 'error');
+                  api.post('/offers/' + id, { action: 'counter', amount: amt }).then(function () { closeDialog(); toast('Counter sent', 'success'); views.myOffersRemount(); })
+                    .catch(function (e) { toast(e.message, 'error'); });
+                });
             });
           });
         });
@@ -1097,12 +1749,25 @@
   };
   views.myOffersRemount = function () { var v = views.myOffers(); if (v.mount) v.mount(); };
   function offerRow(o, received) {
-    var statusColor = { pending: '#C77D23', accepted: '#0E7C66', declined: '#E5484D' };
+    var statusColor = { pending: '#C77D23', accepted: '#0E7C66', declined: '#E5484D', countered: '#9C4F96' };
+    var sub = (received ? 'From ' + esc(o.buyer_name) : 'To ' + esc(o.seller_name)) + ' · ' +
+      '<b style="color:' + (statusColor[o.status] || '#74817C') + '">' + esc(o.status) + '</b>';
+    if (o.status === 'countered' && o.counter_amount) sub += ' · counter: ' + fmtLKR(o.counter_amount);
+    if (o.message) sub += ' · "' + esc(o.message) + '"';
+    var actions = '';
+    if (received && o.status === 'pending') {
+      actions = '<button class="btn btn-primary btn-sm" data-accept="' + o.id + '">Accept</button>' +
+        '<button class="btn btn-outline btn-sm" data-decline="' + o.id + '">Decline</button>' +
+        '<button class="btn btn-outline btn-sm" data-counter="' + o.id + '">Counter</button>';
+    } else if (!received && o.status === 'countered') {
+      actions = '<button class="btn btn-primary btn-sm" data-accept="' + o.id + '">Accept</button>' +
+        '<button class="btn btn-outline btn-sm" data-decline="' + o.id + '">Decline</button>';
+    }
     return '<div class="row-item">' +
       '<span class="ri-icon" style="background:#f1f4f3;color:#0E7C66">' + icon('cash-outline') + '</span>' +
       '<div class="ri-main" data-nav="#/ads/' + o.listing_id + '"><b>' + fmtLKR(o.amount) + ' — ' + esc(o.listing_title || '') + '</b>' +
-      '<span>' + (received ? 'From ' + esc(o.buyer_name) : 'To ' + esc(o.seller_name)) + ' · <b style="color:' + (statusColor[o.status] || '#74817C') + '">' + esc(o.status) + '</b>' + (o.message ? ' · "' + esc(o.message) + '"' : '') + '</span></div>' +
-      (received && o.status === 'pending' ? '<div style="display:flex;gap:6px"><button class="btn btn-primary btn-sm" data-accept="' + o.id + '">Accept</button><button class="btn btn-outline btn-sm" data-decline="' + o.id + '">Decline</button></div>' : '') +
+      '<span>' + sub + '</span></div>' +
+      (actions ? '<div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:flex-end;max-width:170px">' + actions + '</div>' : '') +
       '</div>';
   }
 
@@ -1110,29 +1775,79 @@
     if (!requireAuth()) return { html: '' };
     var u = state.user;
     var html = header('Settings', {});
-    html += '<div class="detail-wrap"><form id="settings-form"><div class="form-card">' +
+    html += '<div class="detail-wrap">' +
+      '<div class="form-card" style="display:flex;align-items:center;gap:14px;margin-bottom:16px">' +
+      avatarHtml(u, 'lg') +
+      '<div><div class="fs13 fw7">Profile photo</div><div class="form-hint">JPG, PNG or WEBP</div></div>' +
+      '<label class="btn btn-outline btn-sm" style="margin-left:auto;width:auto">Upload' +
+      '<input type="file" id="avatar-input" accept="image/*" hidden></label></div>' +
+
+      '<form id="settings-form"><div class="form-card">' +
       '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('person-outline') + 'Profile</h2></div>' +
       '<div class="form-group"><label>Full name</label><input class="input" name="name" value="' + esc(u.name) + '"></div>' +
-      '<div class="form-group"><label>Phone</label><input class="input" name="phone" value="' + esc(u.phone) + '" placeholder="+94 77 123 4567"></div>' +
+      '<div class="form-group"><label>Email</label><input class="input" value="' + esc(u.email) + '" disabled>' +
+      (u.email_verified ? '<div class="form-hint" style="color:var(--brand)">' + icon('checkmark-circle-outline') + ' Verified</div>'
+        : '<a class="form-hint" id="resend-verify" style="color:var(--brand);font-weight:700">Verify your email →</a>') + '</div>' +
+      '<div class="form-group"><label>Phone</label><input class="input" name="phone" value="' + esc(u.phone) + '" placeholder="+94 77 123 4567">' +
+      (u.phone_verified ? '<div class="form-hint" style="color:var(--brand)">' + icon('checkmark-circle-outline') + ' Verified</div>'
+        : '<a class="form-hint" id="verify-phone" style="color:var(--brand);font-weight:700">Verify phone number →</a>') + '</div>' +
       '<div class="form-group"><label>WhatsApp number</label><input class="input" name="whatsapp" value="' + esc(u.whatsapp) + '" placeholder="+94 77 123 4567"></div>' +
-      '<div class="form-group"><label>City / town</label><input class="input" name="city" value="' + esc(u.city) + '" placeholder="Colombo"></div>' +
+      locationSelectsHtml() +
       '<div class="form-group"><label>About you</label><textarea class="textarea" name="bio" style="min-height:80px">' + esc(u.bio) + '</textarea></div>' +
+      '<div class="form-group"><label>Account type</label><div class="seg" id="stype-seg">' +
+      '<div class="opt' + (u.seller_type !== 'business' ? ' active' : '') + '" data-stype="individual">Individual</div>' +
+      '<div class="opt' + (u.seller_type === 'business' ? ' active' : '') + '" data-stype="business">Business</div></div></div>' +
       '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save Changes</button></div></form>' +
+
+      '<div class="form-card" style="margin-top:16px">' +
+      '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Business shop</h2></div>' +
+      '<p class="form-hint" style="margin-bottom:10px">Business sellers get a public shop page with opening hours and contact details.</p>' +
+      '<a class="btn btn-outline" data-nav="#/my-shop">' + icon('create-outline') + 'Manage my shop</a></div>' +
+
       '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('key-outline') + 'Password</h2></div>' +
       '<form id="pw-form"><div class="form-group"><label>Current password</label><input class="input" type="password" name="old"></div>' +
       '<div class="form-group"><label>New password</label><input class="input" type="password" name="new"></div>' +
-      '<button class="btn btn-outline" type="submit">Update password</button></form></div></div><div style="height:16px"></div>';
+      '<button class="btn btn-outline" type="submit">Update password</button></form></div>' +
+      '<a class="btn btn-danger" style="margin-top:16px" data-nav="#/sign-out">' + icon('log-out-outline') + 'Sign out</a>' +
+      '</div><div style="height:16px"></div>';
     return {
       html: html,
       mount: function () {
+        bindLocationSelects($('#settings-form'), { province: u.province, district: u.district, city: u.city });
+        var stype = u.seller_type || 'individual';
+        $$('#stype-seg .opt').forEach(function (o) {
+          o.addEventListener('click', function () {
+            $$('#stype-seg .opt').forEach(function (x) { x.classList.remove('active'); });
+            o.classList.add('active');
+            stype = o.getAttribute('data-stype');
+          });
+        });
+        $('#avatar-input').addEventListener('change', function () {
+          var f = this.files[0];
+          if (!f) return;
+          var fd = new FormData(); fd.append('file', f);
+          fetch('/api/me/avatar', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              if (!d.ok) throw new Error(d.error || 'Upload failed');
+              state.user.avatar = d.data.url;
+              renderDrawer(); renderTabbar();
+              toast('Photo updated', 'success');
+              views.settingsRemount();
+            }).catch(function (e) { toast(e.message, 'error'); });
+        });
         $('#settings-form').addEventListener('submit', function (e) {
           e.preventDefault();
-          var payload = {
+          var locs = $('#settings-form');
+          var prov = locs.querySelector('[data-loc="province"]').value;
+          var dist = locs.querySelector('[data-loc="district"]').value;
+          var city = locs.querySelector('[data-loc="city"]').value;
+          api.patch('/me', {
             name: $('[name="name"]', this).value, phone: $('[name="phone"]', this).value,
-            whatsapp: $('[name="whatsapp"]', this).value, city: $('[name="city"]', this).value,
-            bio: $('[name="bio"]', this).value
-          };
-          api.patch('/me', payload).then(function (d) {
+            whatsapp: $('[name="whatsapp"]', this).value,
+            province: prov, district: dist, city: city,
+            bio: $('[name="bio"]', this).value, seller_type: stype
+          }).then(function (d) {
             state.user = d.user;
             renderDrawer();
             toast('Profile updated', 'success');
@@ -1144,9 +1859,39 @@
             toast('Password updated', 'success'); this.reset();
           }.bind(this)).catch(function (er) { toast(er.message, 'error'); });
         });
+        var rv = $('#resend-verify');
+        if (rv) rv.addEventListener('click', function () {
+          api.post('/auth/resend-verification').then(function (d) {
+            if (d.dev && d.dev.verify_email_token) {
+              location.hash = '#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token);
+            } else {
+              toast('Verification link sent to your email', 'success');
+            }
+          }).catch(function (er) { toast(er.message, 'error'); });
+        });
+        var vp = $('#verify-phone');
+        if (vp) vp.addEventListener('click', function () {
+          openDialog('Verify phone', '<p>We’ll send a 6-digit code to your phone.</p><div class="form-group mt16"><label>Phone number</label><input class="input" id="vp-phone" value="' + esc($('[name="phone"]').value) + '" placeholder="+94 77 123 4567"></div>',
+            'Send code', false, function () {
+              api.post('/auth/verify-phone/request', { phone: $('#vp-phone').value }).then(function (d) {
+                var code = d.dev && d.dev.code;
+                closeDialog();
+                openDialog('Enter code', '<p>Code sent to your phone.</p>' +
+                  (code ? '<p class="form-hint" style="margin:6px 0">Dev code: <b>' + esc(code) + '</b></p>' : '') +
+                  '<div class="form-group mt16"><label>6-digit code</label><input class="input" id="vp-code" inputmode="numeric" placeholder="000000"></div>',
+                  'Verify', false, function () {
+                    api.post('/auth/verify-phone', { code: $('#vp-code').value }).then(function () {
+                      closeDialog(); toast('Phone verified', 'success');
+                      state.user.phone_verified = true; renderDrawer(); views.settingsRemount();
+                    }).catch(function (e) { toast(e.message, 'error'); });
+                  });
+              }).catch(function (er) { toast(er.message, 'error'); });
+            });
+        });
       }
     };
   };
+  views.settingsRemount = function () { var v = views.settings(); if (v.mount) v.mount(); };
 
   views.signin = function (query) {
     var html = header('Sign In', {});
@@ -1154,6 +1899,8 @@
       '<form id="login-form"><div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
       '<div class="form-group"><label>Password</label><input class="input" type="password" name="password" required placeholder="••••••••"></div>' +
       '<button class="btn btn-primary" type="submit">Sign In</button></form>' +
+      '<div class="flex jcsb aic" style="margin-top:10px">' +
+      '<a class="fs12 fw7" data-nav="#/forgot">Forgot password?</a></div>' +
       '<p class="form-hint" style="margin-top:10px;text-align:center">Demo: <b>demo@lankalens.lk</b> / <b>demo1234</b></p>' +
       '<div class="auth-alt">New to Lanka Lens? <a data-nav="#/sign-up">Create an account</a></div></div>';
     return {
@@ -1180,22 +1927,41 @@
       '<div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
       '<div class="form-group"><label>Phone (optional)</label><input class="input" name="phone" placeholder="+94 77 123 4567"></div>' +
       '<div class="form-group"><label>Password</label><input class="input" type="password" name="password" required placeholder="At least 6 characters"></div>' +
+      '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
+      '<div class="opt active" data-stype="individual">Individual</div>' +
+      '<div class="opt" data-stype="business">Business</div></div></div>' +
       '<button class="btn btn-primary" type="submit">Create Account</button></form>' +
+      '<div id="verify-banner"></div>' +
       '<div class="auth-alt">Already have an account? <a data-nav="#/sign-in">Sign in</a></div></div>';
     return {
       html: html,
       mount: function () {
+        var stype = 'individual';
+        $$('#stype-seg .opt').forEach(function (o) {
+          o.addEventListener('click', function () {
+            $$('#stype-seg .opt').forEach(function (x) { x.classList.remove('active'); });
+            o.classList.add('active');
+            stype = o.getAttribute('data-stype');
+          });
+        });
         $('#signup-form').addEventListener('submit', function (e) {
           e.preventDefault();
           var pw = $('[name="password"]', this).value;
           api.post('/auth/signup', {
             name: $('[name="name"]', this).value, email: $('[name="email"]', this).value,
-            phone: $('[name="phone"]', this).value, password: pw
+            phone: $('[name="phone"]', this).value, password: pw, seller_type: stype
           }).then(function (d) {
             api.token = d.token; localStorage.setItem('ll_token', d.token);
             setUser(d.user);
             toast('Account created — welcome!', 'success');
-            location.hash = '#/';
+            if (d.dev && d.dev.verify_email_token) {
+              $('#verify-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px">' +
+                '<div class="fs13" style="color:var(--ink)"><b>Verify your email</b></div>' +
+                '<p class="fs12 muted" style="margin:6px 0 10px">We sent a link to your inbox. In this dev build you can verify instantly:</p>' +
+                '<a class="btn btn-primary btn-sm" data-nav="#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token) + '">Verify now</a></div>';
+            } else {
+              location.hash = '#/';
+            }
           }).catch(function (er) { toast(er.message, 'error'); });
         });
       }
@@ -1426,6 +2192,228 @@
   views.faq = staticPage('faq');
   views.help = staticPage('help');
 
+  views.forgot = function () {
+    var html = header('Forgot Password', {});
+    html += '<div class="auth-wrap"><div class="auth-hero">' + logoMark() + '<h1>Reset your password</h1><p>Enter your email and we’ll send you a reset link.</p></div>' +
+      '<form id="forgot-form"><div class="form-group"><label>Email</label><input class="input" type="email" name="email" required placeholder="you@example.com"></div>' +
+      '<button class="btn btn-primary" type="submit">Send reset link</button></form>' +
+      '<div id="reset-banner"></div>' +
+      '<div class="auth-alt">Remembered it? <a data-nav="#/sign-in">Sign in</a></div></div>';
+    return {
+      html: html,
+      mount: function () {
+        $('#forgot-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          api.post('/auth/forgot', { email: $('[name="email"]', this).value }).then(function (d) {
+            if (d.dev && d.dev.reset_token) {
+              $('#reset-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px"><div class="fs13" style="color:var(--ink)"><b>Reset link created</b></div><p class="fs12 muted" style="margin:6px 0 10px">We emailed you a link. In this dev build:</p><a class="btn btn-primary btn-sm" data-nav="#/reset-password?token=' + encodeURIComponent(d.dev.reset_token) + '">Open reset page</a></div>';
+            } else {
+              $('#reset-banner').innerHTML = '<div class="info-card mt16" style="padding:13px 14px"><p class="fs13">If that email exists, a reset link has been sent.</p></div>';
+            }
+          }).catch(function (er) { toast(er.message, 'error'); });
+        });
+      }
+    };
+  };
+
+  views.resetPassword = function (q) {
+    var token = q.get('token') || '';
+    var html = header('Set New Password', {});
+    html += '<div class="auth-wrap"><div class="auth-hero"><h1>Choose a new password</h1><p>Enter a new password for your account.</p></div>' +
+      '<form id="reset-form"><div class="form-group"><label>New password</label><input class="input" type="password" name="password" required placeholder="At least 6 characters"></div>' +
+      '<div class="form-group"><label>Confirm password</label><input class="input" type="password" name="confirm" required placeholder="Repeat it"></div>' +
+      '<button class="btn btn-primary" type="submit">Reset password</button></form>' +
+      '<div class="auth-alt"><a data-nav="#/sign-in">Back to sign in</a></div></div>';
+    return {
+      html: html,
+      mount: function () {
+        $('#reset-form').addEventListener('submit', function (e) {
+          e.preventDefault();
+          var pw = $('[name="password"]', this).value;
+          var cf = $('[name="confirm"]', this).value;
+          if (pw !== cf) return toast('Passwords do not match', 'error');
+          api.post('/auth/reset', { token: token, password: pw }).then(function () {
+            toast('Password reset — sign in with your new password', 'success');
+            location.hash = '#/sign-in';
+          }).catch(function (er) { toast(er.message, 'error'); });
+        });
+      }
+    };
+  };
+
+  views.verifyEmail = function (q) {
+    var token = q.get('token') || '';
+    var html = header('Verify Email', {});
+    html += '<div id="verify-root"><div class="spinner" style="margin-top:80px"></div></div>';
+    return {
+      html: html,
+      mount: function () {
+        api.post('/auth/verify-email', { token: token }).then(function () {
+          if (state.user) { state.user.email_verified = true; renderDrawer(); }
+          $('#verify-root').innerHTML = '<div class="empty"><div class="e-icon">' + icon('checkmark-circle-outline') + '</div><h3>Email verified</h3><p>Thanks — your email is now confirmed.</p><a class="btn btn-primary btn-sm" data-nav="#/" style="margin-top:12px">Continue</a></div>';
+        }).catch(function (e) {
+          $('#verify-root').innerHTML = '<div class="empty"><div class="e-icon">' + icon('alert-circle-outline') + '</div><h3>Couldn’t verify</h3><p>' + esc(e.message) + '</p></div>';
+        });
+      }
+    };
+  };
+
+  views.analytics = function () {
+    if (!requireAuth()) return { html: '' };
+    var html = header('Seller Analytics', {});
+    html += '<div id="an-root"><div class="spinner"></div></div>';
+    return {
+      html: html,
+      mount: function () {
+        api.get('/me/analytics').then(function (d) {
+          var s = d.summary;
+          var cards = [
+            ['eye-outline', s.views, 'Views'],
+            ['heart-outline', s.favorites, 'Favorites'],
+            ['chatbubble-ellipses-outline', s.messages, 'Messages'],
+            ['call-outline', s.calls, 'Calls'],
+            ['logo-whatsapp', s.whatsapp, 'WhatsApp'],
+            ['cash-outline', s.offers, 'Offers']
+          ];
+          var h = '<div class="stat-strip" style="grid-template-columns:repeat(3,1fr)">' + cards.map(function (c) {
+            return '<div class="stat-box"><b>' + c[1] + '</b><span>' + c[2] + '</span></div>';
+          }).join('') + '</div>';
+          h += '<div class="section"><div class="section-head"><h2>' + icon('bar-chart-outline') + 'Per listing</h2></div></div>';
+          if (!d.listings.length) h += '<div class="empty"><p>No listings yet.</p></div>';
+          else h += '<div>' + d.listings.map(function (l) {
+            return '<div class="row-item"><div class="an-thumb">' + (l.image ? '<img src="' + esc(l.image) + '" alt="">' : icon('camera-outline')) + '</div>' +
+              '<div class="ri-main" data-nav="#/ads/' + l.id + '"><b>' + esc(l.title) + '</b>' +
+              '<span>' + l.views + ' views · ' + l.favorites + ' favs · ' + l.messages + ' msgs · ' + l.calls + ' calls · ' + l.whatsapp + ' WA · ' + l.offers + ' offers</span></div>' +
+              statusChip(l.status) + '</div>';
+          }).join('') + '</div>';
+          $('#an-root').innerHTML = h;
+        }).catch(function (e) { $('#an-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+      }
+    };
+  };
+
+  views.myShop = function () {
+    if (!requireAuth()) return { html: '' };
+    var html = header('My Shop', {});
+    html += '<div id="shop-root"><div class="spinner"></div></div>';
+    return {
+      html: html,
+      mount: function () { load(); }
+    };
+    function load() {
+      api.get('/me/business').then(function (biz) { render(biz || {}); })
+        .catch(function (e) { $('#shop-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
+    }
+    function render(biz) {
+      var hours = biz.opening_hours || {};
+      var days = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
+      var h = '';
+      if ((state.user.seller_type || 'individual') !== 'business') {
+        h += '<div class="detail-wrap" style="padding-bottom:0"><div class="info-card" style="padding:16px">' +
+          '<div class="fs13 fw7">Switch to a business account</div>' +
+          '<p class="fs12 muted" style="margin:6px 0 12px">Business sellers get a public shop page with opening hours and contact details.</p>' +
+          '<button class="btn btn-primary" id="become-business">Become a business seller</button></div></div>';
+      }
+      h += '<div class="detail-wrap"><form id="shop-form"><div class="form-card">' +
+        '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Shop details</h2></div>' +
+        '<div class="form-group"><label>Business name</label><input class="input" name="name" value="' + esc(biz.name || '') + '" placeholder="e.g. Colombo Camera House"></div>' +
+        '<div class="form-group"><label>Logo</label><div class="flex aic gap8">' +
+        (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
+        '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="logo-input" accept="image/*" hidden></label></div></div>' +
+        '<div class="form-group"><label>Description</label><textarea class="textarea" name="description" style="min-height:90px">' + esc(biz.description || '') + '</textarea></div>' +
+        '<div class="form-group"><label>Area / Street</label><input class="input" name="area" value="' + esc(biz.area || '') + '" placeholder="e.g. Galle Road"></div>' +
+        '<div class="form-group"><label>Phone</label><input class="input" name="phone" value="' + esc(biz.phone || '') + '" placeholder="+94 11 250 4400"></div>' +
+        '<div class="form-group"><label>WhatsApp</label><input class="input" name="whatsapp" value="' + esc(biz.whatsapp || '') + '" placeholder="94112504400"></div></div>' +
+        '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('location-outline') + 'Location</h2></div>' +
+        locationSelectsHtml() + '</div>' +
+        '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('time-outline') + 'Opening hours</h2></div>' +
+        days.map(function (d) {
+          return '<div class="form-group"><label>' + d[1] + '</label><input class="input" name="hours_' + d[0] + '" value="' + esc(hours[d[0]] || '') + '" placeholder="9:00 AM – 6:00 PM or Closed"></div>';
+        }).join('') + '</div>' +
+        '<button class="btn btn-primary" style="margin-top:16px" type="submit">' + icon('checkmark-outline') + 'Save shop</button>' +
+        '</form></div><div style="height:16px"></div>';
+      $('#shop-root').innerHTML = h;
+      if ((state.user.seller_type || 'individual') === 'business' && biz.slug) {
+        $('#shop-root').insertAdjacentHTML('afterbegin', '<div class="detail-wrap" style="padding-bottom:0"><div class="promo" data-nav="#/shop/' + esc(biz.slug) + '"><div class="p-icon">' + icon('eye-outline') + '</div><div><b>View your public shop page</b><span>Share this link with customers</span></div><div class="go">' + icon('chevron-forward-outline') + '</div></div></div>');
+      }
+      var bb = $('#become-business');
+      if (bb) bb.addEventListener('click', function () {
+        api.patch('/me', { seller_type: 'business' }).then(function (d) { state.user = d.user; renderDrawer(); render({}); });
+      });
+      bindLocationSelects($('#shop-root'), { province: biz.province, district: biz.district, city: biz.city });
+      $('#logo-input').addEventListener('change', function () {
+        var f = this.files[0];
+        if (!f) return;
+        var fd = new FormData(); fd.append('file', f);
+        fetch('/api/upload', { method: 'POST', headers: { Authorization: 'Bearer ' + api.token }, body: fd })
+          .then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!d.ok) throw new Error(d.error || 'Upload failed');
+            biz.logo = d.data.items[0].url;
+            var p = $('#logo-prev');
+            if (p) p.outerHTML = '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="">';
+          }).catch(function (e) { toast(e.message, 'error'); });
+      });
+      $('#shop-form').addEventListener('submit', function (e) {
+        e.preventDefault();
+        var oh = {};
+        days.forEach(function (d) { var v = $('[name="hours_' + d[0] + '"]', this).value.trim(); if (v) oh[d[0]] = v; }.bind(this));
+        var prov = $('#shop-root').querySelector('[data-loc="province"]').value;
+        var dist = $('#shop-root').querySelector('[data-loc="district"]').value;
+        var city = $('#shop-root').querySelector('[data-loc="city"]').value;
+        api.put('/me/business', {
+          name: $('[name="name"]', this).value, logo: biz.logo || '', description: $('[name="description"]', this).value,
+          area: $('[name="area"]', this).value, phone: $('[name="phone"]', this).value, whatsapp: $('[name="whatsapp"]', this).value,
+          province: prov, district: dist, city: city, opening_hours: oh
+        }).then(function (d) {
+          state.user.seller_type = 'business';
+          renderDrawer(); renderTabbar();
+          toast('Shop saved', 'success');
+          location.hash = '#/shop/' + d.slug;
+        }).catch(function (er) { toast(er.message, 'error'); });
+      });
+    }
+  };
+
+  views.shopPage = function (params) {
+    var html = '<div id="shop-page"><div class="spinner" style="margin-top:80px"></div></div>';
+    return {
+      html: html,
+      mount: function () {
+        api.get('/business/' + params.slug).then(function (d) {
+          var b = d.business;
+          var days = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
+          var hoursHtml = days.map(function (dd) {
+            return '<div class="spec-row"><span class="k">' + dd[1] + '</span><span class="v">' + esc((b.opening_hours || {})[dd[0]] || '—') + '</span></div>';
+          }).join('');
+          $('#shop-page').innerHTML = header(b.name, {}) +
+            '<div class="hero-page" style="text-align:center">' +
+            (b.logo ? '<img class="shop-logo" src="' + esc(b.logo) + '" alt="">' : '<div style="width:76px;height:76px;margin:0 auto;border-radius:18px;background:rgba(255,255,255,.2);display:flex;align-items:center;justify-content:center;font-size:34px">' + icon('briefcase-outline') + '</div>') +
+            '<h1>' + esc(b.name) + '</h1>' +
+            '<p>' + (b.verified ? icon('shield-checkmark') + ' Verified business · ' : '') + esc([b.city, b.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</p>' +
+            '<p style="margin-top:8px">' + starsHtml(d.rating ? d.rating.avg : 0, d.rating ? d.rating.count : 0) + '</p></div>' +
+            '<div class="detail-wrap"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('information-circle-outline') + 'About</h2></div>' +
+            (b.description ? '<div class="info-card" style="padding:14px"><p style="font-size:13.5px;line-height:1.6">' + esc(b.description) + '</p></div>' : '') +
+            '<div class="section-head" style="margin:14px 0 8px"><h2>' + icon('time-outline') + 'Opening hours</h2></div>' +
+            '<div class="info-card">' + hoursHtml + '</div>' +
+            '<div class="section-head" style="margin:14px 0 8px"><h2>' + icon('call-outline') + 'Contact</h2></div>' +
+            '<div class="info-card">' +
+            (b.phone ? '<div class="spec-row"><span class="k">Phone</span><span class="v">' + esc(b.phone) + '</span></div>' : '') +
+            (b.area ? '<div class="spec-row"><span class="k">Address</span><span class="v">' + esc(b.area) + '</span></div>' : '') +
+            '</div>' +
+            '<div class="flex gap8 mt16">' +
+            '<button class="btn btn-primary" data-call-shop="' + esc(b.phone || '') + '">' + icon('call-outline') + 'Call</button>' +
+            '<button class="btn btn-wa" data-wa-shop="' + esc(b.whatsapp || b.phone || '') + '">' + icon('logo-whatsapp') + 'WhatsApp</button>' +
+            '</div>' +
+            '<div class="section-head" style="margin:18px 0 8px"><h2>' + icon('camera-outline') + 'Listings (' + (d.listings || []).length + ')</h2></div>' +
+            '</div><div>' + listingGrid(d.listings) + '</div><div style="height:16px"></div>';
+        }).catch(function (e) {
+          $('#shop-page').innerHTML = header('Shop', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
+        });
+      }
+    };
+  };
+
   /* ---------- router ---------- */
   function parseHash() {
     var h = location.hash.slice(1) || '/';
@@ -1444,17 +2432,24 @@
     { re: /^\/ads\/(\d+)$/, handler: function (p, q, m) { return views.detail({ id: m[1] }); } },
     { re: /^\/sell$/, handler: function () { return views.sell(); } },
     { re: /^\/sell\/([^\/]+)$/, handler: function (p, q, m) { return views.sellForm({ slug: m[1] }); } },
+    { re: /^\/edit-ad\/(\d+)$/, handler: function (p, q, m) { return views.editAd({ id: m[1] }); } },
     { re: /^\/my-ads$/, handler: function () { return views.myAds(); } },
     { re: /^\/my-offers$/, handler: function () { return views.myOffers(); } },
     { re: /^\/favorites$/, handler: function () { return views.favorites(); } },
     { re: /^\/chat$/, handler: function () { return views.chat(); } },
-    { re: /^\/chat\/(\d+)$/, handler: function (p, q, m) { return views.chatThread({ id: m[1] }); } },
+    { re: /^\/chat\/(\d+)$/, handler: function (p, q, m) { return views.chatThread({ id: m[1], q: q }); } },
     { re: /^\/notifications$/, handler: function () { return views.notifications(); } },
     { re: /^\/profile$/, handler: function () { return views.profile(); } },
     { re: /^\/seller\/(\d+)$/, handler: function (p, q, m) { return views.seller({ id: m[1] }); } },
     { re: /^\/settings$/, handler: function () { return views.settings(); } },
+    { re: /^\/analytics$/, handler: function () { return views.analytics(); } },
+    { re: /^\/my-shop$/, handler: function () { return views.myShop(); } },
+    { re: /^\/shop\/([^\/]+)$/, handler: function (p, q, m) { return views.shopPage({ slug: m[1] }); } },
     { re: /^\/sign-in$/, handler: function (p, q) { return views.signin(q); } },
     { re: /^\/sign-up$/, handler: function () { return views.signup(); } },
+    { re: /^\/forgot$/, handler: function () { return views.forgot(); } },
+    { re: /^\/reset-password$/, handler: function (p, q) { return views.resetPassword(q); } },
+    { re: /^\/verify-email$/, handler: function (p, q) { return views.verifyEmail(q); } },
     { re: /^\/sign-out$/, handler: function () { return views.signout(); } },
     { re: /^\/contact$/, handler: function () { return views.contact(); } },
     { re: /^\/blog$/, handler: function () { return views.blog(); } },
@@ -1509,7 +2504,7 @@
       var active = (key === 'home' && (path === '/' || path === '/browse' || path === '/search')) ||
         (key === 'categories' && path.indexOf('/category') === 0) ||
         (key === 'favorites' && path === '/favorites') ||
-        (key === 'profile' && (path === '/profile' || path === '/settings' || path === '/my-ads' || path === '/my-offers'));
+        (key === 'profile' && (path === '/profile' || path === '/settings' || path === '/my-ads' || path === '/my-offers' || path === '/analytics' || path === '/my-shop' || path.indexOf('/edit-ad') === 0));
       a.classList.toggle('active', active);
     });
   }
@@ -1550,6 +2545,8 @@
       ['heart-outline', 'Favorites', '#/favorites'],
       ['chatbubble-ellipses-outline', 'Messages', '#/chat'],
       ['cash-outline', 'My Offers', '#/my-offers'],
+      ['bar-chart-outline', 'Analytics', '#/analytics'],
+      ['briefcase-outline', 'My Shop', '#/my-shop'],
       ['notifications-outline', 'Notifications', '#/notifications'],
       ['settings-outline', 'Settings', '#/settings']
     ] : [];
