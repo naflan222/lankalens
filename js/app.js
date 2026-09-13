@@ -703,7 +703,7 @@
       '<div class="stat"><b>9</b><span>Provinces</span></div>' +
       '<div class="stat"><b>LKR</b><span>Local prices</span></div></div></div></div>' +
       '<form class="search-hero" id="home-search"><span>' + icon('search-outline') + '</span>' +
-      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." aria-label="Search">' +
+      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." aria-label="Search" inputmode="search" enterkeyhint="search" autocomplete="off">' +
       '<button type="submit">Search</button></form>';
 
     var sections = '';
@@ -825,7 +825,22 @@
       '<p class="muted fs12" style="margin-top:16px">© ' + new Date().getFullYear() + ' Lanka Lens. All rights reserved. Prices in Sri Lankan Rupees (LKR).</p></div>';
   }
 
+  /* Website logo.
+     When a logo file is configured (Admin → Settings → Logo URL, which also
+     backs the uploaded /images/ asset) it is used EXACTLY as provided — an
+     <img> contain-fitted inside the .brand-mark box (see lankalens.css), so it
+     is never recoloured, distorted or cropped; the box scales it
+     responsively at each placement (navbar 38px, drawer 44px, auth 62/48px).
+     Until a logo file is configured the built-in mark below renders instead,
+     so removing/changing the file can never break the pages.
+     Every logo placement (home hero, footer, sign in/up, reset, drawer) goes
+     through this one function — there is no second logo to keep in sync. */
   function logoMark() {
+    var logo = (state.meta && state.meta.settings && state.meta.settings.logo) || '';
+    if (!logo && window.LL_LOGO_URL) logo = window.LL_LOGO_URL;
+    if (logo) {
+      return '<span class="brand-mark"><img src="' + esc(logo) + '" alt="Lanka Lens logo" draggable="false"></span>';
+    }
     return '<span class="brand-mark"><svg viewBox="0 0 64 64" width="100%" height="100%"><rect width="64" height="64" rx="14" fill="#0E7C66"/><circle cx="32" cy="32" r="19" fill="none" stroke="#fff" stroke-width="4"/><g fill="#F0A500"><path d="M32 17.5 L38.2 28.3 L50.5 30.1 L42 38.5 L44 50.8 L32 44.5 L20 50.8 L22 38.5 L13.5 30.1 L25.8 28.3 Z"/></g><circle cx="32" cy="32" r="6" fill="#0E7C66"/><circle cx="32" cy="32" r="3.2" fill="#fff"/></svg></span>';
   }
 
@@ -930,7 +945,7 @@
     };
     var html = header('Browse', { back: false, right: '<button class="icon-btn" data-nav="#/search">' + icon('search-outline') + '</button>' });
     html += '<form class="search-hero" id="browse-search" style="margin-top:14px"><span>' + icon('search-outline') + '</span>' +
-      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." value="' + esc(q) + '">' +
+      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." value="' + esc(q) + '" inputmode="search" enterkeyhint="search" autocomplete="off">' +
       '<button type="submit">Search</button></form>';
     html += '<div class="filter-row" id="browse-filters">' +
       '<button class="chip" id="btn-sort">' + icon('swap-vertical-outline') + 'Sort</button>' +
@@ -1177,7 +1192,8 @@
     var html = header('Search', { back: true });
     html += '<div class="section" style="padding-top:14px"><form id="search-form">' +
       '<div class="search-hero" style="margin:0"><span>' + icon('search-outline') + '</span>' +
-      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." autofocus>' +
+      '<input type="search" placeholder="Search cameras, lenses, GoPro, DJI, drones..." ' +
+      'inputmode="search" enterkeyhint="search" autocomplete="off">' +
       '<button type="submit">Search</button></div></form></div>';
     html += '<div class="section"><div class="section-head"><h2>' + icon('grid-outline') + 'Search by Category</h2></div>' +
       '<div id="search-cats">' + loadingHtml('Loading categories…') + '</div></div>';
@@ -1197,6 +1213,15 @@
             // Empty searches browse everything instead of silently doing nothing.
             goSearch(input ? input.value : '');
           });
+          // On mobile, `autofocus` on dynamically injected content is not
+          // reliable: focus explicitly (after the first frame, once the page
+          // has laid out) so the field receives focus and the keyboard opens.
+          var searchInput = $('input', form);
+          if (searchInput) {
+            requestAnimationFrame(function () {
+              try { searchInput.focus({ preventScroll: true }); } catch (e) { searchInput.focus(); }
+            });
+          }
         }
         renderAsync({
           into: '#search-cats',
@@ -2485,12 +2510,13 @@
       '<div class="form-group"><label>About you</label><textarea class="textarea" name="bio" style="min-height:80px">' + esc(u.bio) + '</textarea></div>' +
       '<div class="form-group"><label>Account type</label><div class="seg" id="stype-seg">' +
       '<div class="opt' + (u.seller_type !== 'business' ? ' active' : '') + '" data-stype="individual">Individual</div>' +
-      '<div class="opt' + (u.seller_type === 'business' ? ' active' : '') + '" data-stype="business">Business</div></div></div>' +
+      '<div class="opt' + (u.seller_type === 'business' ? ' active' : '') + '" data-stype="business">Business</div></div>' +
+      '<p class="form-hint" style="margin-top:6px">Individuals buy and sell personal gear with no extra steps. Business accounts are for shops — the shop still needs admin verification before it gets the verified badge.</p></div>' +
       '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save Changes</button></div></form>' +
 
       '<div class="form-card" style="margin-top:16px">' +
       '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Business shop</h2></div>' +
-      '<p class="form-hint" style="margin-bottom:10px">Business sellers get a public shop page with opening hours and contact details.</p>' +
+      '<p class="form-hint" style="margin-bottom:10px">Shop details, opening hours and the verification request live here. Verification is checked by an admin — you cannot self-approve.</p>' +
       '<a class="btn btn-outline" data-nav="#/my-shop">' + icon('create-outline') + 'Manage my shop</a></div>' +
 
       '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('key-outline') + 'Password</h2></div>' +
@@ -2714,7 +2740,8 @@
       '<div class="form-group"><label for="su-password">Password</label><input class="input" id="su-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
       '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
       '<div class="opt active" data-stype="individual" role="button" tabindex="0">Individual</div>' +
-      '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div></div>' +
+      '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div>' +
+      '<p class="form-hint" id="stype-hint">For personal buying &amp; selling. No shop features or verification needed.</p></div>' +
       '<button class="btn btn-primary" type="submit">Create Account</button>' +
       '<p class="form-hint" style="margin-top:12px;text-align:center">By creating an account you agree to our ' +
       '<a data-nav="#/terms">Terms</a> and <a data-nav="#/privacy">Privacy Policy</a>.</p></form>' +
@@ -2728,11 +2755,17 @@
         var form = $('#signup-form');
         if (!form) return;
         var stype = 'individual';
+        var stypeHints = {
+          individual: 'For personal buying &amp; selling. No shop features or verification needed.',
+          business: 'For shops &amp; camera stores. After sign up you complete shop details and request verification — a verified badge is only granted after admin approval.'
+        };
         $$('#stype-seg .opt').forEach(function (o) {
           o.addEventListener('click', function () {
             $$('#stype-seg .opt').forEach(function (x) { x.classList.remove('active'); });
             o.classList.add('active');
             stype = o.getAttribute('data-stype');
+            var hint = $('#stype-hint');
+            if (hint) hint.innerHTML = stypeHints[stype] || stypeHints.individual;
           });
         });
         $$('input', form).forEach(function (i) { i.addEventListener('input', function () { clearFormError(form); }); });
@@ -2756,6 +2789,11 @@
             applySession(d);
             setPending(form, false);
             toast('Account created — welcome, ' + firstName(d.user) + '!', 'success');
+            // Choosing "Business" only sets the account type — no shop or badge
+            // exists yet. Route them to My Shop to complete the profile and
+            // request verification.
+            var next = (stype === 'business') ? '#/my-shop'
+              : safeNext(query && query.get ? query.get('next') : '');
             if (d.dev && d.dev.verify_email_token) {
               var banner = $('#verify-banner');
               if (banner) {
@@ -2764,11 +2802,11 @@
                   '<p class="fs12 muted" style="margin:6px 0 10px">We sent a link to your inbox. In this dev build you can verify instantly:</p>' +
                   '<div class="flex gap8" style="flex-wrap:wrap">' +
                   '<a class="btn btn-primary btn-sm" data-nav="#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token) + '">Verify now</a>' +
-                  '<a class="btn btn-outline btn-sm" data-nav="' + esc(safeNext(query && query.get ? query.get('next') : '')) + '">Continue browsing</a></div></div>';
+                  '<a class="btn btn-outline btn-sm" data-nav="' + esc(next) + '">' + (stype === 'business' ? 'Complete your shop' : 'Continue browsing') + '</a></div></div>';
                 if (banner.scrollIntoView) { try { banner.scrollIntoView({ block: 'nearest' }); } catch (e2) {} }
               }
             } else {
-              location.hash = safeNext(query && query.get ? query.get('next') : '');
+              location.hash = next;
             }
           }).catch(function (er) {
             setPending(form, false);
@@ -2892,8 +2930,8 @@
           into: '#shops-list',
           load: function () { return api.get('/businesses'); },
           isEmpty: function (shops) { return !shops || !shops.length; },
-          emptyText: 'No trusted camera shops yet.',
-          emptySub: 'Shops appear here as soon as a business seller registers.',
+          emptyText: 'No verified camera shops yet.',
+          emptySub: 'Shops appear here once a business completes its profile and an admin verifies it.',
           emptyIcon: 'storefront-outline',
           retryLabel: 'Reload shops',
           render: function (shops) {
@@ -3170,86 +3208,192 @@
 
   views.myShop = function () {
     if (!requireAuth()) return { html: '' };
+    var BIZ_CATEGORIES = ['Camera & Lens Sales', 'Repair & Service', 'Rentals',
+      'Photo Studio / Printing', 'Online Store', 'Accessories & Bags', 'Other'];
+    var DAYS = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
     var html = header('My Shop', {});
     html += '<div id="shop-root"><div class="spinner"></div></div>';
     return {
       html: html,
       mount: function () { load(); }
     };
+    function statusCard(biz) {
+      var st = biz.verification_status || 'not_submitted';
+      var meta = {
+        not_submitted: ['Not submitted', '#74817C',
+          'Complete your shop details below, add a supporting business document, then submit for verification. Until an admin approves the shop it stays private — no public listing and no verified badge.'],
+        pending: ['Pending review', '#C77D23',
+          'Your shop is under review by an administrator. You will be notified as soon as it has been checked.'],
+        approved: ['Verified shop', '#0E7C66',
+          'Your shop has been verified and appears in the camera shops directory with the verified badge.'],
+        rejected: ['Verification rejected', '#E5484D',
+          '']
+      }[st];
+      var h = '<div class="detail-wrap" style="padding-bottom:0"><div class="info-card" style="padding:14px 16px">';
+      h += '<div class="flex aic jcsb" style="gap:10px"><div class="fs13 fw7">' + icon('storefront-outline') + ' Shop verification</div>' +
+        '<span class="status-chip" style="color:' + meta[1] + ';background:' + meta[1] + '1a">' + esc(meta[0]) + '</span></div>';
+      h += '<p class="fs12 muted" style="margin:6px 0 0">' + esc(meta[2]);
+      if (st === 'rejected' && biz.rejection_reason) h += ' Reason: <b style="color:#B42318">' + esc(biz.rejection_reason) + '</b>';
+      if (st === 'pending' && biz.submitted_at) h += ' Submitted ' + fmtDate(biz.submitted_at) + '.';
+      h += '</p></div></div>';
+      return h;
+    }
     function load() {
       api.get('/me/business').then(function (biz) { render(biz || {}); })
         .catch(function (e) { $('#shop-root').innerHTML = '<div class="empty"><p>' + esc(e.message) + '</p></div>'; });
     }
     function render(biz) {
       var hours = biz.opening_hours || {};
-      var days = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
+      var st = biz.verification_status || 'not_submitted';
+      var isBizUser = (state.user.seller_type || 'individual') === 'business';
       var h = '';
-      if ((state.user.seller_type || 'individual') !== 'business') {
+      if (!isBizUser) {
         h += '<div class="detail-wrap" style="padding-bottom:0"><div class="info-card" style="padding:16px">' +
           '<div class="fs13 fw7">Switch to a business account</div>' +
-          '<p class="fs12 muted" style="margin:6px 0 12px">Business sellers get a public shop page with opening hours and contact details.</p>' +
+          '<p class="fs12 muted" style="margin:6px 0 12px">For shops and camera stores that sell regularly. Individual sellers can keep selling personal items without registering a shop.</p>' +
           '<button class="btn btn-primary" id="become-business">Become a business seller</button></div></div>';
       }
-      h += '<div class="detail-wrap"><form id="shop-form"><div class="form-card">' +
+      if (biz.name || isBizUser) h += statusCard(biz);
+      h += '<div class="detail-wrap"><form id="shop-form" novalidate><div class="form-card">' +
         '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Shop details</h2></div>' +
-        '<div class="form-group"><label>Business name</label><input class="input" name="name" value="' + esc(biz.name || '') + '" placeholder="e.g. Colombo Camera House"></div>' +
+        '<div class="form-group"><label>Business name <span class="req">*</span></label><input class="input" name="name" value="' + esc(biz.name || '') + '" placeholder="e.g. Colombo Camera House" maxlength="60"></div>' +
+        '<div class="form-group"><label>Business category <span class="req">*</span></label>' +
+        '<select class="select" name="business_category"><option value="">Select…</option>' +
+        BIZ_CATEGORIES.map(function (c) { return '<option value="' + esc(c) + '"' + (biz.business_category === c ? ' selected' : '') + '>' + esc(c) + '</option>'; }).join('') + '</select></div>' +
+        '<div class="form-group"><label>Owner / contact name <span class="req">*</span></label><input class="input" name="owner_name" value="' + esc(biz.owner_name || '') + '" placeholder="Full name of the shop owner" maxlength="60"></div>' +
+        '<div class="form-group"><label>Business phone <span class="req">*</span></label><input class="input" name="phone" type="tel" value="' + esc(biz.phone || '') + '" placeholder="+94 11 250 4400"></div>' +
+        '<div class="form-group"><label>WhatsApp (optional)</label><input class="input" name="whatsapp" type="tel" value="' + esc(biz.whatsapp || '') + '" placeholder="94112504400"></div>' +
+        '<div class="form-group"><label>Business address — area / street <span class="req">*</span></label><input class="input" name="area" value="' + esc(biz.area || '') + '" placeholder="e.g. 42 Galle Road"></div>' +
+        '<div class="form-group"><label>Business registration no. (optional)</label><input class="input" name="registration_number" value="' + esc(biz.registration_number || '') + '" placeholder="e.g. DSC/DP 123456"></div>' +
         '<div class="form-group"><label>Logo</label><div class="flex aic gap8">' +
-        (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo' + '">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
+        (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
         '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="logo-input" accept="image/*" hidden></label></div></div>' +
         '<div class="form-group"><label>Description</label><textarea class="textarea" name="description" style="min-height:90px">' + esc(biz.description || '') + '</textarea></div>' +
-        '<div class="form-group"><label>Area / Street</label><input class="input" name="area" value="' + esc(biz.area || '') + '" placeholder="e.g. Galle Road"></div>' +
-        '<div class="form-group"><label>Phone</label><input class="input" name="phone" value="' + esc(biz.phone || '') + '" placeholder="+94 11 250 4400"></div>' +
-        '<div class="form-group"><label>WhatsApp</label><input class="input" name="whatsapp" value="' + esc(biz.whatsapp || '') + '" placeholder="94112504400"></div></div>' +
+        '<div class="form-group"><label>Supporting business document <span class="req">*</span></label>' +
+        '<div class="flex aic gap8">' +
+        (biz.document ? '<img id="doc-prev" class="logo-prev" src="' + esc(biz.document) + '" alt="Business document">' : '<span id="doc-prev" class="logo-prev ph">' + icon('document-text-outline') + '</span>') +
+        '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="doc-input" accept="image/*" hidden></label></div>' +
+        '<div class="form-hint">Photo of your business registration, DSC certificate or ID card (JPG/PNG, max 1MB).</div></div>' +
+        '</div>' +
         '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('location-outline') + 'Location</h2></div>' +
         locationSelectsHtml() + '</div>' +
         '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('time-outline') + 'Opening hours</h2></div>' +
-        days.map(function (d) {
+        DAYS.map(function (d) {
           return '<div class="form-group"><label>' + d[1] + '</label><input class="input" name="hours_' + d[0] + '" value="' + esc(hours[d[0]] || '') + '" placeholder="9:00 AM – 6:00 PM or Closed"></div>';
-        }).join('') + '</div>' +
-        '<button class="btn btn-primary" style="margin-top:16px" type="submit">' + icon('checkmark-outline') + 'Save shop</button>' +
-        '</form></div><div style="height:16px"></div>';
+        }).join('') + '</div>';
+      h += '<div class="detail-wrap" style="padding-top:14px">';
+      h += '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save shop details</button>';
+      if (st === 'not_submitted' || st === 'rejected') {
+        h += '<button class="btn btn-accent" type="button" id="shop-submit" style="margin-top:8px">' + icon('shield-checkmark') + (st === 'rejected' ? 'Save & resubmit for verification' : 'Submit for verification') + '</button>' +
+          '<p class="form-hint" style="text-align:center;margin-top:8px">An admin checks your details and document. Only approved shops get the verified badge and a public shop page.</p>';
+      } else if (st === 'pending') {
+        h += '<p class="form-hint" style="text-align:center;margin-top:10px">Changes are saved, but a new verification request is not needed while the review is running.</p>';
+      } else if (st === 'approved') {
+        h += '<p class="form-hint" style="text-align:center;margin-top:10px">Your shop is verified — changes below update your live shop page.</p>';
+      }
+      h += '</div></form></div><div style="height:16px"></div>';
       $('#shop-root').innerHTML = h;
-      if ((state.user.seller_type || 'individual') === 'business' && biz.slug) {
-        $('#shop-root').insertAdjacentHTML('afterbegin', '<div class="detail-wrap" style="padding-bottom:0"><div class="promo" data-nav="#/shop/' + esc(biz.slug) + '"><div class="p-icon">' + icon('eye-outline') + '</div><div><b>View your public shop page</b><span>Share this link with customers</span></div><div class="go">' + icon('chevron-forward-outline') + '</div></div></div>');
+
+      if (isBizUser && biz.slug) {
+        var label = st === 'approved' ? 'View your public shop page' : 'Preview your shop page';
+        var sub = st === 'approved' ? 'Share this link with customers' : 'Visible to you until verification is approved';
+        $('#shop-root').insertAdjacentHTML('afterbegin', '<div class="detail-wrap" style="padding-bottom:0"><div class="promo" data-nav="#/shop/' + esc(biz.slug) + '"><div class="p-icon">' + icon('eye-outline') + '</div><div><b>' + label + '</b><span>' + sub + '</span></div><div class="go">' + icon('chevron-forward-outline') + '</div></div></div>');
       }
       var bb = $('#become-business');
       if (bb) bb.addEventListener('click', function () {
-        act(api.patch('/me', { seller_type: 'business' }), 'You are now a business seller', function (d) {
+        act(api.patch('/me', { seller_type: 'business' }), 'You are now a business seller — complete your shop details and submit for verification', function (d) {
           if (d && d.user) state.user = d.user;
-          renderDrawer(); render({});
+          renderDrawer(); renderTabbar(); render({});
         });
       });
       bindLocationSelects($('#shop-root'), { province: biz.province, district: biz.district, city: biz.city });
-      $('#logo-input').addEventListener('change', function () {
-        var f = this.files[0];
-        if (!f) return;
-        var fd = new FormData(); fd.append('file', f);
-        api.form('/upload', fd)
-          .then(function (d) {
+
+      function uploadImage(id, setter, prevId, alt) {
+        var inp = $(id);
+        if (!inp) return;
+        inp.addEventListener('change', function () {
+          var f = this.files[0];
+          if (!f) return;
+          if (f.size > 1048576) { toast('Image is over 1MB — please use a smaller file', 'error'); return; }
+          var fd = new FormData(); fd.append('file', f);
+          api.form('/upload', fd).then(function (d) {
             var item = d && d.items && d.items[0];
             if (!item || !item.url) throw apiError('The server did not return an uploaded image.', 0, { path: '/upload' });
-            biz.logo = item.url;
-            var p = $('#logo-prev');
-            if (p) p.outerHTML = '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo' + '">';
+            setter(item.url);
+            var p = $(prevId);
+            if (p) p.outerHTML = '<img id="' + prevId.slice(1) + '" class="logo-prev" src="' + esc(item.url) + '" alt="' + esc(alt) + '">';
           }).catch(function (e) { toast(e.message, 'error'); });
-      });
+        });
+      }
+      uploadImage('#logo-input', function (url) { biz.logo = url; }, '#logo-prev', (biz.name || 'Business') + ' logo');
+      uploadImage('#doc-input', function (url) { biz.document = url; }, '#doc-prev', 'Business document');
+
+      function collectForm() {
+        var form = $('#shop-form');
+        var oh = {};
+        DAYS.forEach(function (d) {
+          var el = form.querySelector('[name="hours_' + d[0] + '"]');
+          if (el && el.value.trim()) oh[d[0]] = el.value.trim();
+        });
+        var sel = function (loc) { var el = $('#shop-root').querySelector('[data-loc="' + loc + '"]'); return el ? el.value : ''; };
+        return {
+          name: form.querySelector('[name="name"]').value.trim(),
+          logo: biz.logo || '', description: form.querySelector('[name="description"]').value,
+          area: form.querySelector('[name="area"]').value.trim(),
+          phone: form.querySelector('[name="phone"]').value.trim(),
+          whatsapp: form.querySelector('[name="whatsapp"]').value.trim(),
+          business_category: form.querySelector('[name="business_category"]').value,
+          owner_name: form.querySelector('[name="owner_name"]').value.trim(),
+          registration_number: form.querySelector('[name="registration_number"]').value.trim(),
+          document: biz.document || '',
+          province: sel('province'), district: sel('district'), city: sel('city'),
+          opening_hours: oh
+        };
+      }
+      function validate(p) {
+        if (!p.name) return 'Enter your business name';
+        if (!p.business_category) return 'Choose a business category';
+        if (!p.owner_name) return 'Enter the owner / contact name';
+        if (!p.phone) return 'Enter the business phone number';
+        if (!p.area) return 'Enter the business address';
+        if (!(p.province && p.district && p.city)) return 'Select the province, district and city';
+        if (!p.document) return 'Upload a supporting business document';
+        return null;
+      }
+      function saveForm() { return api.put('/me/business', collectForm()); }
       $('#shop-form').addEventListener('submit', function (e) {
         e.preventDefault();
-        var oh = {};
-        days.forEach(function (d) { var v = $('[name="hours_' + d[0] + '"]', this).value.trim(); if (v) oh[d[0]] = v; }.bind(this));
-        var prov = $('#shop-root').querySelector('[data-loc="province"]').value;
-        var dist = $('#shop-root').querySelector('[data-loc="district"]').value;
-        var city = $('#shop-root').querySelector('[data-loc="city"]').value;
-        api.put('/me/business', {
-          name: $('[name="name"]', this).value, logo: biz.logo || '', description: $('[name="description"]', this).value,
-          area: $('[name="area"]', this).value, phone: $('[name="phone"]', this).value, whatsapp: $('[name="whatsapp"]', this).value,
-          province: prov, district: dist, city: city, opening_hours: oh
-        }).then(function (d) {
+        var p = collectForm();
+        var problem = validate(p);
+        if (problem) { toast(problem, 'error'); return; }
+        setPending(this, true, 'Saving…');
+        saveForm().then(function (d) {
+          setPending(this2, false);
           state.user.seller_type = 'business';
           renderDrawer(); renderTabbar();
-          toast('Shop saved', 'success');
-          location.hash = '#/shop/' + d.slug;
-        }).catch(function (er) { toast(er.message, 'error'); });
+          toast('Shop details saved', 'success');
+          load();
+        }).catch(function (er) {
+          setPending(this2, false);
+          toast(er.message, 'error');
+        });
+        var this2 = this;
+      });
+      var submitBtn = $('#shop-submit');
+      if (submitBtn) submitBtn.addEventListener('click', function () {
+        var p = collectForm();
+        var problem = validate(p);
+        if (problem) { toast(problem, 'error'); return; }
+        submitBtn.disabled = true;
+        api.put('/me/business', p).then(function () {
+          return api.post('/me/business/submit');
+        }).then(function () {
+          toast('Submitted for verification', 'success');
+          load();
+        }).catch(function (er) {
+          submitBtn.disabled = false;
+          toast(er.message, 'error');
+        });
       });
     }
   };
@@ -3273,6 +3417,8 @@
             '<h1>' + esc(b.name) + '</h1>' +
             '<p>' + (b.verified ? icon('shield-checkmark') + ' Verified business · ' : '') + esc([b.city, b.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</p>' +
             '<p style="margin-top:8px">' + starsHtml(d.rating ? d.rating.avg : 0, d.rating ? d.rating.count : 0) + '</p></div>' +
+            (d.preview ? '<div class="detail-wrap" style="padding-top:0"><div class="info-card" style="padding:12px 14px;background:#FBF3E2;border-color:#F0E2C0">' +
+              icon('hourglass-outline') + '<span class="fs13" style="color:#8A5A00;display:inline-flex;align-items:center;gap:8px"><b>This is a private preview.</b> Your shop is not public yet — it will appear in the shops directory with the verified badge once an admin approves it.</span></div></div>' : '') +
             '<div class="detail-wrap"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('information-circle-outline') + 'About</h2></div>' +
             (b.description ? '<div class="info-card" style="padding:14px"><p style="font-size:13.5px;line-height:1.6">' + esc(b.description) + '</p></div>' : '') +
             '<div class="section-head" style="margin:14px 0 8px"><h2>' + icon('time-outline') + 'Opening hours</h2></div>' +
@@ -3307,6 +3453,7 @@
     ['dashboard', 'Dashboard', 'speedometer-outline'],
     ['users', 'Users', 'people-outline'],
     ['listings', 'Listings', 'albums-outline'],
+    ['businesses', 'Businesses', 'storefront-outline'],
     ['reports', 'Reports', 'flag-outline'],
     ['categories', 'Categories', 'layers-outline'],
     ['brands', 'Brands & Models', 'pricetag-outline'],
@@ -3424,6 +3571,8 @@
             ['hourglass-outline', c.pending_listings, '#C77D23', 'Pending review'],
             ['checkmark-circle-outline', c.sold_listings, '#0E7C66', 'Sold'],
             ['storefront-outline', c.shops, '#9C4F96', 'Camera shops'],
+            ['shield-checkmark', c.shops_verified, '#0E7C66', 'Verified shops'],
+            ['hourglass-outline', c.shops_pending, '#C77D23', 'Shops pending'],
             ['flag-outline', c.reports_open, '#E5484D', 'Open reports'],
             ['cash-outline', fmtLKR(c.revenue), '#F0A500', 'Revenue'],
             ['chatbubble-ellipses-outline', c.messages, '#5B6BB0', 'Messages']
@@ -3438,6 +3587,20 @@
               '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Approve</button>' +
               '<button class="btn btn-outline btn-sm" data-mod="reject" data-lid="' + l.id + '">Reject</button></div></div>';
           }).join('') : '<p class="muted fs12 pad16">No listings waiting for review.</p>';
+          var pendBiz = d.pending_businesses || [];
+          h += '<div class="a-sec-head"><h3>' + icon('storefront-outline') + 'Shop verification' +
+            (c.shops_pending ? ' <span class="muted fs12">(' + c.shops_pending + ' pending)</span>' : '') + '</div>';
+          h += pendBiz.length ? pendBiz.map(function (b) {
+            return '<div class="a-row">' +
+              '<div class="a-thumb">' + (b.logo ? '<img src="' + esc(b.logo) + '" alt="' + esc(b.name) + ' logo">' : icon('storefront-outline')) + '</div>' +
+              '<div class="a-main"><b>' + esc(b.name) + '</b>' +
+              '<span>' + esc(b.business_category || 'No category') + ' · ' + esc([b.city, b.district, b.province].filter(Boolean).join(', ') || 'No location') + '</span>' +
+              '<span>Owner: ' + esc((b.owner && b.owner.name) || '—') + (b.owner && b.owner.phone ? ' · ' + esc(b.owner.phone) : '') + '</span></div>' +
+              (b.document ? '<a class="muted fs12" href="' + esc(b.document) + '" target="_blank" rel="noopener">document</a>' : '') +
+              '<div class="a-actions">' +
+              '<button class="btn btn-primary btn-sm" data-bizmod="approve" data-bid="' + b.id + '">Approve</button>' +
+              '<button class="btn btn-outline btn-sm" data-bizmod="reject" data-bid="' + b.id + '">Reject</button></div></div>';
+          }).join('') : '<p class="muted fs12 pad16">No shops waiting for verification.</p>';
           h += '<div class="a-sec-head"><h3>' + icon('people-outline') + 'Newest users</h3></div>';
           h += adminTable(['Name', 'Email', 'Status', 'Joined'], (d.recent_users || []).map(function (u) {
             return '<tr><td>' + esc(u.name) + '</td><td>' + esc(u.email) + '</td><td>' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</td><td>' + fmtDate(u.created_at) + '</td></tr>';
@@ -3450,6 +3613,7 @@
           if (body) {
             body.innerHTML = h;
             bindModeration(body);
+            bindBusinessModeration(body);
             var tabs = $('.admin-tabs'); if (tabs) tabs.innerHTML = adminTabsInner('dashboard');
             bindAdminTabs();
           }
@@ -3513,6 +3677,20 @@
             '<div class="spec-row"><span class="k">Status</span><span class="v">' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</span></div>' +
             '<div class="spec-row"><span class="k">Verified</span><span class="v">' + (u.verified ? 'Yes' : 'No') + ' · Email ' + (u.email_verified ? '✓' : '✗') + ' · Phone ' + (u.phone_verified ? '✓' : '✗') + '</span></div>' +
             '<div class="spec-row"><span class="k">Joined</span><span class="v">' + fmtDate(u.created_at) + '</span></div></div>';
+          if (biz) {
+            var bmeta = { not_submitted: ['Not submitted', '#74817C'], pending: ['Pending review', '#C77D23'], approved: ['Verified', '#0E7C66'], rejected: ['Rejected', '#E5484D'] }[biz.verification_status || 'not_submitted'] || ['Not submitted', '#74817C'];
+            h += '<div class="a-sec-head"><h3>' + icon('storefront-outline') + 'Business / shop</h3></div>';
+            h += '<div class="info-card">' +
+              '<div class="spec-row"><span class="k">Shop</span><span class="v">' + esc(biz.name || '') + (biz.verified ? ' ' + icon('shield-checkmark') : '') + '</span></div>' +
+              '<div class="spec-row"><span class="k">Verification</span><span class="v"><span class="status-chip" style="color:' + bmeta[1] + ';background:' + bmeta[1] + '1a">' + esc(bmeta[0]) + '</span></span></div>' +
+              '<div class="spec-row"><span class="k">Category</span><span class="v">' + esc(biz.business_category || '—') + '</span></div>' +
+              '<div class="spec-row"><span class="k">Owner</span><span class="v">' + esc(biz.owner_name || '—') + ' · ' + esc(biz.phone || '—') + '</span></div>' +
+              '<div class="spec-row"><span class="k">Address</span><span class="v">' + esc([biz.area, biz.city, biz.district, biz.province].filter(Boolean).join(', ') || '—') + '</span></div>' +
+              (biz.registration_number ? '<div class="spec-row"><span class="k">Reg. no.</span><span class="v">' + esc(biz.registration_number) + '</span></div>' : '') +
+              (biz.document ? '<div class="spec-row"><span class="k">Document</span><span class="v"><a href="' + esc(biz.document) + '" target="_blank" rel="noopener">View document</a></span></div>' : '<div class="spec-row"><span class="k">Document</span><span class="v" style="color:#C62828">Missing</span></div>') +
+              (biz.rejection_reason ? '<div class="spec-row"><span class="k">Reason</span><span class="v" style="color:#C62828">' + esc(biz.rejection_reason) + '</span></div>' : '') +
+              '</div>';
+          }
 
           var acts = [['camera-outline', activity.listings, 'Listings'], ['heart-outline', activity.favorites, 'Favorites'], ['cash-outline', activity.offers_made, 'Offers made'], ['chatbubble-ellipses-outline', activity.messages_sent, 'Msgs sent'], ['flag-outline', activity.reports_against, 'Reports against'], ['card-outline', activity.payments, 'Payments']];
           h += '<div class="a-sec-head"><h3>' + icon('bar-chart-outline') + 'Activity</h3></div>' +
@@ -3588,6 +3766,30 @@
     });
   }
 
+  /* Approve / reject shop verification from any admin surface (dashboard). */
+  function bindBusinessModeration(root) {
+    $$('[data-bizmod]', root).forEach(function (b) {
+      b.addEventListener('click', function () {
+        var bid = b.getAttribute('data-bid');
+        var m = b.getAttribute('data-bizmod');
+        if (m === 'reject') {
+          openDialog('Reject shop verification', '<p>Send the owner a reason. They can fix the details and resubmit from My Shop.</p>' +
+            '<div class="form-group mt16"><label>Reason</label>' +
+            '<textarea class="textarea" id="dash-biz-reason" style="min-height:70px" placeholder="e.g. Document does not match the shop name"></textarea></div>',
+            'Reject', true, function () {
+              api.post('/admin/businesses/' + bid + '/moderate', { action: 'reject', reason: $('#dash-biz-reason').value }).then(function () {
+                closeDialog(); toast('Shop verification rejected', 'success'); loadAdminSection('dashboard');
+              }).catch(function (e) { toast(e.message, 'error'); });
+            });
+          return;
+        }
+        api.post('/admin/businesses/' + bid + '/moderate', { action: 'approve' }).then(function () {
+          toast('Shop approved & verified', 'success'); loadAdminSection('dashboard');
+        }).catch(function (e) { toast(e.message, 'error'); });
+      });
+    });
+  }
+
   ADMIN_VIEWS.listings = function () {
     var html = adminActionBar(
       '<form class="a-search" id="al-search"><span>' + icon('search-outline') + '</span><input placeholder="Search title, brand, model…"></form>',
@@ -3634,6 +3836,88 @@
         load();
         $('#al-search').addEventListener('submit', function (e) { e.preventDefault(); load(); });
         $('#al-status').addEventListener('change', load);
+      }
+    };
+  };
+
+  /* ----- Businesses (shop verification) ----- */
+  var BIZ_STATUS_META = {
+    not_submitted: ['Not submitted', '#74817C'],
+    pending: ['Pending review', '#C77D23'],
+    approved: ['Verified', '#0E7C66'],
+    rejected: ['Rejected', '#E5484D']
+  };
+  function bizStatusChip(st) {
+    var m = BIZ_STATUS_META[st] || BIZ_STATUS_META.not_submitted;
+    return '<span class="status-chip" style="color:' + m[1] + ';background:' + m[1] + '1a">' + esc(m[0]) + '</span>';
+  }
+  ADMIN_VIEWS.businesses = function () {
+    var html = adminActionBar('',
+      '<select class="select" id="ab-status" style="width:auto">' +
+      ['pending', 'all', 'not_submitted', 'approved', 'rejected'].map(function (s) {
+        return '<option value="' + s + '">' + (BIZ_STATUS_META[s] ? BIZ_STATUS_META[s][0] : 'All') + (s === 'all' ? '' : '') + '</option>';
+      }).join('') + '</select>');
+    html += '<div id="ab-list"><div class="spinner"></div></div>';
+    return {
+      html: adminBody(html),
+      mount: function () {
+        function moderate(bid, action, label, needReason) {
+          if (needReason) {
+            openDialog(label, '<p>Send the owner a reason. They can fix the details and resubmit from My Shop.</p>' +
+              '<div class="form-group mt16"><label>Reason</label>' +
+              '<textarea class="textarea" id="biz-reject-reason" style="min-height:70px" placeholder="e.g. Document unreadable / does not match the shop name"></textarea></div>',
+              label, true, function () {
+                api.post('/admin/businesses/' + bid + '/moderate', { action: action, reason: $('#biz-reject-reason').value }).then(function () {
+                  closeDialog(); toast(label + ' — done', 'success'); load();
+                }).catch(function (e) { toast(e.message, 'error'); });
+              });
+            return;
+          }
+          openDialog(label, '<p>This immediately ' + (action === 'approve' ? 'publishes the shop with the verified badge' : 'removes the verified badge and hides the shop from the public directory') + '. The owner is notified.</p>',
+            label, action === 'revoke', function () {
+              api.post('/admin/businesses/' + bid + '/moderate', { action: action }).then(function () {
+                closeDialog(); toast('Shop updated', 'success'); load();
+              }).catch(function (e) { toast(e.message, 'error'); });
+            });
+        }
+        function load() {
+          api.get('/admin/businesses?status=' + $('#ab-status').value).then(function (rows) {
+            var el = $('#ab-list');
+            el.innerHTML = rows.map(function (b) {
+              var actions = '';
+              if (b.verification_status === 'pending') {
+                actions += '<button class="btn btn-primary btn-sm" data-biz-act="approve" data-bid="' + b.id + '">Approve</button>' +
+                  '<button class="btn btn-outline btn-sm" data-biz-act="reject" data-bid="' + b.id + '">Reject</button>';
+              }
+              if (b.verification_status === 'approved') {
+                actions += '<button class="btn btn-outline btn-sm" data-biz-act="revoke" data-bid="' + b.id + '">Revoke</button>';
+              }
+              if (b.verification_status === 'rejected' || b.verification_status === 'not_submitted') {
+                actions += '<button class="btn btn-outline btn-sm" data-nav="#/admin/users/' + b.user_id + '">Owner</button>';
+              }
+              actions += '<button class="btn btn-outline btn-sm" data-nav="#/shop/' + esc(b.slug) + '">View</button>';
+              return '<div class="a-row">' +
+                '<div class="a-thumb">' + (b.logo ? '<img src="' + esc(b.logo) + '" alt="' + esc(b.name) + ' logo">' : icon('storefront-outline')) + '</div>' +
+                '<div class="a-main"><b>' + esc(b.name) + (b.verified ? ' ' + icon('shield-checkmark') : '') + '</b>' +
+                '<span>' + esc(b.business_category || 'No category') + ' · ' + esc([b.city, b.district, b.province].filter(Boolean).join(', ') || 'No location') + '</span>' +
+                '<span>Owner: ' + esc((b.owner && b.owner.name) || '—') + (b.owner && b.owner.email ? ' · ' + esc(b.owner.email) : '') + (b.owner && b.owner.phone ? ' · ' + esc(b.owner.phone) : '') + '</span>' +
+                (b.rejection_reason ? '<span class="muted fs12" style="color:#C62828">' + icon('alert-circle-outline') + ' ' + esc(b.rejection_reason) + '</span>' : '') + '</div>' +
+                '<div class="a-side">' + bizStatusChip(b.verification_status) +
+                (b.document ? '<a class="muted fs12" href="' + esc(b.document) + '" target="_blank" rel="noopener">document</a>' : '<span class="muted fs12">no document</span>') + '</div>' +
+                '<div class="a-actions" style="flex-wrap:wrap;justify-content:flex-end">' + actions + '</div></div>';
+            }).join('') || '<div class="empty"><p>No shops in this state yet.</p></div>';
+            $$('#ab-list [data-biz-act]').forEach(function (b2) {
+              b2.addEventListener('click', function () {
+                moderate(b2.getAttribute('data-bid'), b2.getAttribute('data-biz-act'),
+                  b2.getAttribute('data-biz-act') === 'approve' ? 'Approve shop'
+                    : b2.getAttribute('data-biz-act') === 'reject' ? 'Reject shop' : 'Revoke verification',
+                  b2.getAttribute('data-biz-act') === 'reject' || b2.getAttribute('data-biz-act') === 'revoke');
+              });
+            });
+          }).catch(function (e) { adminRenderError($('#ab-list'), e, 'businesses', load); });
+        }
+        load();
+        $('#ab-status').addEventListener('change', load);
       }
     };
   };
@@ -4159,6 +4443,7 @@
     var map = {
       dashboard: ADMIN_VIEWS.dashboard,
       users: ADMIN_VIEWS.users,
+      businesses: ADMIN_VIEWS.businesses,
       listings: ADMIN_VIEWS.listings,
       reports: ADMIN_VIEWS.reports,
       categories: ADMIN_VIEWS.categories,
