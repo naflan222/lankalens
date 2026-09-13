@@ -7,3 +7,5 @@ gunicorn>=23.0,<24
 # request/response_checksum_calculation="when_required" (and falls back cleanly
 # on botocore < 1.36, which never sent those headers). Do not remove that config.
 boto3>=1.34
+# Production PostgreSQL driver + bounded connection pool (SQLite remains stdlib).
+psycopg[binary,pool]>=3.2,<4

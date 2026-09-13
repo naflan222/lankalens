@@ -12,3 +12,19 @@ uploads/
 # Node / misc
 node_modules/
 .DS_Store
+
+# Database backups, WAL sidecars and environment secrets (never commit)
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.dump
+*.backup
+.env
+.env.*
+!.env.example
+
+.cache/
+.pytest_cache/

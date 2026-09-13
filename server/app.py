@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
 Lanka Lens — Sri Lankan camera marketplace
-Flask + SQLite backend (Part 2: users, listings, search & communication).
+Flask backend with PostgreSQL in production and optional local SQLite.
 
 Run:  python server/app.py
 """
@@ -11,6 +11,7 @@ import json
 import time
 import logging
 import sqlite3
+import sys
 import secrets
 import hashlib
 import uuid
@@ -21,9 +22,16 @@ from flask import Flask, request, jsonify, g, abort, send_from_directory
 from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
+# Support both `python server/app.py` and `gunicorn server.app:app`.
+if __package__ in (None, ""):
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from server.database import database, row_dict, DatabaseUnavailable, DatabaseConflict, DatabaseFailure
+from server.schema import SCHEMA, INDEXES
+from server.reference_data import CATEGORIES, BRANDS, DEFAULT_SETTINGS
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BASE_DIR)
-DB_PATH = os.path.join(BASE_DIR, "lankalens.db")
+DB_PATH = database.sqlite_path
 UPLOAD_DIR = os.path.join(ROOT, "uploads")
 
 ALLOWED_IMG = {"jpg", "jpeg", "png", "webp", "gif"}
@@ -199,29 +207,6 @@ PROMOTION_TYPES = [
     ("urgent", "Urgent Badge", "A prominent URGENT badge on your ad", 199, 7),
 ]
 
-# Site-wide configuration defaults (all editable from the admin panel).
-DEFAULT_SETTINGS = {
-    "site_name": "Lanka Lens",
-    "tagline": "Buy & Sell Cameras in Sri Lanka",
-    # The website logo, used exactly as provided (see logoMark() in js/app.js
-    # and .brand-mark in css/lankalens.css). An empty value falls back to the
-    # built-in SVG mark, so deleting the file can never break the pages.
-    "logo": "/images/Logo.png",
-    "contact_email": "hello@lankalens.lk",
-    "contact_phone": "+94 77 000 1111",
-    "contact_address": "Colombo, Sri Lanka",
-    "max_listings_per_user": "50",
-    "max_images_per_listing": "3",
-    "listing_expiry_days": "30",
-    "require_approval": "0",
-    "verification_required_to_sell": "0",
-    "homepage_banners": "[]",
-    "footer_text": "Sri Lanka's camera marketplace.",
-    "social_facebook": "",
-    "social_instagram": "",
-    "social_youtube": "",
-}
-
 USER_STATUSES = {"active", "suspended", "banned"}
 
 
@@ -231,744 +216,21 @@ USER_STATUSES = {"active", "suspended", "banned"}
 def db():
     """Per-request database connection."""
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        g.db = database.connect()
     return g.db
 
 
 def query(sql, args=(), one=False):
     cur = db().execute(sql, args)
-    rows = [dict(r) for r in cur.fetchall()]
-    return (rows[0] if rows else None) if one else rows
+    try:
+        rows = [row_dict(r) for r in cur.fetchall()]
+        return (rows[0] if rows else None) if one else rows
+    finally:
+        cur.close()
 
 
 def execute(sql, args=()):
-    cur = db().execute(sql, args)
-    db().commit()
-    return cur.lastrowid
-
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS categories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    icon TEXT,
-    parent_id INTEGER,
-    sort INTEGER DEFAULT 0,
-    fields TEXT DEFAULT '[]',
-    FOREIGN KEY(parent_id) REFERENCES categories(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS provinces (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS districts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    province_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    FOREIGN KEY(province_id) REFERENCES provinces(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS cities (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    district_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    FOREIGN KEY(district_id) REFERENCES districts(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    email TEXT UNIQUE NOT NULL,
-    password_hash TEXT NOT NULL,
-    phone TEXT DEFAULT '',
-    whatsapp TEXT DEFAULT '',
-    province TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    city TEXT DEFAULT '',
-    bio TEXT DEFAULT '',
-    avatar TEXT DEFAULT '',
-    verified INTEGER DEFAULT 0,
-    email_verified INTEGER DEFAULT 0,
-    phone_verified INTEGER DEFAULT 0,
-    seller_type TEXT DEFAULT 'individual',
-    is_admin INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'active',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    created_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS tokens (
-    token TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    kind TEXT NOT NULL,
-    value TEXT DEFAULT '',
-    created_at INTEGER,
-    expires_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS listings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    category_id INTEGER NOT NULL,
-    title TEXT NOT NULL,
-    slug TEXT,
-    price INTEGER DEFAULT 0,
-    negotiable INTEGER DEFAULT 0,
-    condition TEXT,
-    description TEXT DEFAULT '',
-    brand TEXT DEFAULT '',
-    model TEXT DEFAULT '',
-    year TEXT DEFAULT '',
-    province TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    city TEXT DEFAULT '',
-    images TEXT DEFAULT '[]',
-    featured INTEGER DEFAULT 0,
-    status TEXT DEFAULT 'active',
-    views INTEGER DEFAULT 0,
-    specs TEXT DEFAULT '{}',
-    contact_prefs TEXT DEFAULT '{}',
-    rejection_reason TEXT DEFAULT '',
-    created_at INTEGER,
-    updated_at INTEGER,
-    expiry_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(category_id) REFERENCES categories(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS favorites (
-    user_id INTEGER NOT NULL,
-    listing_id INTEGER NOT NULL,
-    created_at INTEGER,
-    PRIMARY KEY(user_id, listing_id),
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS offers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    listing_id INTEGER NOT NULL,
-    buyer_id INTEGER NOT NULL,
-    seller_id INTEGER NOT NULL,
-    amount INTEGER,
-    counter_amount INTEGER,
-    message TEXT DEFAULT '',
-    status TEXT DEFAULT 'pending',
-    created_at INTEGER,
-    FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-    FOREIGN KEY(buyer_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    listing_id INTEGER,
-    sender_id INTEGER NOT NULL,
-    receiver_id INTEGER NOT NULL,
-    body TEXT NOT NULL,
-    read INTEGER DEFAULT 0,
-    created_at INTEGER,
-    FOREIGN KEY(sender_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(receiver_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS notifications (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    type TEXT DEFAULT 'info',
-    title TEXT DEFAULT '',
-    body TEXT DEFAULT '',
-    link TEXT DEFAULT '',
-    read INTEGER DEFAULT 0,
-    created_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    listing_id INTEGER NOT NULL,
-    reporter_id INTEGER,
-    reason TEXT DEFAULT '',
-    details TEXT DEFAULT '',
-    status TEXT DEFAULT 'open',
-    resolution TEXT DEFAULT '',
-    resolved_by INTEGER,
-    resolved_at INTEGER,
-    created_at INTEGER,
-    FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS user_reports (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    reporter_id INTEGER NOT NULL,
-    reported_id INTEGER NOT NULL,
-    reason TEXT DEFAULT '',
-    details TEXT DEFAULT '',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS contact_events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    listing_id INTEGER NOT NULL,
-    seller_id INTEGER NOT NULL,
-    buyer_id INTEGER,
-    kind TEXT DEFAULT '',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS ratings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    seller_id INTEGER NOT NULL,
-    buyer_id INTEGER NOT NULL,
-    listing_id INTEGER,
-    stars INTEGER NOT NULL,
-    comment TEXT DEFAULT '',
-    created_at INTEGER,
-    UNIQUE(buyer_id, seller_id),
-    FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE,
-    FOREIGN KEY(buyer_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS blocks (
-    user_id INTEGER NOT NULL,
-    blocked_id INTEGER NOT NULL,
-    created_at INTEGER,
-    PRIMARY KEY(user_id, blocked_id)
-);
-
--- Business/shop verification workflow:
---   verification_status: not_submitted -> pending -> approved | rejected
---   rejected -> pending (resubmission). Only `approved` shops get the verified
---   badge, appear in the public shop directory and are publicly viewable.
---   `verified` (0/1) is kept as the fast "show the badge" flag and is only ever
---   set to 1 by an admin approval — never by the owner submitting a profile.
--- Additional seller verification levels can be added later as more
--- verification_status values / columns without a schema rewrite.
-CREATE TABLE IF NOT EXISTS businesses (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL UNIQUE,
-    name TEXT NOT NULL,
-    slug TEXT UNIQUE NOT NULL,
-    logo TEXT DEFAULT '',
-    description TEXT DEFAULT '',
-    province TEXT DEFAULT '',
-    district TEXT DEFAULT '',
-    city TEXT DEFAULT '',
-    area TEXT DEFAULT '',
-    phone TEXT DEFAULT '',
-    whatsapp TEXT DEFAULT '',
-    opening_hours TEXT DEFAULT '{}',
-    verified INTEGER DEFAULT 0,
-    business_category TEXT DEFAULT '',
-    owner_name TEXT DEFAULT '',
-    registration_number TEXT DEFAULT '',
-    document TEXT DEFAULT '',
-    verification_status TEXT DEFAULT 'not_submitted',
-    rejection_reason TEXT DEFAULT '',
-    submitted_at INTEGER,
-    reviewed_at INTEGER,
-    created_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS contact_messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT DEFAULT '',
-    email TEXT DEFAULT '',
-    subject TEXT DEFAULT '',
-    message TEXT DEFAULT '',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS posts (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug TEXT UNIQUE NOT NULL,
-    title TEXT NOT NULL,
-    category TEXT DEFAULT 'Guide',
-    excerpt TEXT DEFAULT '',
-    body TEXT DEFAULT '',
-    image TEXT DEFAULT '',
-    author TEXT DEFAULT 'Lanka Lens',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS brands (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    category TEXT DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS models (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    brand_id INTEGER,
-    name TEXT NOT NULL,
-    category TEXT DEFAULT '',
-    FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS site_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS payments (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id TEXT UNIQUE NOT NULL,
-    user_id INTEGER NOT NULL,
-    amount INTEGER NOT NULL,
-    currency TEXT DEFAULT 'LKR',
-    package TEXT DEFAULT '',
-    package_name TEXT DEFAULT '',
-    listing_id INTEGER,
-    status TEXT DEFAULT 'pending',
-    provider TEXT DEFAULT '',
-    created_at INTEGER,
-    updated_at INTEGER,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS promotions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    listing_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    ptype TEXT NOT NULL,
-    package_name TEXT DEFAULT '',
-    price INTEGER DEFAULT 0,
-    duration_days INTEGER DEFAULT 7,
-    payment_id INTEGER,
-    starts_at INTEGER,
-    ends_at INTEGER,
-    created_at INTEGER,
-    FOREIGN KEY(listing_id) REFERENCES listings(id) ON DELETE CASCADE,
-    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    admin_id INTEGER,
-    action TEXT DEFAULT '',
-    entity TEXT DEFAULT '',
-    entity_id INTEGER,
-    detail TEXT DEFAULT '',
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS banned_emails (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT UNIQUE NOT NULL,
-    created_at INTEGER
-);
-
-CREATE TABLE IF NOT EXISTS blocked_ips (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ip TEXT UNIQUE NOT NULL,
-    created_at INTEGER
-);
-"""
-
-
-def sync_locations(conn):
-    """Bring the provinces/districts/cities tables up to the `PROVINCES` dataset.
-
-    Additive and idempotent: missing entries are created, existing rows keep
-    their ids (so listings, profiles and admin edits stay valid), and anything
-    an admin added on top of the seed is left alone. Runs on every boot via
-    migrate().
-
-    One documented exception: the original seed (pre-v2 dataset) placed
-    "Negombo" under BOTH the Colombo and the Gampaha district. Negombo is in
-    the Gampaha district, so that specific legacy duplicate row is removed.
-    """
-    for pname, districts in PROVINCES.items():
-        prow = conn.execute("SELECT id FROM provinces WHERE name = ?", (pname,)).fetchone()
-        if prow is None:
-            pid = conn.execute("INSERT INTO provinces (name) VALUES (?)", (pname,)).lastrowid
-        else:
-            pid = prow[0]
-        for dname, cities in districts.items():
-            drow = conn.execute(
-                "SELECT id FROM districts WHERE province_id = ? AND name = ?", (pid, dname)).fetchone()
-            if drow is None:
-                did = conn.execute(
-                    "INSERT INTO districts (province_id, name) VALUES (?,?)", (pid, dname)).lastrowid
-            else:
-                did = drow[0]
-            for cname in cities:
-                exists = conn.execute(
-                    "SELECT 1 FROM cities WHERE district_id = ? AND name = ?", (did, cname)).fetchone()
-                if exists is None:
-                    conn.execute("INSERT INTO cities (district_id, name) VALUES (?,?)", (did, cname))
-    # Legacy duplicate cleanup (see docstring).
-    conn.execute(
-        "DELETE FROM cities WHERE name = 'Negombo' AND district_id = "
-        "(SELECT d.id FROM districts d JOIN provinces p ON p.id = d.province_id "
-        "WHERE p.name = 'Western Province' AND d.name = 'Colombo')")
-    conn.commit()
-
-
-def migrate(conn):
-    """Add columns introduced after the initial Part 1 schema (idempotent)."""
-    def cols(table):
-        return {r["name"] for r in [dict(x) for x in conn.execute(f"PRAGMA table_info({table})")]}
-
-    uc = cols("users")
-    if "email_verified" not in uc:
-        conn.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
-    if "phone_verified" not in uc:
-        conn.execute("ALTER TABLE users ADD COLUMN phone_verified INTEGER DEFAULT 0")
-    if "seller_type" not in uc:
-        conn.execute("ALTER TABLE users ADD COLUMN seller_type TEXT DEFAULT 'individual'")
-    if "status" not in uc:
-        conn.execute("ALTER TABLE users ADD COLUMN status TEXT DEFAULT 'active'")
-
-    lc = cols("listings")
-    if "expiry_at" not in lc:
-        conn.execute("ALTER TABLE listings ADD COLUMN expiry_at INTEGER")
-    if "contact_prefs" not in lc:
-        conn.execute("ALTER TABLE listings ADD COLUMN contact_prefs TEXT DEFAULT '{}'")
-    if "rejection_reason" not in lc:
-        conn.execute("ALTER TABLE listings ADD COLUMN rejection_reason TEXT DEFAULT ''")
-
-    sc = cols("sessions")
-    if "expires_at" not in sc:
-        conn.execute("ALTER TABLE sessions ADD COLUMN expires_at INTEGER")
-        # Give pre-existing sessions a full lifetime measured from their creation
-        # so upgrading does not sign everybody out at once.
-        conn.execute("UPDATE sessions SET expires_at = created_at + ? WHERE expires_at IS NULL",
-                     (SESSION_TTL_DAYS * 86400,))
-
-    oc = cols("offers")
-    if "counter_amount" not in oc:
-        conn.execute("ALTER TABLE offers ADD COLUMN counter_amount INTEGER")
-
-    rc = cols("reports")
-    if "status" not in rc:
-        conn.execute("ALTER TABLE reports ADD COLUMN status TEXT DEFAULT 'open'")
-    if "resolution" not in rc:
-        conn.execute("ALTER TABLE reports ADD COLUMN resolution TEXT DEFAULT ''")
-    if "resolved_by" not in rc:
-        conn.execute("ALTER TABLE reports ADD COLUMN resolved_by INTEGER")
-    if "resolved_at" not in rc:
-        conn.execute("ALTER TABLE reports ADD COLUMN resolved_at INTEGER")
-
-    bc = cols("businesses")
-    for col, decl in (
-        ("verified", "INTEGER DEFAULT 0"),
-        ("business_category", "TEXT DEFAULT ''"),
-        ("owner_name", "TEXT DEFAULT ''"),
-        ("registration_number", "TEXT DEFAULT ''"),
-        ("document", "TEXT DEFAULT ''"),
-        ("verification_status", "TEXT DEFAULT 'not_submitted'"),
-        ("rejection_reason", "TEXT DEFAULT ''"),
-        ("submitted_at", "INTEGER"),
-        ("reviewed_at", "INTEGER"),
-    ):
-        if col not in bc:
-            conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {decl}")
-    # Backfill the verification state from the legacy badge so pre-existing
-    # approved shops keep their verified profile after the upgrade, and shops
-    # that were never verified start as "not submitted" (they must go through
-    # the admin review flow to earn the badge).
-    # NOTE: the ALTER above defaults existing rows to 'not_submitted', so the
-    # legacy check must be on the badge itself, not on NULL/empty status.
-    conn.execute(
-        "UPDATE businesses SET verification_status = 'approved' "
-        "WHERE verified = 1 AND verification_status != 'approved'")
-    conn.execute(
-        "UPDATE businesses SET verification_status = 'not_submitted' "
-        "WHERE verification_status IS NULL OR verification_status = ''")
-    conn.execute(
-        "UPDATE businesses SET submitted_at = COALESCE(created_at, 0) "
-        "WHERE verification_status = 'approved' AND submitted_at IS NULL")
-    conn.execute(
-        "UPDATE businesses SET reviewed_at = COALESCE(submitted_at, created_at, 0) "
-        "WHERE verification_status = 'approved' AND reviewed_at IS NULL")
-
-    # Keep the seeded location tree in step with the dataset in code (additive
-    # only — admin-added provinces/districts/cities are never touched, and
-    # existing rows keep their ids so old listings and profiles stay valid).
-    sync_locations(conn)
-
-    # Backfill the website logo on databases seeded before it existed. Only an
-    # EMPTY value is filled — if an admin already configured a custom logo URL
-    # we must never overwrite it.
-    existing_logo = conn.execute(
-        "SELECT value FROM site_settings WHERE key = 'logo'").fetchone()
-    if existing_logo is None:
-        conn.execute("INSERT INTO site_settings (key, value) VALUES ('logo', ?)",
-                     (DEFAULT_SETTINGS["logo"],))
-    elif (existing_logo[0] or "").strip() == "":
-        conn.execute("UPDATE site_settings SET value = ? WHERE key = 'logo'",
-                     (DEFAULT_SETTINGS["logo"],))
-
-    # Retire the orphaned `shops` table. Nothing reads it: the shop directory the
-    # app renders comes from `businesses` (rows owned by real seller accounts).
-    # It held six seeded rows, three of which duplicated a business by name and
-    # three of which (Galle Lens Center, Negombo Camera Mart, Colombo Lens
-    # Exchange) described shops that do not exist anywhere else in the product.
-    # Dropping it is safe because no foreign key references it.
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='shops'").fetchone():
-        conn.execute("DROP TABLE shops")
-
-    conn.commit()
-
-
-# ---------------------------------------------------------------------------
-# Category & location seed data
-# ---------------------------------------------------------------------------
-def _f(name, label, ftype="text", options=None, required=False):
-    d = {"name": name, "label": label, "type": ftype, "required": required}
-    if options:
-        d["options"] = options
-    return d
-
-
-CAMERA_FIELDS = [
-    _f("brand", "Brand", "select", ["Sony", "Canon", "Nikon", "Fujifilm", "Panasonic", "Olympus", "Leica", "Other"], True),
-    _f("model", "Model", "text", required=True),
-    _f("year", "Year", "text"),
-    _f("shutter_count", "Shutter Count", "number"),
-    _f("megapixels", "Megapixels", "text"),
-    _f("video_resolution", "Video Resolution", "text"),
-    _f("body_kit", "Body / Kit", "select", ["Body Only", "Body + Kit Lens"]),
-    _f("lens_included", "Lens Included", "text"),
-    _f("battery", "Battery", "text"),
-    _f("charger", "Charger", "select", ["Yes", "No"]),
-    _f("original_box", "Original Box", "select", ["Yes", "No"]),
-    _f("warranty", "Warranty", "text"),
-    _f("receipt", "Receipt Available", "select", ["Yes", "No"]),
-    _f("reason_for_selling", "Reason for Selling", "textarea"),
-]
-
-LENS_FIELDS = [
-    _f("brand", "Brand", "select", ["Canon", "Nikon", "Sony", "Fujifilm", "Sigma", "Tamron", "Other"], True),
-    _f("model", "Model", "text", required=True),
-    _f("mount", "Mount", "select", ["Canon EF", "Canon RF", "Nikon F", "Nikon Z", "Sony E", "Fujifilm X", "Micro Four Thirds", "Other"], True),
-    _f("focal_length", "Focal Length", "text"),
-    _f("max_aperture", "Maximum Aperture", "text"),
-    _f("image_stabilization", "Image Stabilization", "select", ["Yes", "No"]),
-    _f("autofocus", "Autofocus", "select", ["Yes", "No"]),
-    _f("warranty", "Warranty", "text"),
-    _f("receipt", "Receipt Available", "select", ["Yes", "No"]),
-]
-
-ACTION_FIELDS = [
-    _f("brand", "Brand", "select", ["GoPro", "DJI", "Insta360", "Other"], True),
-    _f("model", "Model", "text", required=True),
-    _f("resolution", "Resolution", "text"),
-    _f("batteries", "Batteries", "text"),
-    _f("accessories", "Accessories", "text"),
-    _f("box", "Original Box", "select", ["Yes", "No"]),
-    _f("warranty", "Warranty", "text"),
-]
-
-DRONE_FIELDS = [
-    _f("brand", "Brand", "select", ["DJI", "Autel", "Other"], True),
-    _f("model", "Model", "text", required=True),
-    _f("flight_time", "Flight Time", "text"),
-    _f("battery_count", "Battery Count", "text"),
-    _f("controller", "Controller", "text"),
-    _f("accessories", "Accessories", "text"),
-    _f("box", "Original Box", "select", ["Yes", "No"]),
-    _f("warranty", "Warranty", "text"),
-]
-
-ACCESSORY_FIELDS = [
-    _f("brand", "Brand", "select", ["Manfrotto", "Zhiyun", "Godox", "SanDisk", "Rode", "Peak Design", "Lowepro", "DJI", "Other"], True),
-    _f("model", "Model", "text", required=True),
-    _f("compatibility", "Compatibility", "text"),
-    _f("warranty", "Warranty", "text"),
-    _f("receipt", "Receipt Available", "select", ["Yes", "No"]),
-]
-
-CATEGORIES = [
-    # (slug, name, icon, parent, sort, fields)
-    ("cameras", "Cameras", "camera-outline", None, 1, "[]"),
-    ("dslr", "DSLR", "camera-outline", "cameras", 1, json.dumps(CAMERA_FIELDS)),
-    ("mirrorless", "Mirrorless", "camera-outline", "cameras", 2, json.dumps(CAMERA_FIELDS)),
-    ("compact", "Compact", "camera-outline", "cameras", 3, json.dumps(CAMERA_FIELDS)),
-    ("cinema-cameras", "Cinema Cameras", "videocam-outline", "cameras", 4, json.dumps(CAMERA_FIELDS)),
-    ("other-cameras", "Other Cameras", "camera-outline", "cameras", 5, json.dumps(CAMERA_FIELDS)),
-
-    ("lenses", "Lenses", "aperture-outline", None, 2, json.dumps(LENS_FIELDS)),
-    ("lens-canon", "Canon", "aperture-outline", "lenses", 1, "[]"),
-    ("lens-nikon", "Nikon", "aperture-outline", "lenses", 2, "[]"),
-    ("lens-sony", "Sony", "aperture-outline", "lenses", 3, "[]"),
-    ("lens-fujifilm", "Fujifilm", "aperture-outline", "lenses", 4, "[]"),
-    ("lens-sigma", "Sigma", "aperture-outline", "lenses", 5, "[]"),
-    ("lens-tamron", "Tamron", "aperture-outline", "lenses", 6, "[]"),
-    ("lens-other", "Other", "aperture-outline", "lenses", 7, "[]"),
-
-    ("action-cameras", "Action Cameras", "videocam-outline", None, 3, json.dumps(ACTION_FIELDS)),
-    ("gopro", "GoPro", "videocam-outline", "action-cameras", 1, "[]"),
-    ("dji-action", "DJI Action", "videocam-outline", "action-cameras", 2, "[]"),
-    ("insta360", "Insta360", "videocam-outline", "action-cameras", 3, "[]"),
-    ("action-other", "Other", "videocam-outline", "action-cameras", 4, "[]"),
-
-    ("drones", "Drones", "navigate-outline", None, 4, json.dumps(DRONE_FIELDS)),
-    ("drone-dji", "DJI", "navigate-outline", "drones", 1, "[]"),
-    ("drone-autel", "Autel", "navigate-outline", "drones", 2, "[]"),
-    ("drone-other", "Other", "navigate-outline", "drones", 3, "[]"),
-
-    ("accessories", "Accessories", "layers-outline", None, 5, json.dumps(ACCESSORY_FIELDS)),
-    ("tripods", "Tripods", "layers-outline", "accessories", 1, "[]"),
-    ("gimbals", "Gimbals", "layers-outline", "accessories", 2, "[]"),
-    ("camera-bags", "Camera Bags", "bag-handle-outline", "accessories", 3, "[]"),
-    ("batteries", "Batteries", "battery-full-outline", "accessories", 4, "[]"),
-    ("chargers", "Chargers", "battery-charging-outline", "accessories", 5, "[]"),
-    ("memory-cards", "Memory Cards", "albums-outline", "accessories", 6, "[]"),
-    ("filters", "Filters", "aperture-outline", "accessories", 7, "[]"),
-    ("flashes", "Flashes", "flash-outline", "accessories", 8, "[]"),
-    ("microphones", "Microphones", "mic-outline", "accessories", 9, "[]"),
-    ("lights", "Lights", "bulb-outline", "accessories", 10, "[]"),
-    ("gopro-accessories", "GoPro Accessories", "videocam-outline", "accessories", 11, "[]"),
-    ("dji-accessories", "DJI Accessories", "navigate-outline", "accessories", 12, "[]"),
-    ("accessories-other", "Other", "layers-outline", "accessories", 13, "[]"),
-]
-
-PROVINCES = {
-    # --- Western Province (3 districts) ---
-    "Western Province": {
-        "Colombo": [
-            "Colombo", "Dehiwala-Mount Lavinia", "Moratuwa", "Nugegoda", "Maharagama",
-            "Battaramulla", "Homagama", "Kadawatha", "Maligawatta", "Thalawathugoda",
-            "Kottawa", "Piliyandala", "Kotahena", "Wellawatte", "Thalawatte",
-            "Bambalapitiya", "Avissawella", "Wattala", "Katunayake", "Kallady",
-            "Rajagiriya", "Kaduwela", "Kiribathgoda",
-        ],
-        "Gampaha": [
-            "Gampaha", "Negombo", "Ja-Ela", "Kandana", "Minuwangoda", "Thalgaswewa",
-            "Attanagalla", "Welikada", "Koswatta", "Henadawala", "Balangoda",
-            "Kiriella", "Pannila", "Dagala",
-        ],
-        "Kalutara": [
-            "Kalutara", "Panadura", "Beruwala", "Horana", "Udagama", "Wadduwa",
-            "Koggala", "Balapitiya", "Kudadehiyawa", "Gannoruwa", "Kosgama", "Welipada",
-        ],
-    },
-    # --- Central Province (3 districts) ---
-    "Central Province": {
-        "Kandy": [
-            "Kandy", "Peradeniya", "Gampola", "Katugastota", "Havelock", "Balana",
-            "Hantana", "Bogampola", "Waskaduwa", "Pattipola", "Ambulpola", "Thotawana",
-            "Hakgala",
-        ],
-        "Matale": [
-            "Matale", "Dambulla", "Nawalapitiya", "Kotagoda", "Bulathgala",
-            "Wariyapola", "Matale East",
-        ],
-        "Nuwara Eliya": [
-            "Nuwara Eliya", "Hatton", "Talawakele", "Borella", "Nuwara Eliya South",
-        ],
-    },
-    # --- Southern Province (3 districts) ---
-    "Southern Province": {
-        "Galle": [
-            "Galle", "Hikkaduwa", "Ambalangoda", "Wollibadda", "Bulatgoda",
-            "Unawata", "Mirissa", "Halmaduwa", "Kuda Oya",
-        ],
-        "Matara": [
-            "Matara", "Weligama", "Kamburupita", "Godakawela", "Hingurana",
-            "Matara East",
-        ],
-        "Hambantota": [
-            "Hambantota", "Tangalle", "Tissamaharama", "Welioya", "Beliatta",
-            "Ekala", "Kamburupitiya",
-        ],
-    },
-    # --- North Western Province (2 districts) ---
-    "North Western Province": {
-        "Kurunegala": [
-            "Kurunegala", "Kuliyapitiya", "Pannala", "Dambanthalawa",
-        ],
-        "Puttalam": [
-            "Puttalam", "Chilaw", "Anamaduwa", "Paaluwas", "Cheddive",
-            "Elpitiya", "Mavulana", "Kodikamam",
-        ],
-    },
-    # --- North Central Province (2 districts) ---
-    "North Central Province": {
-        "Anuradhapura": [
-            "Anuradhapura", "Kekirawa", "Palabaddala", "Kurundaldella",
-            "Anuradhapura South",
-        ],
-        "Polonnaruwa": [
-            "Polonnaruwa", "Minneriya", "Eramupana", "Katiyagala",
-        ],
-    },
-    # --- Eastern Province (3 districts) ---
-    "Eastern Province": {
-        "Ampara": [
-            "Ampara", "Akkaraipattu", "Ninniya", "Kantalai", "Polthena",
-        ],
-        "Batticaloa": [
-            "Batticaloa", "Kalmunai", "Lankanwila", "Batticaloa East",
-        ],
-        "Trincomalee": [
-            "Trincomalee", "Kinniya", "Nilaveli", "Pasikudah", "Kakunboduwa",
-        ],
-    },
-    # --- Sabaragamuwa Province (2 districts) ---
-    "Sabaragamuwa Province": {
-        "Ratnapura": [
-            "Ratnapura", "Embilipitiya", "Kuruwita", "Kithalagoda",
-        ],
-        "Kegalle": [
-            "Kegalle", "Mawanella", "Pelawatte", "Girandala",
-        ],
-    },
-    # --- Uva Province (2 districts) ---
-    "Uva Province": {
-        "Badulla": [
-            "Badulla", "Bandarawela", "Haputale", "Belihuloya", "Dikoya",
-        ],
-        "Monaragala": [
-            "Monaragala", "Wellawaya", "Kataragama", "Maradankaduwa",
-        ],
-    },
-    # --- Northern Province (5 districts) ---
-    "Northern Province": {
-        "Jaffna": [
-            "Jaffna", "Chavakachcheri", "Point Pedro", "Pooneryn", "Kayts",
-            "Oddusdam", "Nallur", "Mantai", "Elayadiventha", "Konamam",
-        ],
-        "Kilinochchi": [
-            "Kilinochchi", "Chankanai", "Palaly", "Panchikawade",
-        ],
-        "Mannar": [
-            "Mannar", "Murugan", "Puliyantheevu",
-        ],
-        "Mullaitivu": [
-            "Mullaitivu", "Manantaden", "Vadakaduvil",
-        ],
-        "Vavuniya": [
-            "Vavuniya", "Nediyanthurai", "Kankesanthurai", "Elayankudai",
-        ],
-    },
-}
-
-
-BRANDS = [
-    ("Sony", "Cameras"), ("Canon", "Cameras"), ("Nikon", "Cameras"),
-    ("Fujifilm", "Cameras"), ("Panasonic", "Cameras"), ("Olympus", "Cameras"),
-    ("Sigma", "Lenses"), ("Tamron", "Lenses"), ("Tokina", "Lenses"),
-    ("GoPro", "Action Cameras"), ("DJI", "Drones"), ("Autel", "Drones"),
-    ("Insta360", "Action Cameras"), ("Manfrotto", "Accessories"),
-    ("Zhiyun", "Accessories"), ("Godox", "Accessories"), ("SanDisk", "Accessories"),
-    ("Rode", "Accessories"), ("Peak Design", "Accessories"), ("Lowepro", "Accessories"),
-]
+    return db().write(sql, args)
 
 
 # ---------------------------------------------------------------------------
@@ -1519,35 +781,6 @@ def expire_overdue():
     expire_promotions()
 
 
-INDEXES = [
-    "CREATE INDEX IF NOT EXISTS idx_listings_status ON listings(status)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_user ON listings(user_id)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_cat ON listings(category_id)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_brand ON listings(brand)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_price ON listings(price)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_expiry ON listings(expiry_at)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_featured ON listings(featured)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(sender_id, receiver_id)",
-    # The conversation list filters on receiver_id alone (unread counts) and on
-    # "sender_id = ? OR receiver_id = ?"; the composite index above cannot serve
-    # either, so this one is what keeps the inbox off a full table scan.
-    "CREATE INDEX IF NOT EXISTS idx_messages_receiver ON messages(receiver_id, read)",
-    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
-    "CREATE INDEX IF NOT EXISTS idx_favorites_listing ON favorites(listing_id)",
-    "CREATE INDEX IF NOT EXISTS idx_categories_parent ON categories(parent_id)",
-    "CREATE INDEX IF NOT EXISTS idx_listings_created ON listings(created_at)",
-    "CREATE INDEX IF NOT EXISTS idx_messages_listing ON messages(listing_id)",
-    "CREATE INDEX IF NOT EXISTS idx_offers_listing ON offers(listing_id)",
-    "CREATE INDEX IF NOT EXISTS idx_offers_buyer ON offers(buyer_id)",
-    "CREATE INDEX IF NOT EXISTS idx_offers_seller ON offers(seller_id)",
-    "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id, read)",
-    "CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status)",
-    "CREATE INDEX IF NOT EXISTS idx_ratings_seller ON ratings(seller_id)",
-    "CREATE INDEX IF NOT EXISTS idx_contact_seller ON contact_events(seller_id, kind)",
-    "CREATE INDEX IF NOT EXISTS idx_promotions_listing ON promotions(listing_id, ptype)",
-]
-
-
 def create_indexes(conn):
     for sql in INDEXES:
         conn.execute(sql)
@@ -1991,6 +1224,42 @@ def handle_http_error(e):
     return jsonify({"ok": False, "error": getattr(e, "description", None) or e.name}), e.code
 
 
+@app.errorhandler(DatabaseUnavailable)
+def handle_database_unavailable(e):
+    app.logger.error("Database unavailable; request not completed")
+    return err("Database temporarily unavailable. Please try again.", 503)
+
+
+@app.errorhandler(DatabaseConflict)
+def handle_database_conflict(e):
+    return err("The change conflicts with an existing record.", 409)
+
+
+@app.errorhandler(DatabaseFailure)
+def handle_database_failure(e):
+    app.logger.error("Database operation failed; request not completed")
+    return err("Database operation failed.", 500)
+
+
+@app.after_request
+def finish_database_transaction(response):
+    conn = g.get("db")
+    if conn is not None:
+        try:
+            if response.status_code < 400:
+                conn.commit()
+            else:
+                conn.rollback()
+        except DatabaseFailure:
+            # No success response for a failed/ambiguous commit. Never retry writes.
+            # Preserve CORS/security headers already attached by other hooks.
+            app.logger.error("Database transaction did not complete successfully")
+            response.set_data(json.dumps({"ok": False, "error": "Database temporarily unavailable. Please try again."}))
+            response.mimetype = "application/json"
+            response.status_code = 503
+    return response
+
+
 @app.errorhandler(Exception)
 def handle_unexpected_error(e):
     """Every API failure must come back as JSON with an honest status code.
@@ -2261,7 +1530,9 @@ def health():
     else:
         storage = "local disk (uploads/) — B2 disabled, missing: %s" % (
             ", ".join(b2_missing_env()) or "none")
-    return ok({"status": "up", "time": now(), "storage": storage})
+    query("SELECT 1 AS ready", one=True)
+    return ok({"status": "up", "time": now(), "storage": storage,
+               "database": database.backend})
 
 
 @app.route("/api/meta")
@@ -2415,14 +1686,14 @@ def build_listing_where(args):
             if field.endswith("_min"):
                 f = field[:-4]
                 try:
-                    conds.append(f"CAST(REPLACE(json_extract(l.specs, ?), ',', '') AS INTEGER) >= ?")
+                    conds.append(database.numeric_spec_sql() + " >= ?")
                     params += [f"$.{f}", int(val)]
                 except ValueError:
                     pass
             elif field.endswith("_max"):
                 f = field[:-4]
                 try:
-                    conds.append(f"CAST(REPLACE(json_extract(l.specs, ?), ',', '') AS INTEGER) <= ?")
+                    conds.append(database.numeric_spec_sql() + " <= ?")
                     params += [f"$.{f}", int(val)]
                 except ValueError:
                     pass
@@ -2939,7 +2210,7 @@ def add_favorite(lid):
     row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
     if not row:
         return err("Listing not found", 404)
-    execute("INSERT OR IGNORE INTO favorites (user_id, listing_id, created_at) VALUES (?,?,?)",
+    execute("INSERT INTO favorites (user_id, listing_id, created_at) VALUES (?,?,?) ON CONFLICT DO NOTHING",
             (u["id"], lid, now()))
     if row["user_id"] != u["id"]:
         notify(row["user_id"], "favorite", "Someone saved your listing",
@@ -3143,7 +2414,7 @@ def block_user(other_id):
     if request.method == "DELETE":
         execute("DELETE FROM blocks WHERE user_id = ? AND blocked_id = ?", (u["id"], other_id))
         return ok({"blocked": False})
-    execute("INSERT OR IGNORE INTO blocks (user_id, blocked_id, created_at) VALUES (?,?,?)", (u["id"], other_id, now()))
+    execute("INSERT INTO blocks (user_id, blocked_id, created_at) VALUES (?,?,?) ON CONFLICT DO NOTHING", (u["id"], other_id, now()))
     return ok({"blocked": True})
 
 
@@ -4294,7 +3565,7 @@ def admin_update_user(uid):
         execute("UPDATE listings SET status = 'paused' WHERE user_id = ? AND status = 'active'", (uid,))
         execute("DELETE FROM sessions WHERE user_id = ?", (uid,))
         if u.get("email"):
-            execute("INSERT OR IGNORE INTO banned_emails (email, created_at) VALUES (?,?)", (u["email"], now()))
+            execute("INSERT INTO banned_emails (email, created_at) VALUES (?,?) ON CONFLICT DO NOTHING", (u["email"], now()))
         audit(admin["id"], "ban", "user", uid)
     elif action == "activate":
         execute("UPDATE users SET status = 'active' WHERE id = ?", (uid,))
@@ -4782,10 +4053,12 @@ def admin_post(pid):
 # Seed
 # ---------------------------------------------------------------------------
 def seed():
+    """Explicit local demo data only. Never called at startup or in production."""
+    if database.is_postgres or database.production:
+        raise RuntimeError("Demo data is available only in local SQLite development")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
-    migrate(conn)
     create_indexes(conn)
 
     has_cats = conn.execute("SELECT COUNT(*) FROM categories").fetchone()[0]
@@ -4799,8 +4072,7 @@ def seed():
                 (slug, name, icon, parent_id, sort, fields))
         conn.commit()
 
-    # Location data is seeded/synced by sync_locations() inside migrate() above
-    # (additive on every boot, so existing databases pick up new towns safely).
+    # Locations are inserted by the explicit init-empty command, never at boot.
 
     if conn.execute("SELECT COUNT(*) FROM brands").fetchone()[0] == 0:
         for name, cat in BRANDS:
@@ -5276,9 +4548,9 @@ def seed():
 # Boot
 # ---------------------------------------------------------------------------
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-if not os.path.exists(DB_PATH):
-    open(DB_PATH, "a").close()
-seed()
+# Read-only readiness check. A missing/unmigrated DB stops deployment; it never
+# creates an empty replacement. See docs/database-persistence.md before cutover.
+database.check_ready()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
