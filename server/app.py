@@ -445,6 +445,14 @@ CREATE TABLE IF NOT EXISTS blocks (
     PRIMARY KEY(user_id, blocked_id)
 );
 
+-- Business/shop verification workflow:
+--   verification_status: not_submitted -> pending -> approved | rejected
+--   rejected -> pending (resubmission). Only `approved` shops get the verified
+--   badge, appear in the public shop directory and are publicly viewable.
+--   `verified` (0/1) is kept as the fast "show the badge" flag and is only ever
+--   set to 1 by an admin approval — never by the owner submitting a profile.
+-- Additional seller verification levels can be added later as more
+-- verification_status values / columns without a schema rewrite.
 CREATE TABLE IF NOT EXISTS businesses (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL UNIQUE,
@@ -460,6 +468,14 @@ CREATE TABLE IF NOT EXISTS businesses (
     whatsapp TEXT DEFAULT '',
     opening_hours TEXT DEFAULT '{}',
     verified INTEGER DEFAULT 0,
+    business_category TEXT DEFAULT '',
+    owner_name TEXT DEFAULT '',
+    registration_number TEXT DEFAULT '',
+    document TEXT DEFAULT '',
+    verification_status TEXT DEFAULT 'not_submitted',
+    rejection_reason TEXT DEFAULT '',
+    submitted_at INTEGER,
+    reviewed_at INTEGER,
     created_at INTEGER,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
@@ -560,6 +576,45 @@ CREATE TABLE IF NOT EXISTS blocked_ips (
 """
 
 
+def sync_locations(conn):
+    """Bring the provinces/districts/cities tables up to the `PROVINCES` dataset.
+
+    Additive and idempotent: missing entries are created, existing rows keep
+    their ids (so listings, profiles and admin edits stay valid), and anything
+    an admin added on top of the seed is left alone. Runs on every boot via
+    migrate().
+
+    One documented exception: the original seed (pre-v2 dataset) placed
+    "Negombo" under BOTH the Colombo and the Gampaha district. Negombo is in
+    the Gampaha district, so that specific legacy duplicate row is removed.
+    """
+    for pname, districts in PROVINCES.items():
+        prow = conn.execute("SELECT id FROM provinces WHERE name = ?", (pname,)).fetchone()
+        if prow is None:
+            pid = conn.execute("INSERT INTO provinces (name) VALUES (?)", (pname,)).lastrowid
+        else:
+            pid = prow[0]
+        for dname, cities in districts.items():
+            drow = conn.execute(
+                "SELECT id FROM districts WHERE province_id = ? AND name = ?", (pid, dname)).fetchone()
+            if drow is None:
+                did = conn.execute(
+                    "INSERT INTO districts (province_id, name) VALUES (?,?)", (pid, dname)).lastrowid
+            else:
+                did = drow[0]
+            for cname in cities:
+                exists = conn.execute(
+                    "SELECT 1 FROM cities WHERE district_id = ? AND name = ?", (did, cname)).fetchone()
+                if exists is None:
+                    conn.execute("INSERT INTO cities (district_id, name) VALUES (?,?)", (did, cname))
+    # Legacy duplicate cleanup (see docstring).
+    conn.execute(
+        "DELETE FROM cities WHERE name = 'Negombo' AND district_id = "
+        "(SELECT d.id FROM districts d JOIN provinces p ON p.id = d.province_id "
+        "WHERE p.name = 'Western Province' AND d.name = 'Colombo')")
+    conn.commit()
+
+
 def migrate(conn):
     """Add columns introduced after the initial Part 1 schema (idempotent)."""
     def cols(table):
@@ -604,6 +659,44 @@ def migrate(conn):
         conn.execute("ALTER TABLE reports ADD COLUMN resolved_by INTEGER")
     if "resolved_at" not in rc:
         conn.execute("ALTER TABLE reports ADD COLUMN resolved_at INTEGER")
+
+    bc = cols("businesses")
+    for col, decl in (
+        ("verified", "INTEGER DEFAULT 0"),
+        ("business_category", "TEXT DEFAULT ''"),
+        ("owner_name", "TEXT DEFAULT ''"),
+        ("registration_number", "TEXT DEFAULT ''"),
+        ("document", "TEXT DEFAULT ''"),
+        ("verification_status", "TEXT DEFAULT 'not_submitted'"),
+        ("rejection_reason", "TEXT DEFAULT ''"),
+        ("submitted_at", "INTEGER"),
+        ("reviewed_at", "INTEGER"),
+    ):
+        if col not in bc:
+            conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {decl}")
+    # Backfill the verification state from the legacy badge so pre-existing
+    # approved shops keep their verified profile after the upgrade, and shops
+    # that were never verified start as "not submitted" (they must go through
+    # the admin review flow to earn the badge).
+    # NOTE: the ALTER above defaults existing rows to 'not_submitted', so the
+    # legacy check must be on the badge itself, not on NULL/empty status.
+    conn.execute(
+        "UPDATE businesses SET verification_status = 'approved' "
+        "WHERE verified = 1 AND verification_status != 'approved'")
+    conn.execute(
+        "UPDATE businesses SET verification_status = 'not_submitted' "
+        "WHERE verification_status IS NULL OR verification_status = ''")
+    conn.execute(
+        "UPDATE businesses SET submitted_at = COALESCE(created_at, 0) "
+        "WHERE verification_status = 'approved' AND submitted_at IS NULL")
+    conn.execute(
+        "UPDATE businesses SET reviewed_at = COALESCE(submitted_at, created_at, 0) "
+        "WHERE verification_status = 'approved' AND reviewed_at IS NULL")
+
+    # Keep the seeded location tree in step with the dataset in code (additive
+    # only — admin-added provinces/districts/cities are never touched, and
+    # existing rows keep their ids so old listings and profiles stay valid).
+    sync_locations(conn)
 
     # Retire the orphaned `shops` table. Nothing reads it: the shop directory the
     # app renders comes from `businesses` (rows owned by real seller accounts).
@@ -731,50 +824,126 @@ CATEGORIES = [
 ]
 
 PROVINCES = {
+    # --- Western Province (3 districts) ---
     "Western Province": {
-        "Colombo": ["Colombo", "Dehiwala-Mount Lavinia", "Moratuwa", "Negombo", "Nugegoda", "Maharagama", "Battaramulla"],
-        "Gampaha": ["Gampaha", "Negombo", "Ja-Ela", "Kandana", "Minuwangoda"],
-        "Kalutara": ["Kalutara", "Panadura", "Beruwala", "Horana"],
+        "Colombo": [
+            "Colombo", "Dehiwala-Mount Lavinia", "Moratuwa", "Nugegoda", "Maharagama",
+            "Battaramulla", "Homagama", "Kadawatha", "Maligawatta", "Thalawathugoda",
+            "Kottawa", "Piliyandala", "Kotahena", "Wellawatte", "Thalawatte",
+            "Bambalapitiya", "Avissawella", "Wattala", "Katunayake", "Kallady",
+            "Rajagiriya", "Kaduwela", "Kiribathgoda",
+        ],
+        "Gampaha": [
+            "Gampaha", "Negombo", "Ja-Ela", "Kandana", "Minuwangoda", "Thalgaswewa",
+            "Attanagalla", "Welikada", "Koswatta", "Henadawala", "Balangoda",
+            "Kiriella", "Pannila", "Dagala",
+        ],
+        "Kalutara": [
+            "Kalutara", "Panadura", "Beruwala", "Horana", "Udagama", "Wadduwa",
+            "Koggala", "Balapitiya", "Kudadehiyawa", "Gannoruwa", "Kosgama", "Welipada",
+        ],
     },
+    # --- Central Province (3 districts) ---
     "Central Province": {
-        "Kandy": ["Kandy", "Peradeniya", "Gampola", "Katugastota"],
-        "Matale": ["Matale", "Dambulla"],
-        "Nuwara Eliya": ["Nuwara Eliya", "Hatton"],
+        "Kandy": [
+            "Kandy", "Peradeniya", "Gampola", "Katugastota", "Havelock", "Balana",
+            "Hantana", "Bogampola", "Waskaduwa", "Pattipola", "Ambulpola", "Thotawana",
+            "Hakgala",
+        ],
+        "Matale": [
+            "Matale", "Dambulla", "Nawalapitiya", "Kotagoda", "Bulathgala",
+            "Wariyapola", "Matale East",
+        ],
+        "Nuwara Eliya": [
+            "Nuwara Eliya", "Hatton", "Talawakele", "Borella", "Nuwara Eliya South",
+        ],
     },
+    # --- Southern Province (3 districts) ---
     "Southern Province": {
-        "Galle": ["Galle", "Hikkaduwa", "Ambalangoda"],
-        "Matara": ["Matara", "Weligama", "Mirissa"],
-        "Hambantota": ["Hambantota", "Tangalle", "Tissamaharama"],
+        "Galle": [
+            "Galle", "Hikkaduwa", "Ambalangoda", "Wollibadda", "Bulatgoda",
+            "Unawata", "Mirissa", "Halmaduwa", "Kuda Oya",
+        ],
+        "Matara": [
+            "Matara", "Weligama", "Kamburupita", "Godakawela", "Hingurana",
+            "Matara East",
+        ],
+        "Hambantota": [
+            "Hambantota", "Tangalle", "Tissamaharama", "Welioya", "Beliatta",
+            "Ekala", "Kamburupitiya",
+        ],
     },
-    "Northern Province": {
-        "Jaffna": ["Jaffna", "Chavakachcheri", "Point Pedro"],
-        "Kilinochchi": ["Kilinochchi"],
-        "Mannar": ["Mannar"],
-        "Vavuniya": ["Vavuniya"],
-        "Mullaitivu": ["Mullaitivu"],
-    },
-    "Eastern Province": {
-        "Trincomalee": ["Trincomalee", "Kinniya"],
-        "Batticaloa": ["Batticaloa", "Kalmunai"],
-        "Ampara": ["Ampara", "Akkaraipattu"],
-    },
+    # --- North Western Province (2 districts) ---
     "North Western Province": {
-        "Kurunegala": ["Kurunegala", "Kuliyapitiya"],
-        "Puttalam": ["Puttalam", "Chilaw"],
+        "Kurunegala": [
+            "Kurunegala", "Kuliyapitiya", "Pannala", "Dambanthalawa",
+        ],
+        "Puttalam": [
+            "Puttalam", "Chilaw", "Anamaduwa", "Paaluwas", "Cheddive",
+            "Elpitiya", "Mavulana", "Kodikamam",
+        ],
     },
+    # --- North Central Province (2 districts) ---
     "North Central Province": {
-        "Anuradhapura": ["Anuradhapura", "Kekirawa"],
-        "Polonnaruwa": ["Polonnaruwa"],
+        "Anuradhapura": [
+            "Anuradhapura", "Kekirawa", "Palabaddala", "Kurundaldella",
+            "Anuradhapura South",
+        ],
+        "Polonnaruwa": [
+            "Polonnaruwa", "Minneriya", "Eramupana", "Katiyagala",
+        ],
     },
-    "Uva Province": {
-        "Badulla": ["Badulla", "Bandarawela", "Haputale"],
-        "Monaragala": ["Monaragala", "Wellawaya"],
+    # --- Eastern Province (3 districts) ---
+    "Eastern Province": {
+        "Ampara": [
+            "Ampara", "Akkaraipattu", "Ninniya", "Kantalai", "Polthena",
+        ],
+        "Batticaloa": [
+            "Batticaloa", "Kalmunai", "Lankanwila", "Batticaloa East",
+        ],
+        "Trincomalee": [
+            "Trincomalee", "Kinniya", "Nilaveli", "Pasikudah", "Kakunboduwa",
+        ],
     },
+    # --- Sabaragamuwa Province (2 districts) ---
     "Sabaragamuwa Province": {
-        "Ratnapura": ["Ratnapura", "Embilipitiya"],
-        "Kegalle": ["Kegalle", "Mawanella"],
+        "Ratnapura": [
+            "Ratnapura", "Embilipitiya", "Kuruwita", "Kithalagoda",
+        ],
+        "Kegalle": [
+            "Kegalle", "Mawanella", "Pelawatte", "Girandala",
+        ],
+    },
+    # --- Uva Province (2 districts) ---
+    "Uva Province": {
+        "Badulla": [
+            "Badulla", "Bandarawela", "Haputale", "Belihuloya", "Dikoya",
+        ],
+        "Monaragala": [
+            "Monaragala", "Wellawaya", "Kataragama", "Maradankaduwa",
+        ],
+    },
+    # --- Northern Province (5 districts) ---
+    "Northern Province": {
+        "Jaffna": [
+            "Jaffna", "Chavakachcheri", "Point Pedro", "Pooneryn", "Kayts",
+            "Oddusdam", "Nallur", "Mantai", "Elayadiventha", "Konamam",
+        ],
+        "Kilinochchi": [
+            "Kilinochchi", "Chankanai", "Palaly", "Panchikawade",
+        ],
+        "Mannar": [
+            "Mannar", "Murugan", "Puliyantheevu",
+        ],
+        "Mullaitivu": [
+            "Mullaitivu", "Manantaden", "Vadakaduvil",
+        ],
+        "Vavuniya": [
+            "Vavuniya", "Nediyanthurai", "Kankesanthurai", "Elayankudai",
+        ],
     },
 }
+
 
 BRANDS = [
     ("Sony", "Cameras"), ("Canon", "Cameras"), ("Nikon", "Cameras"),
@@ -3160,6 +3329,10 @@ def seller_profile(uid):
         return err("Seller not found", 404)
     listings = query(listing_query_base() + " WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.created_at DESC", (uid,))
     biz = query("SELECT * FROM businesses WHERE user_id = ?", (uid,), one=True)
+    # Only an admin-approved shop is public; a pending/unverified business
+    # profile must not leak through the seller page.
+    if biz and not biz["verified"]:
+        biz = None
     ratings = query(
         "SELECT r.*, u.name AS buyer_name FROM ratings r JOIN users u ON u.id = r.buyer_id WHERE r.seller_id = ? ORDER BY r.created_at DESC LIMIT 20",
         (uid,))
@@ -3241,6 +3414,9 @@ def business_payload(b):
         logo = resolve_image_url(logo)
     # Defensive .get() reads: a database created before a column was added must
     # not turn the whole shop list into a 500.
+    doc = b.get("document") or ""
+    if doc and _is_b2_key(doc):
+        doc = resolve_image_url(doc)
     return {
         "id": b.get("id"), "name": b.get("name") or "Unnamed shop", "slug": b.get("slug") or "",
         "logo": logo,
@@ -3250,6 +3426,14 @@ def business_payload(b):
         "whatsapp": b.get("whatsapp") or "",
         "opening_hours": hours, "verified": bool(b.get("verified")),
         "user_id": b.get("user_id"),
+        "business_category": b.get("business_category") or "",
+        "owner_name": b.get("owner_name") or "",
+        "registration_number": b.get("registration_number") or "",
+        "document": doc,
+        "verification_status": b.get("verification_status") or "not_submitted",
+        "rejection_reason": b.get("rejection_reason") or "",
+        "submitted_at": b.get("submitted_at"),
+        "reviewed_at": b.get("reviewed_at"),
     }
 
 
@@ -3263,19 +3447,24 @@ def my_business():
     name = (body.get("name") or "").strip()
     if not name:
         return err("Business name is required")
-    # Normalize logo: accept presigned http URL, /uploads/ or B2 key and store canonical key
-    logo_input = body.get("logo")
-    logo_val = None
-    if isinstance(logo_input, str) and logo_input.strip():
-        s = logo_input.strip()
+
+    def _upload_field(value):
+        """Normalise an uploaded image (logo / supporting document) to its
+        canonical key: accepts a presigned http URL, /uploads/, /images/ or a
+        raw B2 key. Returns None when no value was provided."""
+        if not isinstance(value, str) or not value.strip():
+            return None
+        s = value.strip()
         if s.startswith("/images/"):
-            logo_val = s
-        else:
-            norm = normalize_images_input([s])
-            logo_val = norm[0] if norm else s
-            # If http url without B2 extraction and not /images/, keep original but will be stored as provided
-            if not logo_val:
-                logo_val = s
+            return s
+        norm = normalize_images_input([s])
+        return norm[0] if norm else s
+
+    logo_val = _upload_field(body.get("logo"))
+    doc_val = _upload_field(body.get("document"))
+    business_category = (body.get("business_category") or "").strip()[:60]
+    owner_name = (body.get("owner_name") or "").strip()[:60]
+    registration_number = (body.get("registration_number") or "").strip()[:40]
     existing = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
     if existing:
         slug = existing["slug"]
@@ -3283,17 +3472,20 @@ def my_business():
             slug = slugify(body["slug"])
         # If logo_val is None (not provided), keep existing; else use new
         final_logo = logo_val if logo_val is not None else existing["logo"]
+        final_doc = doc_val if doc_val is not None else (existing["document"] or "")
         # Delete old B2 logo if replaced
         if logo_val is not None and existing["logo"] and existing["logo"] != final_logo and _is_b2_key(existing["logo"]):
             b2_delete_key(_normalize_b2_key(existing["logo"]))
         execute(
             """UPDATE businesses SET name=?, slug=?, logo=?, description=?, province=?, district=?, city=?, area=?,
-               phone=?, whatsapp=?, opening_hours=? WHERE user_id=?""",
+               phone=?, whatsapp=?, opening_hours=?, business_category=?, owner_name=?, registration_number=?, document=?
+               WHERE user_id=?""",
             (name, slug, final_logo, body.get("description") or existing["description"] or "",
              body.get("province") or existing["province"] or "", body.get("district") or existing["district"] or "",
              body.get("city") or existing["city"] or "", body.get("area") or existing["area"] or "",
              body.get("phone") or existing["phone"] or "", body.get("whatsapp") or existing["whatsapp"] or "",
-             json.dumps(body.get("opening_hours") or {}), u["id"]))
+             json.dumps(body.get("opening_hours") or {}), business_category, owner_name, registration_number,
+             final_doc, u["id"]))
     else:
         slug = slugify(body.get("slug") or name)
         base = slug
@@ -3303,21 +3495,75 @@ def my_business():
             i += 1
         execute(
             """INSERT INTO businesses (user_id, name, slug, logo, description, province, district, city, area,
-               phone, whatsapp, opening_hours, verified, created_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?)""",
+               phone, whatsapp, opening_hours, verified, business_category, owner_name,
+               registration_number, document, verification_status, created_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,0,?,?,?,?, 'not_submitted', ?)""",
             (u["id"], name, slug, logo_val or "", body.get("description") or "",
              body.get("province") or "", body.get("district") or "", body.get("city") or "",
              body.get("area") or "", body.get("phone") or "", body.get("whatsapp") or "",
-             json.dumps(body.get("opening_hours") or {}), now()))
+             json.dumps(body.get("opening_hours") or {}), business_category, owner_name,
+             registration_number, doc_val or "", now()))
         execute("UPDATE users SET seller_type = 'business' WHERE id = ?", (u["id"],))
+    b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
+    return ok(business_payload(b))
+
+
+# Business categories offered to shop owners (free text also accepted).
+BUSINESS_CATEGORIES = [
+    "Camera & Lens Sales", "Repair & Service", "Rentals", "Photo Studio / Printing",
+    "Online Store", "Accessories & Bags", "Other",
+]
+
+
+@app.route("/api/me/business/submit", methods=["POST"])
+def submit_business_verification():
+    """Owner submits their shop for admin verification (not_submitted/rejected
+    -> pending). The badge is granted only by an admin approval — submitting
+    never verifies a shop on its own."""
+    u = require_auth()
+    b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
+    if not b:
+        return err("Create your shop details first", 400)
+    status = b["verification_status"] or "not_submitted"
+    if status == "pending":
+        return err("Your shop is already under review", 400)
+    if status == "approved":
+        return err("Your shop is already verified", 400)
+    missing = []
+    if not (b["name"] or "").strip():
+        missing.append("business name")
+    if not (b["owner_name"] or "").strip():
+        missing.append("owner name")
+    if not (b["phone"] or "").strip():
+        missing.append("business phone")
+    if not (b["area"] or "").strip():
+        missing.append("business address")
+    if not ((b["province"] or "").strip() and (b["district"] or "").strip() and (b["city"] or "").strip()):
+        missing.append("province, district and city")
+    if not (b["business_category"] or "").strip():
+        missing.append("business category")
+    if not (b["document"] or "").strip():
+        missing.append("a supporting business document")
+    if missing:
+        return err("To submit for verification you still need: " + ", ".join(missing), 400)
+    execute(
+        "UPDATE businesses SET verification_status='pending', submitted_at=?, reviewed_at=NULL, "
+        "rejection_reason='', verified=0 WHERE user_id=?", (now(), u["id"]))
+    notify(u["id"], "listing", "Shop verification submitted",
+           "Your shop is now under review. We'll notify you once it has been checked.",
+           "#/my-shop")
     b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
     return ok(business_payload(b))
 
 
 @app.route("/api/businesses")
 def businesses_list():
-    """All business sellers (camera shops) with listing counts & ratings."""
-    rows = query("SELECT * FROM businesses ORDER BY verified DESC, name")
+    """Verified (admin-approved) camera shops with listing counts & ratings.
+
+    Only approved businesses appear in the public directory — a shop that has
+    merely registered (pending / not submitted / rejected) is not listed here.
+    """
+    rows = query("SELECT * FROM businesses WHERE verified = 1 ORDER BY name")
     out = []
     for b in rows:
         item = business_payload(b)
@@ -3334,6 +3580,14 @@ def business_page(slug):
     b = query("SELECT * FROM businesses WHERE slug = ?", (slug,), one=True)
     if not b:
         return err("Shop not found", 404)
+    # Unapproved shops are not public. Their owner can still preview their own
+    # shop page from "My Shop" while the verification is pending/rejected.
+    preview = False
+    if not b["verified"]:
+        u = current_user()
+        if not u or u["id"] != b["user_id"]:
+            return err("Shop not found", 404)
+        preview = True
     owner = query("SELECT id, name, phone, whatsapp, province, district, city, bio, avatar, verified, seller_type, created_at FROM users WHERE id = ?", (b["user_id"],), one=True)
     listings = query(listing_query_base() + " WHERE l.user_id = ? AND l.status = 'active' ORDER BY l.created_at DESC", (b["user_id"],))
     return ok({
@@ -3341,6 +3595,7 @@ def business_page(slug):
         "owner": public_user(owner) if owner else None,
         "rating": seller_rating(b["user_id"]),
         "listings": serialize_listings(listings),
+        "preview": preview,
     })
 
 
@@ -3911,6 +4166,8 @@ def admin_dashboard():
         ("reports_open", "SELECT COUNT(*) n FROM reports WHERE status = 'open'"),
         ("messages", "SELECT COUNT(*) n FROM messages"),
         ("promotions", "SELECT COUNT(*) n FROM promotions"),
+        ("shops_verified", "SELECT COUNT(*) n FROM businesses WHERE verified = 1"),
+        ("shops_pending", "SELECT COUNT(*) n FROM businesses WHERE verification_status = 'pending'"),
     ]:
         counts[name] = query(sql, one=True)["n"]
     revenue = query(
@@ -3923,12 +4180,23 @@ def admin_dashboard():
         "ORDER BY r.created_at DESC LIMIT 5")
     recent_payments = query("SELECT * FROM payments ORDER BY created_at DESC LIMIT 5")
     pending = query(listing_query_base() + " WHERE l.status = 'pending' ORDER BY l.created_at DESC LIMIT 8")
+    pending_biz = query(
+        "SELECT b.*, u.name AS owner_name, u.email AS owner_email, u.phone AS owner_phone "
+        "FROM businesses b JOIN users u ON u.id = b.user_id "
+        "WHERE b.verification_status = 'pending' ORDER BY b.submitted_at DESC LIMIT 8")
+    pending_biz_out = []
+    for b in pending_biz:
+        item = business_payload(b)
+        item["owner"] = {"id": b["user_id"], "name": b["owner_name"] or "",
+                         "email": b["owner_email"] or "", "phone": b["owner_phone"] or ""}
+        pending_biz_out.append(item)
     return ok({
         "counts": counts,
         "recent_users": [admin_user_payload(u) for u in recent_users],
         "recent_reports": recent_reports,
         "recent_payments": recent_payments,
         "pending": [serialize_listing(r, include_seller=False) for r in pending],
+        "pending_businesses": pending_biz_out,
     })
 
 
@@ -4034,6 +4302,92 @@ def admin_delete_user(uid):
     audit(admin["id"], "delete", "user", uid, u["email"])
     execute("DELETE FROM users WHERE id = ?", (uid,))
     return ok({"deleted": uid})
+
+
+# ---------------------------------------------------------------------------
+# Admin — business / shop verification
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/businesses")
+def admin_businesses():
+    admin = require_admin()
+    status = (request.args.get("status") or "").strip()
+    sql = ("SELECT b.*, u.name AS owner_name_db, u.email AS owner_email, u.phone AS owner_phone "
+           "FROM businesses b JOIN users u ON u.id = b.user_id")
+    args = ()
+    # "all" (and no value) means no filter — bind it literally and the query
+    # would match zero rows, leaving the admin Businesses list empty.
+    if status and status != "all":
+        sql += " WHERE b.verification_status = ?"
+        args = (status,)
+    sql += " ORDER BY CASE b.verification_status WHEN 'pending' THEN 0 " \
+           "WHEN 'rejected' THEN 1 WHEN 'not_submitted' THEN 2 ELSE 3 END, b.name"
+    rows = query(sql, args)
+    out = []
+    for b in rows:
+        item = business_payload(b)
+        item["owner"] = {
+            "id": b["user_id"], "name": b["owner_name_db"] or "",
+            "email": b["owner_email"] or "", "phone": b["owner_phone"] or "",
+        }
+        item["listing_count"] = query(
+            "SELECT COUNT(*) n FROM listings WHERE user_id = ? AND status = 'active'",
+            (b["user_id"],), one=True)["n"]
+        out.append(item)
+    return ok(out)
+
+
+@app.route("/api/admin/businesses/<int:bid>/moderate", methods=["POST"])
+def admin_moderate_business(bid):
+    """Approve / reject / revoke a shop's verification. The only path that can
+    grant (or remove) the verified badge."""
+    admin = require_admin()
+    b = query("SELECT * FROM businesses WHERE id = ?", (bid,), one=True)
+    if not b:
+        return err("Shop not found", 404)
+    body = request.get_json(silent=True) or {}
+    action = (body.get("action") or "").strip()
+    reason = (body.get("reason") or "").strip()[:500]
+    if action == "approve":
+        if b["verification_status"] == "approved":
+            return err("Shop is already verified", 400)
+        if not (b["document"] or "").strip():
+            return err("This shop has no supporting document on file", 400)
+        execute(
+            "UPDATE businesses SET verification_status='approved', verified=1, reviewed_at=?, "
+            "rejection_reason='' WHERE id=?", (now(), bid))
+        execute("UPDATE users SET verified = 1 WHERE id = ?", (b["user_id"],))
+        notify(b["user_id"], "listing", "Shop verified",
+               f"Your shop “{b['name']}” has been verified. Your public shop page is now live "
+               "with the verified badge.", "#/my-shop")
+        audit(admin["id"], "approve", "business", bid, b["name"])
+    elif action == "reject":
+        if b["verification_status"] == "rejected":
+            return err("Shop is already rejected", 400)
+        if not reason:
+            return err("A rejection reason is required", 400)
+        execute(
+            "UPDATE businesses SET verification_status='rejected', verified=0, reviewed_at=?, "
+            "rejection_reason=? WHERE id=?", (now(), reason, bid))
+        notify(b["user_id"], "listing", "Shop verification rejected",
+               f"Your shop “{b['name']}” could not be verified: {reason}. "
+               "You can fix the details and submit again from My Shop.", "#/my-shop")
+        audit(admin["id"], "reject", "business", bid, f"{b['name']} — {reason}")
+    elif action == "revoke":
+        if b["verification_status"] != "approved":
+            return err("Only a verified shop can be revoked", 400)
+        if not reason:
+            return err("A reason is required", 400)
+        execute(
+            "UPDATE businesses SET verification_status='not_submitted', verified=0, reviewed_at=NULL, "
+            "rejection_reason=? WHERE id=?", (reason, bid))
+        execute("UPDATE users SET verified = 0 WHERE id = ?", (b["user_id"],))
+        notify(b["user_id"], "listing", "Shop verification revoked",
+               f"Your shop “{b['name']}” is no longer verified: {reason}", "#/my-shop")
+        audit(admin["id"], "revoke", "business", bid, f"{b['name']} — {reason}")
+    else:
+        return err("Unknown action")
+    b = query("SELECT * FROM businesses WHERE id = ?", (bid,), one=True)
+    return ok(business_payload(b))
 
 
 @app.route("/api/admin/listings")
@@ -4430,15 +4784,8 @@ def seed():
                 (slug, name, icon, parent_id, sort, fields))
         conn.commit()
 
-    has_prov = conn.execute("SELECT COUNT(*) FROM provinces").fetchone()[0]
-    if has_prov == 0:
-        for pname, districts in PROVINCES.items():
-            pid = conn.execute("INSERT INTO provinces (name) VALUES (?)", (pname,)).lastrowid
-            for dname, cities in districts.items():
-                did = conn.execute("INSERT INTO districts (province_id, name) VALUES (?,?)", (pid, dname)).lastrowid
-                for cname in cities:
-                    conn.execute("INSERT INTO cities (district_id, name) VALUES (?,?)", (did, cname))
-        conn.commit()
+    # Location data is seeded/synced by sync_locations() inside migrate() above
+    # (additive on every boot, so existing databases pick up new towns safely).
 
     if conn.execute("SELECT COUNT(*) FROM brands").fetchone()[0] == 0:
         for name, cat in BRANDS:

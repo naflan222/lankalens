@@ -309,7 +309,11 @@ ul li {
 .searchbar input {
     height: 40px !important;
     font-size: 14px !important;
-    background: #fff !important;
+    /* background-COLOR, never the background shorthand: the shorthand would
+       reset background-image/repeat to initial values *as important*, which
+       beat .select's no-repeat and tiled the dropdown chevron across the
+       whole field (the "repeated symbols" bug). */
+    background-color: #fff !important;
     padding-left: 32px !important;
     padding-right: 32px !important;
 }
@@ -317,7 +321,7 @@ ul li {
 input {
     height: 40px !important;
     font-size: 14px !important;
-    background: #fff !important;
+    background-color: #fff !important;
     border-radius: 8px !important;
     padding-left: 15px !important;
     padding-right: 15px !important;
@@ -326,7 +330,7 @@ input {
 
 textarea {
     font-size: 14px !important;
-    background: #fff !important;
+    background-color: #fff !important;
     border-radius: 8px !important;
     padding-left: 15px !important;
     padding-right: 15px !important;
@@ -344,7 +348,7 @@ input[type="text"] {
 select {
     height: 40px !important;
     font-size: 14px !important;
-    background: #fff !important;
+    background-color: #fff !important;
     border-radius: 8px !important;
     padding-left: 15px !important;
     padding-right: 15px !important;

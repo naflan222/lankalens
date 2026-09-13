@@ -194,6 +194,13 @@ button { font-family: inherit; }
   cursor: pointer;
 }
 .brand .brand-mark { width: 38px; height: 38px; flex-shrink: 0; }
+/* The website logo (images/ or the admin-configured logo URL) is used exactly
+   as provided: contain-fitted inside the mark box so its own proportions are
+   never distorted, cropped or recoloured. The box itself is what scales
+   responsively (38px nav / 62px auth / 48px short viewports). */
+.brand-mark { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+.brand-mark img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.brand-mark svg { width: 100%; height: 100%; display: block; }
 .brand .brand-text { line-height: 1.05; }
 .brand .brand-name {
   font-family: 'Heebo', 'Montserrat', sans-serif;
@@ -284,6 +291,7 @@ button { font-family: inherit; }
   color: #fff;
 }
 .drawer-head .mini-user { display: flex; align-items: center; gap: 12px; }
+.drawer-head .mini-user .brand-mark { width: 44px; height: 44px; }
 .avatar { flex-shrink: 0; }
 .avatar .circle {
   width: 46px; height: 46px;
@@ -364,8 +372,25 @@ button { font-family: inherit; }
   background: var(--brand); color: #fff; border: 0;
   height: 44px; padding: 0 18px; border-radius: 12px;
   font-size: 14px; font-weight: 600; cursor: pointer;
+  flex-shrink: 0;
 }
 .search-hero button:active { background: var(--brand-dark); }
+/* Mobile keyboard: when the search field is focused on a phone, iOS Safari
+   auto-zooms into any input whose font-size is below 16px — that zoom made the
+   search bar look "stretched" and pushed the page around (and on some Android
+   browsers the bar appeared to overflow). Touch devices get a 16px search
+   input so focusing keeps the normal 1:1 zoom, the field stays exactly the
+   same size and sits comfortably above the keyboard. Desktop is untouched. */
+@media (pointer: coarse) {
+  .search-hero input { font-size: 16px; }
+}
+/* Keep the whole bar from ever growing past its container on narrow screens. */
+.search-hero { max-width: 100%; }
+.search-hero input {
+  flex: 1 1 auto;
+  min-width: 0;              /* allow the flex child to shrink instead of overflow */
+  max-width: 100%;
+}
 
 /* Section headers */
 .section {
@@ -647,7 +672,10 @@ button { font-family: inherit; }
 .input, .select, .textarea {
   width: 100%;
   border: 1px solid var(--line);
-  background: var(--card) !important;
+  /* background-COLOR, not the shorthand: the shorthand would set
+     background-image/repeat to initial values as important, which beat
+     .select's no-repeat and tiled its chevron across the whole field. */
+  background-color: var(--card) !important;
   border-radius: 12px !important;
   height: 46px !important;
   padding: 0 14px !important;
@@ -660,7 +688,11 @@ button { font-family: inherit; }
   outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(14,124,102,.12);
 }
 .textarea { height: auto !important; min-height: 110px; padding: 12px 14px !important; resize: vertical; }
-.select { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 512 512'%3E%3Cpath fill='none' stroke='%2374817c' stroke-linecap='round' stroke-linejoin='round' stroke-width='48' d='M112 184l144 144 144-144'/%3E%3C/svg%3E") !important; background-repeat: no-repeat; background-position: right 12px center; padding-right: 38px !important; }
+/* One clean dropdown indicator, fixed at the right edge.
+   background-repeat MUST stay important: any rule that resets the background
+   shorthand (with !important) used to win and tile this chevron across the
+   entire field — the "repeated symbols" bug reported on the location selects. */
+.select { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 512 512'%3E%3Cpath fill='none' stroke='%2374817c' stroke-linecap='round' stroke-linejoin='round' stroke-width='48' d='M112 184l144 144 144-144'/%3E%3C/svg%3E") !important; background-repeat: no-repeat !important; background-position: right 12px center !important; padding-right: 38px !important; }
 .form-card {
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 16px; box-shadow: var(--shadow-sm);
@@ -1223,6 +1255,8 @@ button { font-family: inherit; }
 .a-main b { display: block; font-size: 13.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .a-main span { display: block; font-size: 12px; color: var(--ink-2); margin-top: 2px; }
 .a-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-left: auto; }
+.a-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+.a-side .muted { white-space: nowrap; }
 
 .a-table-wrap { overflow-x: auto; padding: 0 16px 12px; }
 .a-table { width: 100%; border-collapse: collapse; font-size: 12.5px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
