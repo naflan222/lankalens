@@ -203,7 +203,10 @@ PROMOTION_TYPES = [
 DEFAULT_SETTINGS = {
     "site_name": "Lanka Lens",
     "tagline": "Buy & Sell Cameras in Sri Lanka",
-    "logo": "",
+    # The website logo, used exactly as provided (see logoMark() in js/app.js
+    # and .brand-mark in css/lankalens.css). An empty value falls back to the
+    # built-in SVG mark, so deleting the file can never break the pages.
+    "logo": "/images/Logo.png",
     "contact_email": "hello@lankalens.lk",
     "contact_phone": "+94 77 000 1111",
     "contact_address": "Colombo, Sri Lanka",
@@ -697,6 +700,18 @@ def migrate(conn):
     # only — admin-added provinces/districts/cities are never touched, and
     # existing rows keep their ids so old listings and profiles stay valid).
     sync_locations(conn)
+
+    # Backfill the website logo on databases seeded before it existed. Only an
+    # EMPTY value is filled — if an admin already configured a custom logo URL
+    # we must never overwrite it.
+    existing_logo = conn.execute(
+        "SELECT value FROM site_settings WHERE key = 'logo'").fetchone()
+    if existing_logo is None:
+        conn.execute("INSERT INTO site_settings (key, value) VALUES ('logo', ?)",
+                     (DEFAULT_SETTINGS["logo"],))
+    elif (existing_logo[0] or "").strip() == "":
+        conn.execute("UPDATE site_settings SET value = ? WHERE key = 'logo'",
+                     (DEFAULT_SETTINGS["logo"],))
 
     # Retire the orphaned `shops` table. Nothing reads it: the shop directory the
     # app renders comes from `businesses` (rows owned by real seller accounts).

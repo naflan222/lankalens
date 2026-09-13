@@ -2,7 +2,7 @@
 
 **Branch:** `arena/01a0988a-lankalens`
 **Scope:** the 7 requested product changes — (1) website logo, (2) mobile search focus/keyboard, (3) dropdown repeated-symbol fix, (4) Sri Lanka location data, (5) user types (individual vs business), (6) admin-controlled shop verification, (7) UI/UX consistency — plus full regression testing of everything pre-existing.
-**Result:** **5 implementation defects found and fixed. 105 automated assertions pass (56 API E2E + 49 frontend jsdom) + the in-place migration test. Status: READY** — the only open item is the user's logo *file*, which has not been uploaded yet (pipeline is complete; §2).
+**Result:** **5 implementation defects found and fixed. 118 automated assertions pass (56 API E2E + 49 frontend jsdom + 13 logo placements) + the in-place migration test (incl. logo backfill). Status: COMPLETE** — all 7 requested items shipped, including the owner's logo.
 
 ---
 
@@ -22,19 +22,19 @@ O1/O2 were found while wiring the first clean boot; F1–F3 were found by the **
 
 ## 2. Item 1 — Website logo
 
-**Code: complete. File: awaiting the user's upload.**
+**Complete.** The owner's logo is committed at `images/Logo.png` (723×832 PNG, transparent background) and is live in all six placements.
 
-- `logoMark()` (`js/app.js`) now renders `<span class="brand-mark"><img src="…" alt="Lanka Lens logo" draggable="false"></span>` when `state.meta.settings.logo` (or `window.LL_LOGO_URL`) is set, and falls back to the original inline SVG when it is not. It is the **single** source of the mark, used in all six places the logo appears:
+- `logoMark()` (`js/app.js`) renders `<span class="brand-mark"><img src="…" alt="Lanka Lens logo" draggable="false"></span>` when `state.meta.settings.logo` (or `window.LL_LOGO_URL`) is set, and falls back to the original inline SVG when it is not. It is the **single** source of the mark, used in all six places the logo appears:
   - top header (`.brand`),
   - footer,
-  - mobile drawer menu head,
+  - mobile drawer menu head (shown for signed-out visitors; signed-in users see their avatar in that slot by design),
   - sign-in page,
   - sign-up page,
   - reset-password page.
   There is no other hand-rolled logo markup anywhere in the app.
 - The image is used **exactly as provided**: `.brand-mark img { width:100%; height:100%; object-fit: contain }` — no crop, recolor, filter or aspect change; only the containing box scales responsively (38 px nav / 44 px drawer / 62 px auth hero / 48 px on short viewports).
-- Backend: `settings.logo` exists (`DEFAULT_SETTINGS`, `app.py`), is exposed through `GET /api/meta` (`settings.logo`), and `migrate()` back-fills the value for existing databases whose row is empty.
-- **To finish:** drop the logo file in `images/` and set `DEFAULT_SETTINGS["logo"]` (one line) — or set it via the existing admin settings flow. Everything else (all six render sites, responsive sizing, fallback) is already live and tested (smoke asserts `.brand .brand-mark` renders on home with zero console errors).
+- Backend: `DEFAULT_SETTINGS["logo"] = "/images/Logo.png"`; `migrate()` back-fills the value for existing databases **only where the stored value is empty** — an admin-configured custom logo URL is never overwritten (asserted in the migration test). Fresh databases seed it directly.
+- **Verified (13-assertion logo suite, jsdom):** `/images/Logo.png` serves 200 as image/png (261 444 bytes); `GET /api/meta` returns the configured value; and every one of the six placements renders a real `<img>` with `src="/images/Logo.png"` (no SVG fallback), zero console errors.
 
 ## 3. Item 2 — Mobile search: focus + keyboard
 
@@ -96,12 +96,13 @@ not_submitted ──submit (owner)──► pending ──approve (admin, needs 
 |-------|-------------|--------|
 | `/tmp/e2e_test.py` | 56 API assertions against a live cold-booted server: locations, auth, individual flow, business + verification lifecycle, admin moderation, privacy, directory, SPA/CSS serving | **56/56 pass** |
 | `/tmp/smoke.mjs` | 49 jsdom assertions: boots the real SPA (real `index.html` + `js/app.js` + live API) in 6 identities/routes and drives real user actions — search focus/submit, 9-step ad wizard with the location cascade, My Shop in 4 statuses, admin dashboard + Businesses list + Approve-button click through the confirmation dialog, individual upgrade prompt, shops directory, public shop page; asserts zero console errors/unhandled rejections on every page | **49/49 pass** |
-| `/tmp/migration_test.py` | Builds a *legacy* schema DB (old business columns, 3-province locations, the legacy Negombo-dupe, a verified + an unverified business, an admin-added city) and boots the app against it — asserts in-place upgrade: columns added, statuses backfilled off the old `verified` flag, locations synced additively, legacy dupe removed, admin rows preserved; then re-boots to prove idempotency | **ALL PASS** |
+| `/tmp/migration_test.py` | Builds a *legacy* schema DB (old business columns, 3-province locations, the legacy Negombo-dupe, a verified + an unverified business, an admin-added city, **and pre-seeded `site_settings` with an empty logo**) and boots the app against it — asserts in-place upgrade: columns added, statuses backfilled off the old `verified` flag, locations synced additively, legacy dupe removed, admin rows preserved, **logo back-filled from empty to `/images/Logo.png`, idempotent on re-migrate, and an admin-custom logo left untouched**; then re-boots to prove idempotency | **ALL PASS** |
+| `/tmp/logo_check.mjs` | 13 jsdom assertions: boots the real SPA and asserts the owner's logo renders as a loaded `<img src="/images/Logo.png">` (never the SVG fallback) in all six placements — home header, home footer, sign-in, sign-up, reset-password, and the mobile drawer (anonymous state) — with the asset serving 200 and zero console errors | **13/13 pass** |
 | Syntax | `node --check js/app.js`; `python -c "import ast; ast.parse(app.py)"` | clean |
 
-## 10. Open item
+## 10. Open items
 
-1. **The logo file itself** — the user's uploaded logo has not arrived in the workspace. Pipeline (all six render sites, responsive contain-fit, `settings.logo`, migration back-fill, SVG fallback) is complete and tested; saving the file to `images/` and setting the one `DEFAULT_SETTINGS["logo"]` line is all that remains.
+None. All seven requested items are implemented and verified, including the owner's logo (committed at `images/Logo.png` and live in every placement).
 
 ## 11. Production (Railway) caveats
 
