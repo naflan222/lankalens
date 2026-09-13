@@ -1,0 +1,5 @@
+-r ../server/requirements.txt
+pytest>=8,<9
+requests>=2.32,<3
+# Bundles real PostgreSQL for disposable integration tests; never a production dependency.
+pgserver==0.1.4

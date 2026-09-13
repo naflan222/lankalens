@@ -2,7 +2,8 @@
 # Do not replace this with a static-file server; /api/* must reach Gunicorn.
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV APP_ENV=production \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app

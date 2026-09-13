@@ -9,3 +9,18 @@ server/*.db
 uploads
 node_modules
 QA-REPORT-PART3.md
+
+# Never bake database snapshots or credentials into the image.
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+*.dump
+*.backup
+.env
+.env.*
+tests
+.cache/
+.pytest_cache/

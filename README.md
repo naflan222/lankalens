@@ -5,9 +5,10 @@ cameras, lenses, drones, action cameras and accessories, priced in rupees.
 
 ## Stack
 
-- **Backend** — Python + Flask + SQLite (`server/app.py`). A real, database-driven
-  API (categories, listings, users, favorites, offers, chat, notifications, shops,
-  blog, locations). No static demo data — everything is seeded into SQLite on first run.
+- **Backend** — Python + Flask, with **PostgreSQL in production** and optional
+  SQLite for local development. The API stores users, listings, favorites,
+  offers, chat, notifications, shops, blog and locations in the database.
+  Startup never creates, migrates, resets or seeds a database.
 - **Frontend** — a framework-free single-page app (hash router) that reuses the
   template's look & feel: `css/style.css` (re-themed), `css/framework7.bundle.min.css`
   (UI styling) and a locally self-hosted ionicons SVG sprite (`icons/icons.svg`).
@@ -17,7 +18,10 @@ cameras, lenses, drones, action cameras and accessories, priced in rupees.
 
 ```bash
 pip install -r server/requirements.txt
-python3 server/app.py        # serves on http://localhost:8000
+# LOCAL development, with DATABASE_URL and production/Railway variables unset:
+python3 -m server.manage_db init-empty --allow-empty
+python3 -m server.manage_db seed-demo  # optional, local SQLite only
+python3 server/app.py                 # serves on http://localhost:8000
 ```
 
 Open **http://localhost:8000** — Flask serves both the SPA and the JSON API from
@@ -39,10 +43,21 @@ separate frontend process for this service. Railway's deployment logs should
 show `Using detected Dockerfile!`, Gunicorn listening on `0.0.0.0:$PORT`, and
 access-log entries such as `POST /api/auth/login ... 200`.
 
-The SQLite file is deliberately excluded from the image (`server/*.db` in
-`.dockerignore`), so an existing Railway volume/database is never copied over by
-a build. Preserve its existing mount and database path before deploying; the
-application only seeds when no database file exists.
+**Existing installation: back up and import the running SQLite database BEFORE
+changing variables or deploying this version.** Follow the complete
+[database persistence and Railway cutover runbook](docs/database-persistence.md).
+Do not run `init-empty` for an existing marketplace.
+
+Set `DATABASE_URL` to a separate Railway PostgreSQL service with a persistent
+volume. Docker sets `APP_ENV=production`; Railway variables also activate the
+production guard. Missing/invalid PostgreSQL configuration fails closed rather
+than falling back to SQLite. `railway.json` runs the idempotent schema gate
+`python -m server.manage_db migrate` before deployment. It does not import or seed.
+
+The old `/app/server/lankalens.db` was inside the application container. Excluding
+it from the image did **not** make it persistent. There is no production database
+file in the new application filesystem; PostgreSQL owns the data independently.
+The existing B2 configuration and image object keys must be retained unchanged.
 
 ### Serving the frontend separately (optional)
 
@@ -70,6 +85,8 @@ Either way, sign-in failures report the real cause inline on the form (HTTP
 status, unreachable API, non-JSON response) instead of a generic message.
 
 ## Demo accounts
+
+Created only by explicit `seed-demo` in local SQLite. Never seeded in PostgreSQL.
 
 | Role | Email | Password |
 |------|-------|----------|
@@ -222,7 +239,13 @@ never create two listings.
 ## Project layout
 
 ```
-server/app.py          Flask app: schema, seed data and JSON API
+server/app.py          Flask JSON API and explicit local demo seeder
+server/database.py     Database config, safe errors and PostgreSQL pooling
+server/schema.py       Versioned schema and indexes
+server/manage_db.py    Explicit backup/import/schema commands
+server/reference_data.py Reference catalog (not seeded at startup)
+docs/database-persistence.md Production backup/cutover/verification runbook
+tests/                Real PostgreSQL migration and restart integration tests
 server/requirements.txt
 index.html             SPA shell
 js/app.js              router + views + API client
