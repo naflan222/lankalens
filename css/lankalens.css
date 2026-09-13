@@ -198,7 +198,12 @@ button { font-family: inherit; }
    as provided: contain-fitted inside the mark box so its own proportions are
    never distorted, cropped or recoloured. The box itself is what scales
    responsively (38px nav / 62px auth / 48px short viewports). */
-.brand-mark { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+/* Every placement wraps the mark in a sized box (.brand 38px, drawer 44px,
+   auth 62/48px) — but the bare default below is the safety net: without it a
+   mark rendered outside those wrappers (e.g. the footer) would fall back to
+   the logo file's intrinsic 723×832 size and blow the page out horizontally
+   on phones. */
+.brand-mark { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; width: 38px; height: 38px; }
 .brand-mark img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .brand-mark svg { width: 100%; height: 100%; display: block; }
 .brand .brand-text { line-height: 1.05; }
@@ -373,6 +378,10 @@ button { font-family: inherit; }
   height: 44px; padding: 0 18px; border-radius: 12px;
   font-size: 14px; font-weight: 600; cursor: pointer;
   flex-shrink: 0;
+  /* The base reset gives every button width:100%; inside this flex row that
+     made the Search button swallow the whole bar and crush the input to zero
+     width (the search field vanished). Size it to its label instead. */
+  width: auto;
 }
 .search-hero button:active { background: var(--brand-dark); }
 /* Mobile keyboard: when the search field is focused on a phone, iOS Safari
