@@ -2,6 +2,11 @@
 
 Run `python -m server.manage_db --help`. SQLite input is opened read-only.
 Import DDL, records, verification, indexes and completion ledger commit together.
+
+`docker-entrypoint.sh` runs `wait-for-db` and then `migrate` as separate
+processes *before* Gunicorn imports the application; boot itself still only
+reads (`server.database.check_ready`). `init-empty` runs at startup only when an
+operator explicitly sets `DB_ALLOW_INIT_EMPTY` for a brand-new installation.
 """
 import argparse
 from contextlib import closing
@@ -316,8 +321,11 @@ def insert_reference(conn, pg):
 def init_empty():
     """Prepare a BRAND-NEW database: schema, indexes, constraints, reference data.
 
-    Explicit operator action only; application startup and pre-deploy never call
-    it. PostgreSQL safety rules:
+    Explicit operator action. Application startup, Gunicorn boot and Railway's
+    pre-deploy never call it; `docker-entrypoint.sh` calls it only when the
+    operator deliberately sets ``DB_ALLOW_INIT_EMPTY`` for a brand-new
+    installation, and that variable should be removed afterwards. PostgreSQL
+    safety rules:
 
     * The destination ``public`` schema must contain no tables at all. Any
       existing table aborts the command before any DDL is issued.
@@ -374,6 +382,48 @@ def init_empty():
     print("Fresh database explicitly initialized with schema, indexes and reference data only; no demo users, shops or listings.")
 
 
+def wait_seconds(value, default=60.0):
+    """Bounded startup window; an unusable override falls back to the default."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return default
+    return seconds if 0 < seconds <= 3600 else default
+
+
+def wait_for_db(timeout=None, interval=2.0):
+    """Read-only wait until PostgreSQL accepts connections. Called before boot.
+
+    ``docker-entrypoint.sh`` runs this so a container that starts before its
+    database service (both redeployed together, a database host migration, a
+    slow volume attach) retries for a bounded window instead of failing on the
+    first attempt. It issues only ``SELECT 1``: it never creates, alters, drops,
+    truncates or writes anything, and it never falls back to SQLite. On timeout
+    it raises a constant, credential-free message so the entrypoint can exit
+    non-zero and keep Gunicorn from starting against an absent database.
+    """
+    if timeout is None:
+        timeout = wait_seconds(os.getenv("DB_WAIT_SECONDS"), 60.0)
+    interval = wait_seconds(interval, 2.0)
+    deadline = time.monotonic() + timeout
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            with pg_connect() as conn:
+                conn.execute("SELECT 1").fetchone()
+            print(f"PostgreSQL accepted connections after {attempts} attempt(s); no data was read or changed.")
+            return
+        except Exception:
+            # Connectivity/driver details can contain host or credential fragments.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MigrationError(
+                    "PostgreSQL did not accept connections within the startup window; "
+                    "the application was not started and no records were changed") from None
+            time.sleep(min(interval, remaining))
+
+
 def migrate():
     """Version 1 is the baseline. Future reviewed additive migrations go here."""
     with pg_connect() as conn:
@@ -398,6 +448,9 @@ def main():
     backup.add_argument("--output", required=True)
     imp = sub.add_parser("import-sqlite", help="Atomic import into EMPTY PostgreSQL; never run init-empty first")
     imp.add_argument("--source", required=True)
+    sub.add_parser("wait-for-db",
+                   help="Read-only startup wait until PostgreSQL accepts connections "
+                        "(window: DB_WAIT_SECONDS, default 60); writes nothing")
     sub.add_parser("init-empty",
                    help="Prepare a brand-NEW installation (schema, indexes, constraints, "
                         "reference data); refuses if any table already exists; never drops data")
@@ -410,6 +463,8 @@ def main():
             print("Consistent backup complete. SHA256:", fingerprint(path))
         elif args.command == "import-sqlite":
             import_sqlite(args.source)
+        elif args.command == "wait-for-db":
+            wait_for_db()
         elif args.command == "init-empty":
             init_empty()
         elif args.command == "migrate":

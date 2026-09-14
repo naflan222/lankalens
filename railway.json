@@ -5,13 +5,10 @@
     "dockerfilePath": "Dockerfile"
   },
   "deploy": {
-    "startCommand": "gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --access-logfile - --error-logfile - server.app:app",
+    "startCommand": "/bin/sh /app/docker-entrypoint.sh",
     "healthcheckPath": "/api/health",
     "healthcheckTimeout": 120,
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 5,
-    "preDeployCommand": [
-      "/bin/sh -c \"python -m server.manage_db init-empty && python -m server.manage_db migrate\""
-    ]
+    "restartPolicyMaxRetries": 5
   }
 }
