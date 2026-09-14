@@ -305,19 +305,54 @@ Configure scheduled database backups and periodically test restores. Prefer
 separate migration-owner and least-privilege runtime roles: runtime needs DML on
 application tables, sequence usage and SELECT on the ledger, not DROP/CREATE.
 
-### Only for an intentionally NEW installation
+### Only for an intentionally NEW installation (no prior data to recover)
 
-```bash
-# DATABASE_URL already injected; knowingly starts a NEW marketplace.
-python -m server.manage_db init-empty --allow-empty
-```
+When there is no recoverable SQLite database and this is a genuinely new
+marketplace, prepare the Railway PostgreSQL database **exactly once, before the
+first deploy of this code** (the pre-deploy `migrate` gate fails closed on an
+unprepared database, which is intended):
 
-This inserts reference categories/locations/brands/settings, not users, demo
-shops/listings or an admin. Existing Lanka Lens installations must import instead.
-To bootstrap an admin for a new installation, create the real account through
-signup, then have the DBA promote only that verified account with a parameterized
-`UPDATE users SET is_admin=1 WHERE id=...` in the trusted DB console. No default
-production password is created. Imported existing admin flags remain unchanged.
+1. Provision the PostgreSQL service with a persistent volume, but do **not** run
+   `init-empty` inside the Flask container or as a startup/pre-deploy step.
+2. From a trusted machine, use the database service's public TLS endpoint:
+   Postgres service → **Variables** → `DATABASE_PUBLIC_URL` (append `sslmode=require`
+   if the URL does not already enforce TLS). The URL is supplied via environment
+   only, never as a CLI argument, in code, logs or chat.
+3. Run:
+
+   ```bash
+   export DATABASE_URL='postgresql://…@<host>.proxy.rlwy.net:<port>/railway?sslmode=require'
+   python -m server.manage_db init-empty   # schema + indexes + constraints + reference data
+   python -m server.manage_db migrate      # version gate; must print "current"
+   ```
+
+4. Then point the Flask service at the database with a Railway **variable
+   reference** — `DATABASE_URL=${{Postgres.DATABASE_URL}}`, replacing `Postgres`
+   with the actual database service name — keep `APP_ENV=production` and every
+   `B2_*` variable unchanged, and deploy. Verify `/api/health` returns 200 with
+   `"database": "postgresql"`.
+
+`init-empty` safety contract:
+
+- Creates all 28 application tables, their constraints and indexes, plus the
+  reference categories/locations, brands and default `site_settings` rows.
+- Creates **no** users, shops, listings, demo data or admin, and no default
+  password. To bootstrap an admin, create the real account through signup, then
+  have the DBA promote only that verified account with a parameterized
+  `UPDATE users SET is_admin=1 WHERE id=...` in the trusted DB console.
+- It is never invoked by application startup, gunicorn boot, or the pre-deploy
+  command; it only runs when an operator executes it explicitly.
+- It acquires the migration advisory lock and refuses to run if the PostgreSQL
+  `public` schema already contains any table; it never drops, truncates or
+  overwrites anything. Schema, reference data and the completion ledger commit in
+  one transaction; a failure rolls all of it back. Re-running on a prepared
+  database prints "already prepared" and changes nothing.
+- It does not read, create or recreate any SQLite database, and production keeps
+  refusing to run without PostgreSQL. It performs no B2 calls and never deletes
+  B2 objects; existing image objects and all `B2_*` configuration are untouched.
+
+Existing Lanka Lens installations with a recoverable SQLite backup must use
+`import-sqlite` instead. Imported existing admin flags remain unchanged.
 
 ## 6. Verification checklist and actual evidence
 
