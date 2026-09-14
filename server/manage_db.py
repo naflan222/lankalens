@@ -313,9 +313,21 @@ def insert_reference(conn, pg):
         write("INSERT INTO site_settings (key,value) VALUES (?,?)", (key, str(value)))
 
 
-def init_empty(allow_empty):
-    if not allow_empty:
-        raise MigrationError("Explicit --allow-empty required. Existing Lanka Lens installations must use import-sqlite instead")
+def init_empty():
+    """Prepare a BRAND-NEW database: schema, indexes, constraints, reference data.
+
+    Explicit operator action only; application startup and pre-deploy never call
+    it. PostgreSQL safety rules:
+
+    * The destination ``public`` schema must contain no tables at all. Any
+      existing table aborts the command before any DDL is issued.
+    * Nothing is ever dropped or truncated and no existing row is touched; an
+      aborted run rolls back completely.
+    * Schema, indexes, reference data and the completion ledger commit together
+      in one transaction under a transaction-scoped advisory lock.
+    * Re-running on an already prepared database is a no-op that changes
+      nothing and never duplicates reference rows.
+    """
     url = os.getenv("DATABASE_URL", "").strip()
     if url:
         with pg_connect() as conn:
@@ -325,14 +337,18 @@ def init_empty(allow_empty):
                 print("Database already prepared; nothing changed.")
                 return
             if tables:
-                raise MigrationError("Destination is not empty; use import-sqlite or reviewed additive migrations")
-            for ddl in statements(SCHEMA):
-                conn.execute(ddl_postgres(ddl))
-            for ddl in INDEXES:
-                conn.execute(ddl)
-            insert_reference(conn, True)
-            conn.execute(LEDGER_DDL)
-            conn.execute(f"INSERT INTO {LEDGER} VALUES (%s,%s,%s,%s)", (SCHEMA_VERSION, "explicit-empty", "{}", int(time.time())))
+                raise MigrationError(
+                    "Destination public schema is not empty; init-empty only prepares a brand-new "
+                    "database and never drops, truncates or overwrites existing tables")
+            with conn.transaction():
+                for ddl in statements(SCHEMA):
+                    conn.execute(ddl_postgres(ddl))
+                for ddl in INDEXES:
+                    conn.execute(ddl)
+                insert_reference(conn, True)
+                conn.execute(LEDGER_DDL)
+                conn.execute(f"INSERT INTO {LEDGER} VALUES (%s,%s,%s,%s)",
+                             (SCHEMA_VERSION, "explicit-empty", "{}", int(time.time())))
     else:
         from server.database import database
         # Database config has already refused SQLite in a production environment.
@@ -342,7 +358,7 @@ def init_empty(allow_empty):
                 if existing.execute("SELECT 1 FROM sqlite_master WHERE name=?", (LEDGER,)).fetchone():
                     print("Database already prepared; nothing changed.")
                     return
-            raise MigrationError("SQLite file already exists; preserve it and use import-sqlite for PostgreSQL")
+            raise MigrationError("SQLite file already exists but is not prepared; it is never overwritten")
         path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         os.close(fd)
@@ -353,8 +369,9 @@ def init_empty(allow_empty):
                 conn.execute(ddl)
             insert_reference(conn, False)
             conn.execute(LEDGER_DDL)
-            conn.execute(f"INSERT INTO {LEDGER} VALUES (?,?,?,?)", (SCHEMA_VERSION, "explicit-empty", "{}", int(time.time())))
-    print("Empty database explicitly initialized with reference data only; no demo users, shops or listings.")
+            conn.execute(f"INSERT INTO {LEDGER} VALUES (?,?,?,?)",
+                         (SCHEMA_VERSION, "explicit-empty", "{}", int(time.time())))
+    print("Fresh database explicitly initialized with schema, indexes and reference data only; no demo users, shops or listings.")
 
 
 def migrate():
@@ -381,8 +398,9 @@ def main():
     backup.add_argument("--output", required=True)
     imp = sub.add_parser("import-sqlite", help="Atomic import into EMPTY PostgreSQL; never run init-empty first")
     imp.add_argument("--source", required=True)
-    init = sub.add_parser("init-empty", help="NEW installations only; not a migration")
-    init.add_argument("--allow-empty", action="store_true")
+    sub.add_parser("init-empty",
+                   help="Prepare a brand-NEW installation (schema, indexes, constraints, "
+                        "reference data); refuses if any table already exists; never drops data")
     sub.add_parser("migrate", help="Explicit, idempotent PostgreSQL schema version check/upgrades")
     sub.add_parser("seed-demo", help="Local SQLite only; explicitly add demo accounts/listings")
     args = parser.parse_args()
@@ -393,7 +411,7 @@ def main():
         elif args.command == "import-sqlite":
             import_sqlite(args.source)
         elif args.command == "init-empty":
-            init_empty(args.allow_empty)
+            init_empty()
         elif args.command == "migrate":
             migrate()
         elif args.command == "seed-demo":

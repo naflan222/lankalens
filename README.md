@@ -19,9 +19,9 @@ cameras, lenses, drones, action cameras and accessories, priced in rupees.
 ```bash
 pip install -r server/requirements.txt
 # LOCAL development, with DATABASE_URL and production/Railway variables unset:
-python3 -m server.manage_db init-empty --allow-empty
+python3 -m server.manage_db init-empty
 python3 -m server.manage_db seed-demo  # optional, local SQLite only
-python3 server/app.py                 # serves on http://localhost:8000
+python3 server/app.py                  # serves on http://localhost:8000
 ```
 
 Open **http://localhost:8000** — Flask serves both the SPA and the JSON API from
@@ -53,6 +53,28 @@ volume. Docker sets `APP_ENV=production`; Railway variables also activate the
 production guard. Missing/invalid PostgreSQL configuration fails closed rather
 than falling back to SQLite. `railway.json` runs the idempotent schema gate
 `python -m server.manage_db migrate` before deployment. It does not import or seed.
+
+**Brand-new installation (no prior data): initialize PostgreSQL exactly once,
+before the first deploy of this code.** The pre-deploy gate deliberately fails
+on an uninitialized database, so run the explicit command from a trusted machine
+that can reach the database's public TLS URL:
+
+```bash
+# Railway Postgres service -> Variables -> copy DATABASE_PUBLIC_URL (TLS endpoint).
+# DATABASE_URL is read from the environment only; never pass it as an argument.
+export DATABASE_URL='postgresql://…@xxxx.proxy.rlwy.net:PORT/railway?sslmode=require'
+python -m server.manage_db init-empty   # creates all tables/indexes/constraints + reference data
+python -m server.manage_db migrate      # version gate; must print "current"
+```
+
+`init-empty` never runs at application startup, never drops or truncates
+anything, and refuses if the `public` schema already contains any table;
+re-running it on a prepared database is a no-op. It creates no users, shops,
+listings or admin — bootstrap the first admin by signing up through the site and
+promoting that account with a parameterized `UPDATE users SET is_admin=1 ...`.
+Existing installations with a recoverable SQLite database must use
+`import-sqlite` instead (see the runbook); this project never recreates or
+falls back to SQLite in production.
 
 The old `/app/server/lankalens.db` was inside the application container. Excluding
 it from the image did **not** make it persistent. There is no production database

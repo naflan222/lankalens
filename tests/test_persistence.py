@@ -3,13 +3,17 @@ import json
 import sqlite3
 import subprocess
 import sys
+import uuid
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
+from psycopg import sql
 import pytest
 import requests
 
 from server.manage_db import (import_sqlite, MigrationError, verify_rows, inspect_source,
                               destination_tables, fingerprint, snapshot)
+from server.reference_data import DEFAULT_SETTINGS
 from server.schema import TABLES
 from conftest import B2_KEY, PASSWORD, ROOT, cli, clean_env, running_app
 
@@ -194,7 +198,6 @@ def test_production_refuses_sqlite_and_missing_schema(pg_url, tmp_path):
     assert r.returncode != 0 and "not prepared" in r.stderr
     with psycopg.connect(pg_url) as pg:
         assert not destination_tables(pg)
-    assert cli(pg_url, "init-empty").returncode == 1
 
 
 def test_connection_failure_does_not_expose_credentials_or_fallback(tmp_path):
@@ -231,8 +234,8 @@ with app.test_client() as c:
 def test_local_sqlite_explicit_init_and_restarts(tmp_path):
     path = tmp_path / "local.sqlite3"
     extra = {"SQLITE_PATH": str(path)}
-    assert cli(None, "init-empty", "--allow-empty", extra=extra).returncode == 0
-    assert cli(None, "init-empty", "--allow-empty", extra=extra).returncode == 0
+    assert cli(None, "init-empty", extra=extra).returncode == 0
+    assert cli(None, "init-empty", extra=extra).returncode == 0
     assert cli(None, "seed-demo", extra=extra).returncode == 0
     for _ in range(2):
         with running_app(None, tmp_path, sqlite_path=path) as base:
@@ -299,15 +302,76 @@ def test_concurrent_imports_are_serialized(pg_url, legacy_sqlite):
         assert pg.execute("SELECT COUNT(*) FROM ll_schema_migrations").fetchone()[0] == 1
 
 
-def test_fresh_initialization_is_explicit_and_idempotent(pg_url):
-    assert cli(pg_url, "init-empty").returncode == 1
-    assert cli(pg_url, "init-empty", "--allow-empty").returncode == 0
-    assert cli(pg_url, "init-empty", "--allow-empty").returncode == 0
+def test_fresh_initialization_is_explicit_idempotent_and_boots(pg_url, tmp_path):
+    # The bare explicit command prepares a brand-new empty PostgreSQL database.
+    first = cli(pg_url, "init-empty")
+    assert first.returncode == 0, first.stderr
+    # Re-running is a safe no-op: no duplicated reference rows, no error.
+    second = cli(pg_url, "init-empty")
+    assert second.returncode == 0, second.stderr
+    assert "already prepared" in second.stdout
+    # Demo seeding stays a local-SQLite-only operation.
     assert cli(pg_url, "seed-demo").returncode == 1
+    # The version gate used by Railway pre-deploy passes after initialization.
+    assert cli(pg_url, "migrate").returncode == 0
     with psycopg.connect(pg_url) as pg:
+        # No marketplace accounts/data are fabricated.
         assert pg.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         assert pg.execute("SELECT COUNT(*) FROM listings").fetchone()[0] == 0
+        assert pg.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0
+        # All required reference/default data is present.
         assert pg.execute("SELECT COUNT(*) FROM categories").fetchone()[0] == 37
+        assert pg.execute("SELECT COUNT(*) FROM brands").fetchone()[0] == 20
+        assert pg.execute("SELECT COUNT(*) FROM provinces").fetchone()[0] == 9
+        assert pg.execute("SELECT COUNT(*) FROM site_settings").fetchone()[0] == len(DEFAULT_SETTINGS)
+        assert pg.execute("SELECT COUNT(*) FROM ll_schema_migrations").fetchone()[0] == 1
+        # Every application table exists (constraints/indexes come with the schema DDL).
+        found = {r[0] for r in pg.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+        assert set(TABLES) <= found
+        index_count = pg.execute("SELECT count(*) FROM pg_indexes WHERE schemaname='public'").fetchone()[0]
+        assert index_count >= len(TABLES)
+    # The application then boots normally in production mode and passes readiness.
+    with running_app(pg_url, tmp_path) as base:
+        health = requests.get(base + "/api/health", timeout=10).json()["data"]
+        assert health["status"] == "up"
+        assert health["database"] == "postgresql"
+        meta = api(base, "/api/meta")
+        assert meta["categories"] and meta["brands"]
+        assert api(base, "/api/listings")["total"] == 0
+        # The first real account gets a normal, non-reused ID.
+        signup = api(base, "/api/auth/signup", "POST", json={
+            "name": "First Owner", "email": "owner@example.test", "password": PASSWORD})
+        assert signup["user"]["id"] == 1
+        assert api(base, "/api/auth/login", "POST",
+                  json={"email": "owner@example.test", "password": PASSWORD})["user"]["id"] == 1
+    # A third init after live writes still changes nothing (fix-forward safety).
+    third = cli(pg_url, "init-empty")
+    assert third.returncode == 0 and "already prepared" in third.stdout
+
+
+def test_init_refuses_nonempty_database_without_dropping_anything(postgres):
+    """init-empty must never become a destructive operation on a used database."""
+    name = "ll_test_" + uuid.uuid4().hex[:12]
+    with psycopg.connect(postgres.get_uri(), autocommit=True) as admin:
+        admin.execute(sql.SQL("CREATE DATABASE {}").format(sql.Identifier(name)))
+    uri = urlsplit(postgres.get_uri())
+    url = urlunsplit((uri.scheme, uri.netloc, "/" + name, uri.query, uri.fragment))
+    try:
+        with psycopg.connect(url, autocommit=True) as pg:
+            pg.execute("CREATE TABLE keep_existing (id BIGINT PRIMARY KEY, note TEXT)")
+            pg.execute("INSERT INTO keep_existing VALUES (1, 'must survive a refused init')")
+        result = cli(url, "init-empty")
+        assert result.returncode == 1
+        assert "not empty" in result.stderr
+        with psycopg.connect(url) as pg:
+            # Nothing was dropped, truncated, or created.
+            assert pg.execute("SELECT note FROM keep_existing WHERE id=1").fetchone()[0] == \
+                "must survive a refused init"
+            tables = {r[0] for r in pg.execute("SELECT tablename FROM pg_tables WHERE schemaname='public'")}
+            assert tables == {"keep_existing"}
+    finally:
+        with psycopg.connect(postgres.get_uri(), autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
 
 
 def test_application_startup_performs_no_database_writes(pg_url, legacy_sqlite):
