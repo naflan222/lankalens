@@ -15,11 +15,16 @@ import sys
 import secrets
 import hashlib
 import uuid
+import threading
+import smtplib
+from email.message import EmailMessage
 from datetime import datetime, timezone
 from functools import wraps
 
 from flask import Flask, request, jsonify, g, abort, send_from_directory
 from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
 
 # Support both `python server/app.py` and `gunicorn server.app:app`.
@@ -237,17 +242,23 @@ def execute(sql, args=()):
 # Helpers
 # ---------------------------------------------------------------------------
 def hash_password(pw):
-    salt = secrets.token_hex(16)
-    h = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 120_000).hex()
-    return f"{salt}${h}"
+    """Create a modern password hash. Existing PBKDF2 hashes remain readable."""
+    return generate_password_hash(pw, method="scrypt")
 
 
 def verify_password(pw, stored):
     try:
+        if stored.startswith(("scrypt:", "pbkdf2:")):
+            return check_password_hash(stored, pw)
         salt, h = stored.split("$", 1)
-        return hmac_compare(h, hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 120_000).hex())
+        candidate = hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 120_000).hex()
+        return hmac_compare(h, candidate)
     except Exception:
         return False
+
+
+def password_needs_rehash(stored):
+    return not (stored or "").startswith("scrypt:")
 
 
 def hmac_compare(a, b):
@@ -799,20 +810,28 @@ def notify(user_id, type_, title, body, link="", dedupe=None):
         (user_id, type_, title, body, link, now()))
 
 
+def token_digest(token):
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def make_token(user_id, kind, value="", ttl=3600):
-    token = secrets.token_hex(32)
+    token = secrets.token_urlsafe(32)
     execute("DELETE FROM tokens WHERE user_id = ? AND kind = ?", (user_id, kind))
     execute("INSERT INTO tokens (token, user_id, kind, value, created_at, expires_at) VALUES (?,?,?,?,?,?)",
-            (token, user_id, kind, value, now(), now() + ttl))
+            (token_digest(token), user_id, kind, value, now(), now() + ttl))
     return token
 
 
 def consume_token(token, kind):
-    row = query("SELECT * FROM tokens WHERE token = ? AND kind = ?", (token, kind), one=True)
+    digest = token_digest(token)
+    row = query("SELECT * FROM tokens WHERE token = ? AND kind = ?", (digest, kind), one=True)
+    if not row:
+        # One-release compatibility for tokens created before hashing-at-rest.
+        row = query("SELECT * FROM tokens WHERE token = ? AND kind = ?", (token, kind), one=True)
     if not row:
         return None
     if row["expires_at"] and row["expires_at"] < now():
-        execute("DELETE FROM tokens WHERE token = ?", (token,))
+        execute("DELETE FROM tokens WHERE token = ?", (row["token"],))
         return None
     return row
 
@@ -933,23 +952,36 @@ def has_urgent_badge(listing_id):
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
+def request_token():
+    value = request.headers.get("Authorization", "")
+    return value[7:].strip() if value.startswith("Bearer ") else ""
+
+
 def current_user():
-    token = request.headers.get("Authorization", "")
-    if token.startswith("Bearer "):
-        token = token[7:]
+    token = request_token()
     if not token:
         return None
     ts = now()
+    digest = token_digest(token)
     row = query(
         "SELECT u.*, s.expires_at AS session_expires_at FROM sessions s "
         "JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at IS NOT NULL AND s.expires_at > ?",
-        (token, ts), one=True)
+        (digest, ts), one=True)
+    if not row:
+        # Accept an existing plaintext session once, then migrate it in place.
+        row = query(
+            "SELECT u.*, s.expires_at AS session_expires_at FROM sessions s "
+            "JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at IS NOT NULL AND s.expires_at > ?",
+            (token, ts), one=True)
+        if row:
+            execute("UPDATE sessions SET token = ? WHERE token = ?", (digest, token))
     if not row:
         return None
     # Sliding window: an active user is never logged out mid-session, but a
     # token that stops being used expires.
     if row["session_expires_at"] - ts < SESSION_RENEW_WINDOW:
-        execute("UPDATE sessions SET expires_at = ? WHERE token = ?", (ts + SESSION_TTL_DAYS * 86400, token))
+        execute("UPDATE sessions SET expires_at = ? WHERE token = ?",
+                (ts + SESSION_TTL_DAYS * 86400, digest))
     return row
 
 
@@ -982,7 +1014,8 @@ def admin_only(fn):
 # ---------------------------------------------------------------------------
 # Rate limiting (in-memory, per client IP)
 # ---------------------------------------------------------------------------
-_RATE = {}  # ip -> list of timestamps
+_RATE = {}  # (endpoint, client IP) -> timestamps
+_RATE_LOCK = threading.Lock()
 
 
 def rate_limit(limit, window=60):
@@ -997,14 +1030,23 @@ def rate_limit(limit, window=60):
 
         @wraps(fn)
         def wrapper(*args, **kwargs):
-            ip = request.headers.get("X-Forwarded-For", request.remote_addr or "unknown").split(",")[0].strip()
+            ip = request.remote_addr or "unknown"
             key = f"{bucket_name}:{ip}"
             t = now()
-            bucket = [x for x in _RATE.get(key, []) if x > t - window]
-            if len(bucket) >= limit:
-                abort(429, description="Too many attempts — please wait a minute and try again")
-            bucket.append(t)
-            _RATE[key] = bucket
+            with _RATE_LOCK:
+                bucket = [x for x in _RATE.get(key, []) if x > t - window]
+                if len(bucket) >= limit:
+                    abort(429, description="Too many attempts — please wait and try again")
+                bucket.append(t)
+                _RATE[key] = bucket
+                if len(_RATE) > 10000:
+                    cutoff = t - max(window, 3600)
+                    for old_key in list(_RATE)[:2000]:
+                        kept = [x for x in _RATE[old_key] if x > cutoff]
+                        if kept:
+                            _RATE[old_key] = kept
+                        else:
+                            _RATE.pop(old_key, None)
             return fn(*args, **kwargs)
         return wrapper
     return deco
@@ -1064,6 +1106,8 @@ def user_payload(u):
 # App
 # ---------------------------------------------------------------------------
 app = Flask(__name__)
+# Railway terminates TLS at exactly one reverse-proxy hop.
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024
 
 
@@ -1280,7 +1324,7 @@ def handle_unexpected_error(e):
 # token based (Authorization: Bearer …) and never uses cookies, so a permissive
 # Allow-Origin does not expose session credentials. Set LL_CORS_ORIGINS to
 # restrict it, e.g. LL_CORS_ORIGINS=https://lankalens.lk
-CORS_ORIGINS = [o.strip() for o in os.environ.get("LL_CORS_ORIGINS", "*").split(",") if o.strip()]
+CORS_ORIGINS = [o.strip() for o in os.environ.get("LL_CORS_ORIGINS", "").split(",") if o.strip()]
 
 
 @app.after_request
@@ -1313,7 +1357,17 @@ def add_security_headers(resp):
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     resp.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
-    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
+    resp.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; "
+        "form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'"
+    )
+    if database.production:
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    if request.path.startswith("/api/"):
+        resp.headers.setdefault("Cache-Control", "no-store")
     if request.path.startswith("/uploads/"):
         resp.headers.setdefault("Content-Disposition", "inline")
         resp.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -1531,8 +1585,7 @@ def health():
         storage = "local disk (uploads/) — B2 disabled, missing: %s" % (
             ", ".join(b2_missing_env()) or "none")
     query("SELECT 1 AS ready", one=True)
-    return ok({"status": "up", "time": now(), "storage": storage,
-               "database": database.backend})
+    return ok({"status": "up"})
 
 
 @app.route("/api/meta")
@@ -2142,18 +2195,12 @@ def renew_listing(lid):
 
 @app.route("/api/listings/<int:lid>/promote", methods=["POST"])
 def promote_listing(lid):
-    u = require_auth()
-    row = query("SELECT * FROM listings WHERE id = ?", (lid,), one=True)
-    if not row:
-        return err("Listing not found", 404)
-    if row["user_id"] != u["id"] and not u["is_admin"]:
-        return err("Not allowed", 403)
-    execute("UPDATE listings SET featured = 1, updated_at = ? WHERE id = ?", (now(), lid))
-    notify(u["id"], "promotion", "Listing promoted", f"“{row['title']}” is now featured on the homepage.", f"#/ads/{lid}")
-    return ok({"id": lid, "featured": True})
+    require_auth()
+    return err("Use the promotion purchase flow", 410)
 
 
 @app.route("/api/listings/<int:lid>/contact", methods=["POST"])
+@rate_limit(120, 3600)
 def contact_listing(lid):
     u = current_user()
     body = request.get_json(silent=True) or {}
@@ -2168,6 +2215,7 @@ def contact_listing(lid):
 
 
 @app.route("/api/listings/<int:lid>/report", methods=["POST"])
+@rate_limit(10, 3600)
 def report_listing(lid):
     u = current_user()
     body = request.get_json(silent=True) or {}
@@ -2601,9 +2649,16 @@ def change_password():
     if not verify_password(body.get("old") or "", u["password_hash"]):
         return err("Current password is incorrect", 401)
     new = (body.get("new") or "").strip()
-    if len(new) < 6:
-        return err("New password must be at least 6 characters")
+    if len(new) < 12:
+        return err("New password must be at least 12 characters")
     execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(new), u["id"]))
+    current = request_token()
+    if current:
+        digest = token_digest(current)
+        execute("DELETE FROM sessions WHERE user_id = ? AND token NOT IN (?, ?)", (u["id"], digest, current))
+        execute("UPDATE sessions SET token = ? WHERE user_id = ? AND token = ?", (digest, u["id"], current))
+    else:
+        execute("DELETE FROM sessions WHERE user_id = ?", (u["id"],))
     return ok({"changed": True})
 
 
@@ -2885,6 +2940,63 @@ def business_page(slug):
     })
 
 
+
+# ---------------------------------------------------------------------------
+# SMTP email — disabled safely until required environment variables are set
+# ---------------------------------------------------------------------------
+def smtp_configured():
+    required = ("SMTP_HOST", "SMTP_FROM_EMAIL", "LL_PUBLIC_URL")
+    return all(os.environ.get(name, "").strip() for name in required)
+
+
+def send_email(to_address, subject, text):
+    if not smtp_configured():
+        app.logger.warning("Email not sent: SMTP_HOST, SMTP_FROM_EMAIL and LL_PUBLIC_URL are required")
+        return False
+    host = os.environ["SMTP_HOST"].strip()
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    username = os.environ.get("SMTP_USERNAME", "").strip()
+    password = os.environ.get("SMTP_PASSWORD", "")
+    use_ssl = os.environ.get("SMTP_USE_SSL", "").lower() in ("1", "true", "yes") or port == 465
+    use_starttls = os.environ.get("SMTP_STARTTLS", "true").lower() in ("1", "true", "yes")
+    msg = EmailMessage()
+    msg["From"] = os.environ["SMTP_FROM_EMAIL"].strip()
+    msg["To"] = to_address
+    msg["Subject"] = subject
+    msg.set_content(text)
+    try:
+        smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
+        with smtp_cls(host, port, timeout=10) as client:
+            if not use_ssl and use_starttls:
+                client.starttls()
+            if username:
+                client.login(username, password)
+            client.send_message(msg)
+        return True
+    except Exception as exc:
+        app.logger.error("SMTP delivery failed: %s", exc.__class__.__name__)
+        return False
+
+
+def auth_link(route, token):
+    base = os.environ.get("LL_PUBLIC_URL", "").strip().rstrip("/")
+    return f"{base}/#/{route}?token={token}"
+
+
+def send_reset_email(email, token):
+    return send_email(email, "Reset your Lanka Lens password",
+                      "A password reset was requested for your account.\n\n"
+                      f"Open this link within 60 minutes:\n{auth_link('reset-password', token)}\n\n"
+                      "If you did not request this, ignore this email.")
+
+
+def send_verification_email(email, token):
+    return send_email(email, "Verify your Lanka Lens email",
+                      "Verify your email address within 24 hours:\n\n"
+                      f"{auth_link('verify-email', token)}\n\n"
+                      "If you did not create this account, ignore this email.")
+
+
 # ---------------------------------------------------------------------------
 # Auth endpoints
 # ---------------------------------------------------------------------------
@@ -2912,8 +3024,8 @@ def signup():
         return err("Please enter your name")
     if not EMAIL_RE.match(email):
         return err("Please enter a valid email")
-    if len(password) < 6:
-        return err("Password must be at least 6 characters")
+    if len(password) < 12:
+        return err("Password must be at least 12 characters")
     if query("SELECT id FROM users WHERE email = ?", (email,), one=True):
         return err("An account with this email already exists", 409)
     if query("SELECT id FROM banned_emails WHERE email = ?", (email,), one=True):
@@ -2925,17 +3037,16 @@ def signup():
         "INSERT INTO users (name, email, password_hash, phone, whatsapp, seller_type, email_verified, created_at) VALUES (?,?,?,?,?,?,0,?)",
         (name, email, hash_password(password), (body.get("phone") or "").strip(),
          (body.get("whatsapp") or "").strip(), seller_type, now()))
-    token = secrets.token_hex(32)
+    token = secrets.token_urlsafe(32)
     execute("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-            (token, uid, now(), now() + SESSION_TTL_DAYS * 86400))
+            (token_digest(token), uid, now(), now() + SESSION_TTL_DAYS * 86400))
     u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
 
-    # Email verification: token emailed in production; exposed in `dev` for local testing.
     vtoken = make_token(uid, "email", ttl=86400)
-    return ok({
-        "token": token, "user": user_payload(u),
-        "dev": {"verify_email_token": vtoken, "verify_email_link": f"#/verify-email?token={vtoken}"},
-    })
+    sent = send_verification_email(email, vtoken)
+    if not sent:
+        execute("DELETE FROM tokens WHERE token = ?", (token_digest(vtoken),))
+    return ok({"token": token, "user": user_payload(u), "verification_sent": sent})
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -2961,17 +3072,20 @@ def login():
     if u.get("status") == "suspended":
         return err("This account has been suspended. Contact support.", 403)
 
-    token = secrets.token_hex(32)
+    if password_needs_rehash(u["password_hash"]):
+        execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(password), u["id"]))
+    token = secrets.token_urlsafe(32)
     execute("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
-            (token, u["id"], now(), now() + SESSION_TTL_DAYS * 86400))
+            (token_digest(token), u["id"], now(), now() + SESSION_TTL_DAYS * 86400))
     return ok({"token": token, "user": user_payload(u)})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
 def logout():
-    token = request.headers.get("Authorization", "")
-    if token.startswith("Bearer "):
-        execute("DELETE FROM sessions WHERE token = ?", (token[7:],))
+    token = request_token()
+    if token:
+        execute("DELETE FROM sessions WHERE token = ? OR token = ?",
+                (token_digest(token), token))
     return ok({"logged_out": True})
 
 
@@ -2986,14 +3100,15 @@ def forgot_password():
     if missing:
         return missing
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
-    if not u:
-        # Do not reveal whether the email exists.
-        return ok({"sent": True, "dev": None})
-    token = make_token(u["id"], "reset", ttl=3600)
-    return ok({"sent": True, "dev": {"reset_token": token, "reset_link": f"#/reset-password?token={token}"}})
+    if u and smtp_configured():
+        token = make_token(u["id"], "reset", ttl=3600)
+        if not send_reset_email(email, token):
+            execute("DELETE FROM tokens WHERE token = ?", (token_digest(token),))
+    return ok({"sent": True})
 
 
 @app.route("/api/auth/reset", methods=["POST"])
+@rate_limit(10, 300)
 def reset_password():
     body, bad = json_body()
     if bad:
@@ -3006,10 +3121,11 @@ def reset_password():
     if not row:
         return err("This reset link is invalid or has expired", 400)
     new = (body.get("password") or "").strip()
-    if len(new) < 6:
-        return err("Password must be at least 6 characters")
+    if len(new) < 12:
+        return err("Password must be at least 12 characters")
     execute("UPDATE users SET password_hash = ? WHERE id = ?", (hash_password(new), row["user_id"]))
-    execute("DELETE FROM tokens WHERE token = ?", (token,))
+    execute("DELETE FROM tokens WHERE token = ? OR token = ?", (token_digest(token), token))
+    execute("DELETE FROM sessions WHERE user_id = ?", (row["user_id"],))
     return ok({"reset": True})
 
 
@@ -3031,35 +3147,44 @@ def verify_email():
 
 
 @app.route("/api/auth/resend-verification", methods=["POST"])
+@rate_limit(5, 3600)
 def resend_verification():
     u = require_auth()
     if u.get("email_verified"):
         return ok({"verified": True, "dev": None})
     token = make_token(u["id"], "email", ttl=86400)
-    return ok({"sent": True, "dev": {"verify_email_token": token, "verify_email_link": f"#/verify-email?token={token}"}})
+    sent = send_verification_email(u["email"], token)
+    if not sent:
+        execute("DELETE FROM tokens WHERE token = ?", (token_digest(token),))
+    return ok({"sent": True})
 
 
 @app.route("/api/auth/verify-phone/request", methods=["POST"])
+@rate_limit(5, 3600)
 def request_phone_code():
     u = require_auth()
     body = request.get_json(silent=True) or {}
     phone = (body.get("phone") or "").strip()
     if not phone:
         return err("Please enter your phone number")
+    if database.production or os.environ.get("LL_ALLOW_DEV_TOKENS") != "1":
+        return err("Phone verification service is not configured", 503)
     otp = f"{secrets.randbelow(1000000):06d}"
-    make_token(u["id"], "phone", value=otp, ttl=600)
+    make_token(u["id"], "phone", value=token_digest(otp), ttl=600)
     execute("UPDATE users SET phone = ?, phone_verified = 0 WHERE id = ?", (phone, u["id"]))
-    # Production would send via SMS; expose in dev for local testing.
     return ok({"sent": True, "dev": {"code": otp}})
 
 
 @app.route("/api/auth/verify-phone", methods=["POST"])
+@rate_limit(10, 600)
 def verify_phone():
     u = require_auth()
     body = request.get_json(silent=True) or {}
     code = (body.get("code") or "").strip()
     row = query("SELECT * FROM tokens WHERE user_id = ? AND kind = 'phone' ORDER BY created_at DESC LIMIT 1", (u["id"],), one=True)
-    if not row or row["value"] != code:
+    if database.production or os.environ.get("LL_ALLOW_DEV_TOKENS") != "1":
+        return err("Phone verification service is not configured", 503)
+    if not row or not hmac_compare(row["value"], token_digest(code)):
         return err("Incorrect code")
     if row["expires_at"] and row["expires_at"] < now():
         return err("This code has expired")
@@ -3091,6 +3216,7 @@ def post_detail(slug):
 
 
 @app.route("/api/contact", methods=["POST"])
+@rate_limit(5, 3600)
 def contact():
     body = request.get_json(silent=True) or {}
     name = (body.get("name") or "").strip()
@@ -3211,6 +3337,7 @@ def process_image(data, ext, max_dim=1600, thumb_dim=420):
 
 
 @app.route("/api/upload", methods=["POST"])
+@rate_limit(30, 3600)
 def upload():
     require_auth()
     files = request.files.getlist("files") or ([request.files["file"]] if "file" in request.files else [])
@@ -3379,7 +3506,9 @@ def _apply_promotion_from_payment(payment, pkg=None):
 
 @app.route("/api/payments/<int:pid>/simulate", methods=["POST"])
 def simulate_payment(pid):
-    """Dev-only helper: mark a manual payment successful and apply its promotion."""
+    """Local-only helper; production must use a verified provider webhook."""
+    if database.production or os.environ.get("LL_ALLOW_PAYMENT_SIMULATION") != "1":
+        abort(404)
     u = require_auth()
     pay = query("SELECT * FROM payments WHERE id = ?", (pid,), one=True)
     if not pay:
@@ -3960,12 +4089,21 @@ ADMIN_SETTINGS_KEYS = [
 @app.route("/api/admin/settings", methods=["GET", "PUT"])
 def admin_settings():
     require_admin()
+
+    def safe_settings():
+        values = get_settings()
+        if values.get("payment_webhook_secret"):
+            values["payment_webhook_secret"] = "********"
+        return values
+
     if request.method == "GET":
-        return ok({"settings": get_settings(), "promotions": promotion_prices()})
+        return ok({"settings": safe_settings(), "promotions": promotion_prices()})
     body = request.get_json(silent=True) or {}
     for key in ADMIN_SETTINGS_KEYS:
         if key in body:
             val = body[key]
+            if key == "payment_webhook_secret" and val == "********":
+                continue
             # Enforce hard cap of 3 for image limit per listing (task requirement)
             if key == "max_images_per_listing":
                 try:
@@ -3978,7 +4116,7 @@ def admin_settings():
                 except (TypeError, ValueError):
                     val = "3"
             set_setting(key, val)
-    return ok({"settings": get_settings(), "promotions": promotion_prices()})
+    return ok({"settings": safe_settings(), "promotions": promotion_prices()})
 
 
 # ---------------------------------------------------------------------------

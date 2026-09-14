@@ -14,6 +14,34 @@
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+
+  // Allow basic article formatting without allowing scripts, event handlers,
+  // embedded objects, unsafe URLs, or arbitrary attributes.
+  function sanitizeRichHtml(input) {
+    var template = document.createElement('template');
+    template.innerHTML = String(input || '');
+    var allowed = {
+      P: 1, BR: 1, H2: 1, H3: 1, H4: 1, UL: 1, OL: 1, LI: 1,
+      STRONG: 1, EM: 1, B: 1, I: 1, BLOCKQUOTE: 1, A: 1
+    };
+    Array.prototype.slice.call(template.content.querySelectorAll('*')).forEach(function (el) {
+      if (!allowed[el.tagName]) {
+        el.replaceWith(document.createTextNode(el.textContent || ''));
+        return;
+      }
+      var raw = el.tagName === 'A' ? (el.getAttribute('href') || '') : '';
+      Array.prototype.slice.call(el.attributes).forEach(function (attr) {
+        el.removeAttribute(attr.name);
+      });
+      if (el.tagName === 'A') {
+        if (/^(https?:|mailto:|\/|#)/i.test(raw)) {
+          el.setAttribute('href', raw);
+          el.setAttribute('rel', 'noopener noreferrer');
+        }
+      }
+    });
+    return template.innerHTML;
+  }
   function icon(name, cls) {
     return '<ion-icon name="' + name + '"' + (cls ? ' class="' + cls + '"' : '') + '></ion-icon>';
   }
@@ -239,6 +267,7 @@
   function storeDel(key) { try { window.localStorage.removeItem(key); } catch (e) {} }
   function sessGet(key) { try { return window.sessionStorage.getItem(key); } catch (e) { return null; } }
   function sessSet(key, val) { try { window.sessionStorage.setItem(key, val); } catch (e) {} }
+  function sessDel(key) { try { window.sessionStorage.removeItem(key); } catch (e) {} }
 
   /* ---------- api ----------
      The SPA is normally served by the Flask app itself, so a relative base is
@@ -320,7 +349,12 @@
   var api = {
     base: '/api',
     baseExplicit: false,
-    token: (storeGet('ll_token') || '').replace(/^undefined$|^null$/, ''),
+    token: (function () {
+      var token = (sessGet('ll_token') || storeGet('ll_token') || '').replace(/^undefined$|^null$/, '');
+      if (token) sessSet('ll_token', token);
+      storeDel('ll_token'); // one-time migration away from persistent localStorage
+      return token;
+    }()),
     req: function (method, path, body) {
       var headers = {};
       if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -412,6 +446,7 @@
   function clearSession() {
     api.token = '';
     storeDel('ll_token');
+    sessDel('ll_token');
     state.user = null;
     state.favIds = [];
   }
@@ -2097,10 +2132,8 @@
           label: p.name + ' — ' + fmtLKR(p.price) + ' · ' + p.duration_days + ' days',
           onClick: function () {
             api.post('/promotions/purchase', { listing_id: id, type: p.type }).then(function (r) {
-              return api.post('/payments/' + r.payment_id + '/simulate').then(function () {
-                toast(p.name + ' activated!', 'success');
-                views.myAdsRemount();
-              });
+              toast('Payment request created: ' + r.transaction_id, 'success');
+              views.myAdsRemount();
             }).catch(function (e) { toast(e.message, 'error'); });
           }
         };
@@ -2667,7 +2700,8 @@
       throw apiError('The server did not return your account details. Please try again.', 0);
     }
     api.token = d.token;
-    storeSet('ll_token', d.token);
+    sessSet('ll_token', d.token);
+    storeDel('ll_token');
     setUser(d.user);
     return d;
   }
@@ -2737,7 +2771,7 @@
       '<div class="form-group"><label for="su-name">Full name</label><input class="input" id="su-name" name="name" required placeholder="Your name" autocomplete="name"></div>' +
       '<div class="form-group"><label for="su-email">Email</label><input class="input" id="su-email" type="email" name="email" required placeholder="you@example.com" autocomplete="email" autocapitalize="none" autocorrect="off" spellcheck="false"></div>' +
       '<div class="form-group"><label for="su-phone">Phone (optional)</label><input class="input" id="su-phone" type="tel" name="phone" placeholder="+94 77 123 4567" autocomplete="tel" inputmode="tel"></div>' +
-      '<div class="form-group"><label for="su-password">Password</label><input class="input" id="su-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
+      '<div class="form-group"><label for="su-password">Password</label><input class="input" id="su-password" type="password" name="password" required minlength="12" placeholder="at least 12 characters" autocomplete="new-password"></div>' +
       '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
       '<div class="opt active" data-stype="individual" role="button" tabindex="0">Individual</div>' +
       '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div>' +
@@ -2780,7 +2814,7 @@
 
           if (name.length < 2) { showFormError(form, 'Please enter your name.'); $('[name="name"]', form).focus(); return; }
           if (!EMAIL_RE_CLIENT.test(email)) { showFormError(form, 'Please enter a valid email address.'); $('[name="email"]', form).focus(); return; }
-          if (pw.length < 6) { showFormError(form, 'Password must be at least 6 characters.'); $('[name="password"]', form).focus(); return; }
+          if (pw.length < 12) { showFormError(form, 'Password must be at least 12 characters.'); $('[name="password"]', form).focus(); return; }
 
           setPending(form, true, 'Creating account…');
           api.post('/auth/signup', {
@@ -2794,20 +2828,8 @@
             // request verification.
             var next = (stype === 'business') ? '#/my-shop'
               : safeNext(query && query.get ? query.get('next') : '');
-            if (d.dev && d.dev.verify_email_token) {
-              var banner = $('#verify-banner');
-              if (banner) {
-                banner.innerHTML = '<div class="info-card mt16" style="padding:13px 14px">' +
-                  '<div class="fs13" style="color:var(--ink)"><b>Verify your email</b></div>' +
-                  '<p class="fs12 muted" style="margin:6px 0 10px">We sent a link to your inbox. In this dev build you can verify instantly:</p>' +
-                  '<div class="flex gap8" style="flex-wrap:wrap">' +
-                  '<a class="btn btn-primary btn-sm" data-nav="#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token) + '">Verify now</a>' +
-                  '<a class="btn btn-outline btn-sm" data-nav="' + esc(next) + '">' + (stype === 'business' ? 'Complete your shop' : 'Continue browsing') + '</a></div></div>';
-                if (banner.scrollIntoView) { try { banner.scrollIntoView({ block: 'nearest' }); } catch (e2) {} }
-              }
-            } else {
-              location.hash = next;
-            }
+            if (d.verification_sent) toast('Check your email for the verification link', 'success');
+            location.hash = next;
           }).catch(function (er) {
             setPending(form, false);
             showFormError(form, (er && er.message) || 'Sign up failed. Please try again.');
@@ -2911,7 +2933,7 @@
             '<div class="detail-wrap"><span class="vbadge">' + esc(p.category || 'Guide') + '</span>' +
             '<h1 class="detail-title" style="margin-top:10px">' + esc(p.title) + '</h1>' +
             '<div class="detail-meta"><span>' + icon('person-outline') + esc(p.author || 'Lanka Lens') + '</span><span>' + icon('calendar-outline') + fmtDate(p.created_at) + '</span></div></div>' +
-            '<div class="prose">' + (p.body || '') + '</div>';
+            '<div class="prose">' + sanitizeRichHtml(p.body || '') + '</div>';
         }).catch(function (e) {
           $('#post-root').innerHTML = header('Guide', {}) + '<div class="empty"><p>' + esc(e.message) + '</p></div>';
         });
@@ -3116,8 +3138,8 @@
     var html = header('Set New Password', { heading: false, backTo: '#/' });
     html += '<div class="auth-wrap"><div class="auth-hero"><h1>Choose a new password</h1><p>Enter a new password for your account.</p></div>' +
       '<form id="reset-form" class="auth-form"><div class="form-error" role="alert"></div>' +
-      '<div class="form-group"><label for="rp-password">New password</label><input class="input" id="rp-password" type="password" name="password" required minlength="6" placeholder="At least 6 characters" autocomplete="new-password"></div>' +
-      '<div class="form-group"><label for="rp-confirm">Confirm password</label><input class="input" id="rp-confirm" type="password" name="confirm" required minlength="6" placeholder="Repeat it" autocomplete="new-password"></div>' +
+      '<div class="form-group"><label for="rp-password">New password</label><input class="input" id="rp-password" type="password" name="password" required minlength="12" placeholder="at least 12 characters" autocomplete="new-password"></div>' +
+      '<div class="form-group"><label for="rp-confirm">Confirm password</label><input class="input" id="rp-confirm" type="password" name="confirm" required minlength="12" placeholder="Repeat it" autocomplete="new-password"></div>' +
       '<button class="btn btn-primary" type="submit">Reset password</button></form>' +
       '<div class="auth-alt"><a data-nav="#/sign-in">Back to sign in</a></div></div>';
     return {
@@ -3133,7 +3155,7 @@
           var pw = $('[name="password"]', form).value || '';
           var cf = $('[name="confirm"]', form).value || '';
           if (!token) { showFormError(form, 'This reset link is missing its token. Request a new one.'); return; }
-          if (pw.length < 6) { showFormError(form, 'Password must be at least 6 characters.'); return; }
+          if (pw.length < 12) { showFormError(form, 'Password must be at least 12 characters.'); return; }
           if (pw !== cf) { showFormError(form, 'Passwords do not match.'); $('[name="confirm"]', form).focus(); return; }
           setPending(form, true, 'Resetting…');
           api.post('/auth/reset', { token: token, password: pw }).then(function () {
