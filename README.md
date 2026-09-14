@@ -30,18 +30,35 @@ the same origin, which is what the frontend expects.
 ### Railway production
 
 This is a **single Flask service**, not a static-site deployment. `Dockerfile` and
-`railway.json` force Railway to run the following command from the repository
+`railway.json` make Railway run exactly one startup command from the repository
 root:
 
 ```bash
-gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 4 --access-logfile - --error-logfile - server.app:app
+/bin/sh /app/docker-entrypoint.sh
 ```
+
+`docker-entrypoint.sh` is the permanent startup gate. It is also the image's own
+`CMD`, so the same ordering holds on a plain container restart and keeps working
+after Railway stops reading config-as-code (`railway.json` is deprecated; the
+announced cutoff is **2026-12-01**):
+
+```text
+DATABASE_URL verified (PostgreSQL only, never a SQLite fallback)
+  → python -m server.manage_db wait-for-db   # bounded, read-only: SELECT 1
+  → python -m server.manage_db migrate       # read-only schema version gate
+  → exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 server.app:app
+```
+
+Any failing step exits non-zero **before** Gunicorn starts, so the container can
+never serve an unprepared database, and `exec` makes Gunicorn the container
+process so Railway's `SIGTERM` drains requests on redeploy.
 
 `/api/*`, the SPA shell (`/`), and the app assets are all served by that Flask
 application. Do not configure Caddy, a Railway static-files service, or a
 separate frontend process for this service. Railway's deployment logs should
-show `Using detected Dockerfile!`, Gunicorn listening on `0.0.0.0:$PORT`, and
-access-log entries such as `POST /api/auth/login ... 200`.
+show `Using detected Dockerfile!`, the `[startup]` gate lines, Gunicorn
+listening on `0.0.0.0:$PORT`, and access-log entries such as
+`POST /api/auth/login ... 200`.
 
 **Existing installation: back up and import the running SQLite database BEFORE
 changing variables or deploying this version.** Follow the complete
@@ -49,15 +66,18 @@ changing variables or deploying this version.** Follow the complete
 Do not run `init-empty` for an existing marketplace.
 
 Set `DATABASE_URL` to a separate Railway PostgreSQL service with a persistent
-volume. Docker sets `APP_ENV=production`; Railway variables also activate the
-production guard. Missing/invalid PostgreSQL configuration fails closed rather
-than falling back to SQLite. `railway.json` runs the idempotent schema gate
-`python -m server.manage_db migrate` before deployment. It does not import or seed.
+volume, by reference (`DATABASE_URL=${{Postgres.DATABASE_URL}}`). Docker sets
+`APP_ENV=production`; Railway variables also activate the production guard.
+Missing/invalid PostgreSQL configuration fails closed rather than falling back
+to SQLite. The idempotent schema gate `python -m server.manage_db migrate` runs
+in the **start command**, not as a Railway pre-deploy command: pre-deploy runs
+only on a deploy (never on a restart), in a separate container, with no volumes
+and no retry on failure. The gate never imports or seeds.
 
-**Brand-new installation (no prior data): initialize PostgreSQL exactly once,
-before the first deploy of this code.** The pre-deploy gate deliberately fails
-on an uninitialized database, so run the explicit command from a trusted machine
-that can reach the database's public TLS URL:
+**Brand-new installation (no prior data): prepare PostgreSQL exactly once.** The
+startup gate deliberately fails closed on an uninitialized database. Either run
+the explicit commands from a trusted machine that can reach the database's
+public TLS URL:
 
 ```bash
 # Railway Postgres service -> Variables -> copy DATABASE_PUBLIC_URL (TLS endpoint).
@@ -67,9 +87,15 @@ python -m server.manage_db init-empty   # creates all tables/indexes/constraints
 python -m server.manage_db migrate      # version gate; must print "current"
 ```
 
-`init-empty` never runs at application startup, never drops or truncates
-anything, and refuses if the `public` schema already contains any table;
-re-running it on a prepared database is a no-op. It creates no users, shops,
+or add the service variable `DB_ALLOW_INIT_EMPTY=1` for the **first** deploy
+only, which lets `docker-entrypoint.sh` run `init-empty` before `migrate`, and
+then delete that variable. Do not leave it set: with the default (unset)
+behaviour a `DATABASE_URL` that accidentally points at an empty database fails
+loudly instead of silently becoming an empty-but-working marketplace.
+
+`init-empty` never drops or truncates anything, refuses if the `public` schema
+already contains any table, and is a no-op on a prepared database; it is not part
+of an ordinary production start. It creates no users, shops,
 listings or admin — bootstrap the first admin by signing up through the site and
 promoting that account with a parameterized `UPDATE users SET is_admin=1 ...`.
 Existing installations with a recoverable SQLite database must use

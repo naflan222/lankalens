@@ -5,6 +5,15 @@
 > application container.** Environment changes may trigger a deployment. This
 > code has not been deployed to Railway and no live production data was accessed.
 
+> **Status update (2026-09-14): the cutover has already happened.** LankaLens is
+> live on Railway against PostgreSQL (persistent volume) with Backblaze B2
+> storage; signup, login, listing creation and image upload are confirmed
+> working. The old SQLite database was ephemeral, is gone, and no backup of it
+> exists — so the warning above and sections 3–4 are **historical**: they apply
+> only to an installation that still holds a recoverable SQLite file, and no
+> restore should be attempted. The authoritative parts for the live service are
+> the startup gate in section 2 and the settings table in section 5.
+
 ## 1. Audit of the previous implementation
 
 Audited commit: `4ae5f155b93b7a2a20fd5343f7d5ec9e14e35f7f`.
@@ -111,6 +120,25 @@ Browser → Railway Flask/Gunicorn service → DATABASE_URL → PostgreSQL servi
                                       → existing B2 bucket (unchanged)
 ```
 
+Container startup is one gate owned by the image, on every deploy **and** every
+restart (`docker-entrypoint.sh`, invoked as `/bin/sh /app/docker-entrypoint.sh`
+by both the Dockerfile `CMD` and `railway.json`'s `startCommand`):
+
+```text
+container start
+  → DATABASE_URL must be postgresql:// (else exit non-zero; no SQLite fallback)
+  → manage_db wait-for-db  bounded, read-only SELECT 1 until PG accepts connections
+  → manage_db init-empty   ONLY if the operator explicitly set DB_ALLOW_INIT_EMPTY
+  → manage_db migrate      read-only schema version gate; fails closed
+  → exec gunicorn          replaces the shell, so it owns SIGTERM on redeploy
+  → Flask imports server.app → database.check_ready() (reads only)
+  → /api/health = 200 with data.database = "postgresql"
+  → B2 configuration, bucket and object keys untouched
+```
+
+Every step must succeed before Gunicorn starts; a failure exits non-zero and the
+container never serves an unprepared database.
+
 - PostgreSQL is mandatory when APP_ENV/FLASK_ENV is `production` or Railway
   environment/project/service markers are present. Docker sets APP_ENV=production.
 - Any nonempty DATABASE_URL must be `postgresql://` or `postgres://`. Invalid or
@@ -118,9 +146,18 @@ Browser → Railway Flask/Gunicorn service → DATABASE_URL → PostgreSQL servi
 - No production database file is created anywhere in the application container.
 - Startup checks the completion ledger and schema availability, using reads only.
   A blank/unimported database will not start a silently empty marketplace.
-- Railway's pre-deploy `python -m server.manage_db migrate` checks the version.
+- The start command's `python -m server.manage_db migrate` checks the version.
   Version 1 is the import baseline; future reviewed additive migrations belong
   in that command. No auto-import, table deletion or demo seeding is configured.
+- The gate lives in the **start command**, not in a Railway pre-deploy command:
+  pre-deploy runs only on a deploy (never on a plain restart), in a separate
+  container, without volumes mounted, and is not retried when it fails. Railway
+  also stopped accepting new config-as-code services and announces a
+  **2026-12-01** cutoff for reading `railway.json`, while the image `CMD`
+  keeps working — so the image owns the gate and `railway.json` only repeats it.
+- `DB_WAIT_SECONDS` (default 60) bounds the read-only connection wait, which
+  covers a PostgreSQL service that restarts or reattaches its volume more slowly
+  than this container starts. `healthcheckTimeout` is 120s, above that window.
 - psycopg pools are lazy and per-process (safe with Gunicorn workers), min 1/max
   10 connections by default. Optional `DB_POOL_MAX=10` accepts 1–100. Budget total
   connections as workers × pool max, plus admin/migration/other services.
@@ -289,13 +326,38 @@ With writes still frozen and the final snapshot safely exported:
 3. Keep `APP_ENV=production` (set by the Dockerfile) and all existing `B2_*`
    variables **unchanged**. Optionally set `DB_POOL_MAX` to suit your DB limit.
    No database credentials belong in source control.
-4. Deploy this branch/version only after the import. The pre-deploy version gate
-   and app readiness check fail closed if DATABASE_URL or the import is missing.
+4. Deploy this branch/version only after the import. The start-command version
+   gate and the app readiness check fail closed if DATABASE_URL or the import is
+   missing, so a failed deploy cannot serve an unprepared database.
 5. Verify `/api/health` returns HTTP 200 and `data.database = "postgresql"`; confirm
    B2 remains enabled in the storage summary. Compare live counts to the manifest.
 6. Complete the checklist below before reopening writes. Keep the SQLite backup
    and old deployment reference for rollback/reconciliation. Do not delete either
    as part of cutover.
+
+### Railway settings for the permanent configuration
+
+The repository is the source of truth; these are the settings to keep in the
+dashboard so nothing depends on a one-off manual command.
+
+| Setting | Value | Why |
+|---|---|---|
+| Config File | `/railway.json` | Still read until Railway's 2026-12-01 config-as-code cutoff. |
+| Root Directory | *(empty = repository root)* | `Dockerfile`, `railway.json` and `docker-entrypoint.sh` live there. |
+| Builder | `DOCKERFILE`, `dockerfilePath: Dockerfile` | Unchanged. |
+| Custom Start Command | `/bin/sh /app/docker-entrypoint.sh`, or leave it empty | Identical to `railway.json`'s `startCommand` and to the image `CMD`, so config precedence no longer matters: config-as-code overrides the dashboard, and an empty dashboard value falls back to the image `CMD`. All three are the same gate. |
+| Pre-deploy Command | *(empty)* | Removed deliberately. Pre-deploy runs only on a deploy, never on a restart, in a separate container with no volumes and no retry. |
+| Healthcheck | `/api/health`, timeout `120` | Covers the 60s `DB_WAIT_SECONDS` window plus migration and boot. |
+| Restart policy | `ON_FAILURE`, 5 retries | Unchanged. A failed gate exits non-zero instead of serving. |
+| `DATABASE_URL` | `${{Postgres.DATABASE_URL}}` | Unchanged reference to the PostgreSQL service. |
+| PostgreSQL service + volume | unchanged | The volume belongs to the database service, never to the app service. |
+| `B2_*` variables, bucket, keys | unchanged | No B2 configuration or upload logic is touched by the gate. |
+| `DB_ALLOW_INIT_EMPTY` | **unset** | Set to `1` only for a first deploy against a brand-new database, then delete it. |
+| `DB_WAIT_SECONDS` | unset (defaults to 60) | Raise only if PostgreSQL needs longer to accept connections. |
+
+Never put `&&`, `;` or a bare `$PORT` in a Railway start command for a Dockerfile
+service: Railway runs it in exec form, which expands nothing.
+`docker-entrypoint.sh` expands `${PORT:-8000}` itself.
 
 An app deployment now replaces only application code/processes. PostgreSQL data
 stays in the independent database service's persistent volume; B2 objects remain
@@ -309,11 +371,13 @@ application tables, sequence usage and SELECT on the ledger, not DROP/CREATE.
 
 When there is no recoverable SQLite database and this is a genuinely new
 marketplace, prepare the Railway PostgreSQL database **exactly once, before the
-first deploy of this code** (the pre-deploy `migrate` gate fails closed on an
+first deploy of this code** (the start-command `migrate` gate fails closed on an
 unprepared database, which is intended):
 
-1. Provision the PostgreSQL service with a persistent volume, but do **not** run
-   `init-empty` inside the Flask container or as a startup/pre-deploy step.
+1. Provision the PostgreSQL service with a persistent volume. `init-empty` is not
+   part of an ordinary container start: either run it from a trusted machine
+   (step 3 below), or set `DB_ALLOW_INIT_EMPTY=1` on the Flask service for the
+   first deploy only and delete that variable afterwards.
 2. From a trusted machine, use the database service's public TLS endpoint:
    Postgres service → **Variables** → `DATABASE_PUBLIC_URL` (append `sslmode=require`
    if the URL does not already enforce TLS). The URL is supplied via environment
@@ -340,8 +404,11 @@ unprepared database, which is intended):
   password. To bootstrap an admin, create the real account through signup, then
   have the DBA promote only that verified account with a parameterized
   `UPDATE users SET is_admin=1 WHERE id=...` in the trusted DB console.
-- It is never invoked by application startup, gunicorn boot, or the pre-deploy
-  command; it only runs when an operator executes it explicitly.
+- Application startup, Gunicorn boot and `server.app` never invoke it.
+  `docker-entrypoint.sh` runs it only when an operator deliberately sets
+  `DB_ALLOW_INIT_EMPTY`, and that variable should be deleted after the first
+  successful deploy so a mis-pointed `DATABASE_URL` keeps failing loudly instead
+  of silently producing an empty marketplace. Running it by hand is unchanged.
 - It acquires the migration advisory lock and refuses to run if the PostgreSQL
   `public` schema already contains any table; it never drops, truncates or
   overwrites anything. Schema, reference data and the completion ledger commit in
@@ -371,10 +438,12 @@ random isolated databases and run actual Gunicorn processes. They do not use or
 modify a production DATABASE_URL. Test database cleanup is confined to those
 randomly created test databases. No test binaries or database files are committed.
 
-Latest run (2026-09-13): **18 tests passed in 30.95 seconds**, Python 3.11,
-PostgreSQL 16.2. Compile checks and `git diff --check` also passed. An AST
-comparison confirmed 24 B2/image functions were unchanged; no frontend files
-were modified.
+Latest run (2026-09-14): **28 tests passed in 57.61 seconds**, Python 3.11,
+PostgreSQL 16.2 — the 19 pre-existing tests plus 9 new tests that drive the real
+`docker-entrypoint.sh` startup gate. `server/app.py`, `server/database.py`,
+`server/requirements.txt`, the frontend and every B2 code path were left
+unmodified (confirmed with `git diff --stat`); an earlier AST comparison had
+already shown 24 B2/image functions unchanged.
 
 Verified scenarios:
 
@@ -390,6 +459,31 @@ Verified scenarios:
   loading passed. **This is not evidence of a live B2 object download.**
 - Exercised search, JSON spec filters/facets, upserts, favorites, reviews, chat
   queries, shop display, admin settings/moderation, concurrent health requests.
+- **Startup gate** (`tests/test_startup_gate.py`): ran `/bin/sh docker-entrypoint.sh`
+  exactly as the image `CMD` and `railway.json`'s `startCommand` do, against real
+  PostgreSQL and real Gunicorn processes:
+  - prepared database → `wait-for-db` → `migrate` → Gunicorn, with log-ordering
+    proof that the gate completed before `Listening at`, `/api/health` = 200 with
+    `database = "postgresql"`, and every table count identical before/after boot;
+  - `exec` verified via `/proc/<pid>/cmdline`: Gunicorn, not `sh`, is the
+    container process, and SIGTERM exits 0, so redeploys drain gracefully;
+  - a container replacement preserved the user, listing, bearer session and login;
+  - an unprepared/empty database fails closed and creates **nothing**, not even
+    the ledger, unless `DB_ALLOW_INIT_EMPTY=1` is set explicitly;
+  - with that opt-in, a brand-new database was prepared once, served health,
+    accepted a first signup (`id = 1`), fabricated no demo data, and later starts
+    needed no opt-in and duplicated no reference rows;
+  - a used database missing the ledger is refused by **both** paths without
+    dropping the existing table or its row;
+  - a missing or non-PostgreSQL `DATABASE_URL` exits non-zero and creates no
+    SQLite file; an unreachable PostgreSQL fails inside the bounded window
+    without leaking the DSN, user or secret.
+- **Simulated the built image without Docker** (no daemon in the workspace): the
+  repository tree filtered by `.dockerignore`, a venv holding **only**
+  `server/requirements.txt`, `APP_ENV=production` plus Railway markers, then the
+  real start command — 23/23 checks passed across three consecutive container
+  starts, with `/`, `/api/health`, `/api/meta`, signup, listing creation,
+  restart persistence and clean SIGTERM shutdowns.
 - Checked safe refusal for missing/invalid DB configuration, empty/unprepared DB,
   nonempty destination, unsupported schema and bad data; tested full rollback,
   WAL-inclusive backup, duplicate import, concurrent imports, sequence high-water
@@ -402,6 +496,14 @@ Do not mark the production incident resolved until an operator records:
 
 - [ ] Original SQLite final backup safely stored off-container; counts/hash recorded.
 - [ ] Verified import and production PostgreSQL volume/backup configuration.
+- [ ] Deployment logs show the gate in order: `[startup] DATABASE_URL is set…`,
+      `PostgreSQL accepted connections…`, `Schema version 1 is current`,
+      `[startup] Database ready…`, then `Listening at: http://0.0.0.0:<port>`.
+- [ ] `DB_ALLOW_INIT_EMPTY` is **not** set on the live service (delete it if it
+      was used for the first deploy of a brand-new database).
+- [ ] Dashboard Custom Start Command is `/bin/sh /app/docker-entrypoint.sh` or
+      empty, and the deployment details page shows that same command.
+- [ ] No pre-deploy command remains configured on the Flask service.
 - [ ] Existing user and admin logins work; a pre-migration unexpired session works.
 - [ ] Existing shops, reviews, messages, reports, settings and payment records match.
 - [ ] Create an identifiable **test user** and **test listing**; record IDs privately.

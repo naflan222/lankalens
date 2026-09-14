@@ -14,6 +14,13 @@ RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY . /app
 
-# Railway supplies PORT at runtime. The shell form expands it while retaining a
-# useful local-container default; railway.json supplies the same command.
-CMD ["sh", "-c", "exec gunicorn --bind 0.0.0.0:${PORT:-8000} --workers 1 --threads 4 --access-logfile - --error-logfile - server.app:app"]
+# The image owns the startup gate: verify DATABASE_URL, wait for PostgreSQL,
+# run the read-only schema gate, then `exec` Gunicorn as PID 1 (so Railway's
+# SIGTERM drains gracefully). Keeping it in CMD means the ordering survives both
+# plain container restarts and Railway's 2026-12-01 config-as-code cutoff;
+# railway.json invokes this same script. Do not start gunicorn directly here —
+# server.app refuses to boot against an unprepared database, and nothing would
+# have prepared it. The script expands ${PORT:-8000} itself, which matters
+# because a Railway start command runs in exec form and does not expand $PORT.
+RUN chmod 0755 /app/docker-entrypoint.sh
+CMD ["/bin/sh", "/app/docker-entrypoint.sh"]
