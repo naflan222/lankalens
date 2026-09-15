@@ -1965,6 +1965,8 @@ def validate_listing_fields(body, require_complete=True):
 @app.route("/api/listings", methods=["POST"])
 def create_listing():
     u = require_auth()
+    if not u.get("email_verified") and not u.get("is_admin"):
+        return err("Verify your email before posting an ad", 403)
     body = request.get_json(silent=True) or {}
 
     status = body.get("status") or "active"
@@ -2391,6 +2393,23 @@ def respond_offer(oid):
 # ---------------------------------------------------------------------------
 # Chat
 # ---------------------------------------------------------------------------
+@app.route("/api/support/admin")
+def support_admin():
+    """Expose one support-admin chat target to business accounts only."""
+    u = require_auth()
+    if u.get("seller_type") != "business":
+        return err("Admin messaging is available to business accounts only", 403)
+    admin = query(
+        "SELECT id, name, avatar FROM users WHERE is_admin = 1 AND status = 'active' "
+        "ORDER BY id LIMIT 1", one=True)
+    if not admin:
+        return err("No support administrator is available", 404)
+    avatar = admin.get("avatar") or ""
+    if avatar and _is_b2_key(avatar):
+        avatar = resolve_image_url(avatar)
+    return ok({"id": admin["id"], "name": admin["name"], "avatar": avatar})
+
+
 @app.route("/api/chat/conversations")
 def conversations():
     u = require_auth()
@@ -2445,6 +2464,8 @@ def send_message(other_id):
     other = query("SELECT * FROM users WHERE id = ?", (other_id,), one=True)
     if not other:
         return err("User not found", 404)
+    if other.get("is_admin") and not u.get("is_admin") and u.get("seller_type") != "business":
+        return err("Only business accounts can message an administrator", 403)
     if query("SELECT 1 FROM blocks WHERE user_id = ? AND blocked_id = ?", (other_id, u["id"]), one=True):
         return err("You cannot message this user", 403)
     body = request.get_json(silent=True) or {}
@@ -2906,7 +2927,14 @@ def businesses_list():
     Only approved businesses appear in the public directory — a shop that has
     merely registered (pending / not submitted / rejected) is not listed here.
     """
-    rows = query("SELECT * FROM businesses WHERE verified = 1 ORDER BY name")
+    try:
+        pinned_shop_id = int(get_setting("pinned_shop_id", "0") or 0)
+    except (TypeError, ValueError):
+        pinned_shop_id = 0
+    rows = query(
+        "SELECT * FROM businesses WHERE verified = 1 "
+        "ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, name",
+        (pinned_shop_id,))
     out = []
     for b in rows:
         item = business_payload(b)
@@ -3040,11 +3068,22 @@ def send_reset_email(email, token):
                       "If you did not request this, ignore this email.")
 
 
-def send_verification_email(email, token):
-    return send_email(email, "Verify your Lanka Lens email",
-                      "Verify your email address within 24 hours:\n\n"
-                      f"{auth_link('verify-email', token)}\n\n"
-                      "If you did not create this account, ignore this email.")
+def send_verification_email(email, code):
+    return send_email(email, "Your Lanka Lens verification code",
+                      "Use this 6-digit code to verify your email address:\n\n"
+                      f"{code}\n\n"
+                      "The code expires in 10 minutes. If you did not create this account, "
+                      "you can safely ignore this email.")
+
+
+def issue_email_otp(user):
+    """Create one short-lived, hashed-at-rest email verification code."""
+    code = f"{secrets.randbelow(1000000):06d}"
+    make_token(user["id"], "email_otp", value=token_digest(code), ttl=600)
+    sent = send_verification_email(user["email"], code)
+    if not sent:
+        execute("DELETE FROM tokens WHERE user_id = ? AND kind = 'email_otp'", (user["id"],))
+    return sent, code
 
 
 # ---------------------------------------------------------------------------
@@ -3092,11 +3131,11 @@ def signup():
             (token_digest(token), uid, now(), now() + SESSION_TTL_DAYS * 86400))
     u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
 
-    vtoken = make_token(uid, "email", ttl=86400)
-    sent = send_verification_email(email, vtoken)
-    if not sent:
-        execute("DELETE FROM tokens WHERE token = ?", (token_digest(vtoken),))
-    return ok({"token": token, "user": user_payload(u), "verification_sent": sent})
+    sent, otp = issue_email_otp(u)
+    response = {"token": token, "user": user_payload(u), "verification_sent": sent}
+    if sent and not database.production and os.environ.get("LL_ALLOW_DEV_TOKENS") == "1":
+        response["dev"] = {"email_code": otp}
+    return ok(response)
 
 
 @app.route("/api/auth/login", methods=["POST"])
@@ -3180,10 +3219,33 @@ def reset_password():
 
 
 @app.route("/api/auth/verify-email", methods=["POST"])
+@rate_limit(10, 600)
 def verify_email():
     body, bad = json_body()
     if bad:
         return bad
+
+    code = (body.get("code") or "").strip()
+    if code:
+        u = require_auth()
+        if u.get("email_verified"):
+            return ok({"verified": True})
+        if not re.fullmatch(r"\d{6}", code):
+            return err("Enter the 6-digit verification code", 400)
+        row = query(
+            "SELECT * FROM tokens WHERE user_id = ? AND kind = 'email_otp' "
+            "ORDER BY created_at DESC LIMIT 1", (u["id"],), one=True)
+        if not row or (row["expires_at"] and row["expires_at"] < now()):
+            if row:
+                execute("DELETE FROM tokens WHERE token = ?", (row["token"],))
+            return err("This verification code has expired. Request a new code.", 400)
+        if not secrets.compare_digest(row.get("value") or "", token_digest(code)):
+            return err("That verification code is incorrect", 400)
+        execute("UPDATE users SET email_verified = 1 WHERE id = ?", (u["id"],))
+        execute("DELETE FROM tokens WHERE user_id = ? AND kind IN ('email_otp', 'email')", (u["id"],))
+        return ok({"verified": True})
+
+    # Compatibility for verification links issued before the OTP rollout.
     token = (body.get("token") or "").strip()
     missing = missing_fields_error({"token": token}, "token")
     if missing:
@@ -3192,7 +3254,7 @@ def verify_email():
     if not row:
         return err("This verification link is invalid or has expired", 400)
     execute("UPDATE users SET email_verified = 1 WHERE id = ?", (row["user_id"],))
-    execute("DELETE FROM tokens WHERE token = ?", (token,))
+    execute("DELETE FROM tokens WHERE token = ?", (row["token"],))
     return ok({"verified": True})
 
 
@@ -3202,11 +3264,13 @@ def resend_verification():
     u = require_auth()
     if u.get("email_verified"):
         return ok({"verified": True, "dev": None})
-    token = make_token(u["id"], "email", ttl=86400)
-    sent = send_verification_email(u["email"], token)
+    sent, otp = issue_email_otp(u)
     if not sent:
-        execute("DELETE FROM tokens WHERE token = ?", (token_digest(token),))
-    return ok({"sent": True})
+        return err("We could not send the verification email. Please try again.", 503)
+    response = {"sent": True}
+    if not database.production and os.environ.get("LL_ALLOW_DEV_TOKENS") == "1":
+        response["dev"] = {"email_code": otp}
+    return ok(response)
 
 
 @app.route("/api/auth/verify-phone/request", methods=["POST"])
@@ -3787,9 +3851,14 @@ def admin_businesses():
     sql += " ORDER BY CASE b.verification_status WHEN 'pending' THEN 0 " \
            "WHEN 'rejected' THEN 1 WHEN 'not_submitted' THEN 2 ELSE 3 END, b.name"
     rows = query(sql, args)
+    try:
+        pinned_shop_id = int(get_setting("pinned_shop_id", "0") or 0)
+    except (TypeError, ValueError):
+        pinned_shop_id = 0
     out = []
     for b in rows:
         item = business_payload(b)
+        item["pinned"] = b["id"] == pinned_shop_id
         item["owner"] = {
             "id": b["user_id"], "name": b["owner_name_db"] or "",
             "email": b["owner_email"] or "", "phone": b["owner_phone"] or "",
@@ -3799,6 +3868,29 @@ def admin_businesses():
             (b["user_id"],), one=True)["n"]
         out.append(item)
     return ok(out)
+
+
+@app.route("/api/admin/businesses/<int:bid>")
+def admin_business_detail(bid):
+    require_admin()
+    b = query(
+        "SELECT b.*, u.name AS owner_name_db, u.email AS owner_email, "
+        "u.phone AS owner_phone, u.whatsapp AS owner_whatsapp "
+        "FROM businesses b JOIN users u ON u.id = b.user_id WHERE b.id = ?",
+        (bid,), one=True)
+    if not b:
+        return err("Shop not found", 404)
+    item = business_payload(b)
+    item["owner"] = {
+        "id": b["user_id"], "name": b["owner_name_db"] or "",
+        "email": b["owner_email"] or "", "phone": b["owner_phone"] or "",
+        "whatsapp": b["owner_whatsapp"] or "",
+    }
+    item["listings"] = serialize_listings(query(
+        listing_query_base() + " WHERE l.user_id = ? ORDER BY l.created_at DESC LIMIT 20",
+        (b["user_id"],)))
+    item["pinned"] = str(get_setting("pinned_shop_id", "0") or "0") == str(bid)
+    return ok(item)
 
 
 @app.route("/api/admin/businesses/<int:bid>/moderate", methods=["POST"])
@@ -3812,7 +3904,16 @@ def admin_moderate_business(bid):
     body = request.get_json(silent=True) or {}
     action = (body.get("action") or "").strip()
     reason = (body.get("reason") or "").strip()[:500]
-    if action == "approve":
+    if action == "pin":
+        if b["verification_status"] != "approved":
+            return err("Only an approved shop can be pinned", 400)
+        set_setting("pinned_shop_id", str(bid))
+        audit(admin["id"], "pin", "business", bid, b["name"])
+    elif action == "unpin":
+        if str(get_setting("pinned_shop_id", "0") or "0") == str(bid):
+            set_setting("pinned_shop_id", "0")
+        audit(admin["id"], "unpin", "business", bid, b["name"])
+    elif action == "approve":
         if b["verification_status"] == "approved":
             return err("Shop is already verified", 400)
         execute(
