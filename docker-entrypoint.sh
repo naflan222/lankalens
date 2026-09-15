@@ -86,6 +86,8 @@ esac
 
 # 5. Hand over to Gunicorn as PID 1. Railway supplies PORT at runtime; the
 #    worker/thread counts match the verified-working production configuration.
+#    social_app wraps the existing marketplace app and only registers the
+#    business social-profile endpoints; core routes remain unchanged.
 PORT="${PORT:-8000}"
 log "Database ready; starting gunicorn on 0.0.0.0:${PORT} (1 worker, 4 threads)."
 exec "$PYTHON" -m gunicorn \
@@ -94,4 +96,4 @@ exec "$PYTHON" -m gunicorn \
     --threads 4 \
     --access-logfile - \
     --error-logfile - \
-    server.app:app
+    server.social_app:app
