@@ -86,6 +86,7 @@ esac
 
 # 5. Hand over to Gunicorn as PID 1. Railway supplies PORT at runtime; the
 #    worker/thread counts match the verified-working production configuration.
+#    server.wsgi imports the marketplace app and installs provider integrations.
 PORT="${PORT:-8000}"
 log "Database ready; starting gunicorn on 0.0.0.0:${PORT} (1 worker, 4 threads)."
 exec "$PYTHON" -m gunicorn \
@@ -94,4 +95,4 @@ exec "$PYTHON" -m gunicorn \
     --threads 4 \
     --access-logfile - \
     --error-logfile - \
-    server.app:app
+    server.wsgi:app
