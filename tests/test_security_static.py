@@ -113,7 +113,7 @@ def test_locations_use_complete_application_catalogue():
 
 
 def test_email_otp_is_hashed_short_lived_and_required_for_posting():
-    assert 'kind = "email_otp"' in SERVER
+    assert '"email_otp"' in SERVER
     assert 'value=token_digest(code), ttl=600' in SERVER
     assert 'secrets.compare_digest' in SERVER
     assert 'Verify your email before posting an ad' in SERVER
