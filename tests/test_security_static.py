@@ -44,3 +44,10 @@ def test_brevo_https_email_is_preferred_with_smtp_fallback():
     assert "if brevo_api_configured():" in SERVER
     assert "return brevo_api_configured() or smtp_configured()" in SERVER
     assert "if u and email_configured():" in SERVER
+
+
+def test_optional_listing_contact_buttons_are_guarded():
+    assert "if (whatsappButton) whatsappButton.addEventListener" in CLIENT
+    assert "if (callButton) callButton.addEventListener" in CLIENT
+    assert "$('#btn-wa').addEventListener" not in CLIENT
+    assert "$('#btn-call').addEventListener" not in CLIENT

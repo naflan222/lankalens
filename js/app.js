@@ -1390,22 +1390,26 @@
     function recordContact(kind) {
       api.post('/listings/' + l.id + '/contact', { kind: kind }).catch(logNonCritical('contact analytics'));
     }
-    if ($('#btn-chat')) $('#btn-chat').addEventListener('click', function () {
+    var chatButton = $('#btn-chat');
+    if (chatButton) chatButton.addEventListener('click', function () {
       recordContact('chat');
       if (requireAuth()) location.hash = '#/chat/' + s.id + '?listing=' + l.id;
     });
-    $('#btn-wa').addEventListener('click', function () {
+    var whatsappButton = $('#btn-wa');
+    if (whatsappButton) whatsappButton.addEventListener('click', function () {
       var num = phoneDigits(s.whatsapp || s.phone);
       if (!num) return toast('Seller did not share a number', 'error');
       recordContact('whatsapp');
       window.open('https://wa.me/' + num + '?text=' + encodeURIComponent('Hi, I\'m interested in your listing "' + l.title + '" on Lanka Lens.'), '_blank');
     });
-    $('#btn-call').addEventListener('click', function () {
+    var callButton = $('#btn-call');
+    if (callButton) callButton.addEventListener('click', function () {
       if (!s.phone) return toast('Seller did not share a number', 'error');
       recordContact('call');
       window.location.href = 'tel:' + phoneDigits(s.phone);
     });
-    $('#btn-more').addEventListener('click', function () {
+    var moreButton = $('#btn-more');
+    if (moreButton) moreButton.addEventListener('click', function () {
       openSheet(null, [
         { icon: 'chatbubble-ellipses-outline', label: 'Chat with seller', onClick: function () { recordContact('chat'); if (requireAuth()) location.hash = '#/chat/' + s.id + '?listing=' + l.id; } },
         { icon: 'cash-outline', label: 'Make an offer', onClick: function () { openOfferDialog(l); } },
