@@ -9,16 +9,24 @@ listings, sessions (migrated to hashed storage on use), and B2 object keys.
 Set these in Railway before enabling password reset or email verification:
 
 - `LL_PUBLIC_URL=https://your-domain.example`
+- `SMTP_FROM_EMAIL=support@your-domain.example`
+- `BREVO_API_KEY=your-transactional-api-key` (preferred; uses HTTPS)
+
+The sender address must be verified in Brevo. The application prefers Brevo's
+HTTPS transactional API whenever `BREVO_API_KEY` is present. Never commit or log
+the real key.
+
+SMTP remains available as a fallback when `BREVO_API_KEY` is absent:
+
 - `SMTP_HOST=smtp.example.com`
 - `SMTP_PORT=587`
 - `SMTP_USERNAME=your-smtp-login`
 - `SMTP_PASSWORD=your-smtp-password`
-- `SMTP_FROM_EMAIL=support@your-domain.example`
 - `SMTP_STARTTLS=true`
 
-For implicit TLS on port 465, set `SMTP_USE_SSL=true`. Never commit real values.
-When SMTP is incomplete or delivery fails, password-reset and verification
-endpoints return a generic response and expose no token.
+For implicit TLS on port 465, set `SMTP_USE_SSL=true`. When neither transport is
+complete or delivery fails, password-reset and verification endpoints return a
+generic response and expose no token.
 
 Optional:
 
