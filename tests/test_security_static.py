@@ -3,6 +3,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVER = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+CSS = (ROOT / "css" / "lankalens.css").read_text(encoding="utf-8")
+REFERENCE_DATA = (ROOT / "server" / "reference_data.py").read_text(encoding="utf-8")
 CLIENT = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
 
 
@@ -51,3 +53,59 @@ def test_optional_listing_contact_buttons_are_guarded():
     assert "if (callButton) callButton.addEventListener" in CLIENT
     assert "$('#btn-wa').addEventListener" not in CLIENT
     assert "$('#btn-call').addEventListener" not in CLIENT
+
+
+def test_bottom_sheet_opens_panel_and_overlay():
+    assert "panel.classList.add('open')" in CLIENT
+    assert "panel.classList.remove('open')" in CLIENT
+    assert ".sheet.open" in CSS
+
+
+def test_buying_guide_has_three_illustrated_practical_sections():
+    assert CLIENT.count('class="guide-photo"') >= 3
+    for image in (
+        "/images/products/sony-a7iii-1.jpg",
+        "/images/products/lens-canon-1.jpg",
+        "/images/products/gopro-1.jpg",
+    ):
+        assert image in CLIENT
+    assert ".guide-grid" in CSS
+    assert ".guide-checklist" in CSS
+
+
+def test_business_features_are_scoped_and_documents_are_optional():
+    assert "state.user.seller_type === 'business'" in CLIENT
+    assert "u.seller_type === 'business'" in CLIENT
+    assert "Supporting business document" not in CLIENT
+    assert 'missing.append("a supporting business document")' not in SERVER
+    assert "This shop has no supporting document on file" not in SERVER
+
+
+def test_business_owner_can_set_all_days_open_24_hours():
+    assert "Set 24/7 opening hours" in CLIENT
+    assert "24 Hours Open" in CLIENT
+    assert "hours_sunday" in CLIENT
+
+
+def test_contact_details_are_current():
+    assert "support@lankalens.online" in CLIENT
+    assert "+94 777 4666 75" in CLIENT
+    assert "Tangalle, Sri Lanka" in CLIENT
+    assert "hello@lankalens.lk" not in CLIENT
+
+
+def test_locations_use_complete_application_catalogue():
+    assert "PROVINCES" in SERVER
+    assert "for province_name, districts in PROVINCES.items()" in SERVER
+    for province in (
+        "Western Province",
+        "Central Province",
+        "Southern Province",
+        "North Western Province",
+        "North Central Province",
+        "Eastern Province",
+        "Sabaragamuwa Province",
+        "Uva Province",
+        "Northern Province",
+    ):
+        assert province in REFERENCE_DATA
