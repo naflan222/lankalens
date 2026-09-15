@@ -82,7 +82,7 @@
       save.disabled = true;
       if (status) status.textContent = 'Saving…';
       request('/me/business/social', {
-        method: 'PUT',
+        method: 'POST',
         body: JSON.stringify({
           facebook_url: facebook ? facebook.value.trim() : '',
           instagram_url: instagram ? instagram.value.trim() : ''
