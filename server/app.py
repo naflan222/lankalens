@@ -33,7 +33,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from server.database import database, row_dict, DatabaseUnavailable, DatabaseConflict, DatabaseFailure
 from server.schema import SCHEMA, INDEXES
-from server.reference_data import CATEGORIES, BRANDS, DEFAULT_SETTINGS
+from server.reference_data import CATEGORIES, BRANDS, PROVINCES, DEFAULT_SETTINGS
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(BASE_DIR)
@@ -1623,17 +1623,21 @@ def categories():
 
 @app.route("/api/locations")
 def locations():
-    provs = query("SELECT * FROM provinces ORDER BY id")
-    out = []
-    for p in provs:
-        dists = query("SELECT * FROM districts WHERE province_id = ? ORDER BY id", (p["id"],))
-        dd = []
-        for d in dists:
-            cities = query("SELECT id, name FROM cities WHERE district_id = ? ORDER BY id", (d["id"],))
-            dd.append({"id": d["id"], "name": d["name"], "cities": cities})
-        out.append({"id": p["id"], "name": p["name"], "districts": dd})
-    return ok(out)
-
+    """Return the complete location catalogue without requiring a data migration."""
+    data = [
+        {
+            "name": province_name,
+            "districts": [
+                {
+                    "name": district_name,
+                    "cities": [{"name": city_name} for city_name in cities],
+                }
+                for district_name, cities in districts.items()
+            ],
+        }
+        for province_name, districts in PROVINCES.items()
+    ]
+    return ok(data)
 
 @app.route("/api/brands")
 def brands():
@@ -2771,7 +2775,6 @@ def business_payload(b):
         "business_category": b.get("business_category") or "",
         "owner_name": b.get("owner_name") or "",
         "registration_number": b.get("registration_number") or "",
-        "document": doc,
         "verification_status": b.get("verification_status") or "not_submitted",
         "rejection_reason": b.get("rejection_reason") or "",
         "submitted_at": b.get("submitted_at"),
@@ -2884,8 +2887,6 @@ def submit_business_verification():
         missing.append("province, district and city")
     if not (b["business_category"] or "").strip():
         missing.append("business category")
-    if not (b["document"] or "").strip():
-        missing.append("a supporting business document")
     if missing:
         return err("To submit for verification you still need: " + ", ".join(missing), 400)
     execute(
@@ -3814,8 +3815,6 @@ def admin_moderate_business(bid):
     if action == "approve":
         if b["verification_status"] == "approved":
             return err("Shop is already verified", 400)
-        if not (b["document"] or "").strip():
-            return err("This shop has no supporting document on file", 400)
         execute(
             "UPDATE businesses SET verification_status='approved', verified=1, reviewed_at=?, "
             "rejection_reason='' WHERE id=?", (now(), bid))
