@@ -36,3 +36,11 @@ def test_browser_hardening_is_present():
 def test_no_database_or_storage_schema_change_is_required():
     schema = (ROOT / "server" / "schema.py").read_text(encoding="utf-8")
     assert "SCHEMA_VERSION = 1" in schema
+
+
+def test_brevo_https_email_is_preferred_with_smtp_fallback():
+    assert 'BREVO_EMAIL_API_URL = "https://api.brevo.com/v3/smtp/email"' in SERVER
+    assert '"api-key": os.environ["BREVO_API_KEY"].strip()' in SERVER
+    assert "if brevo_api_configured():" in SERVER
+    assert "return brevo_api_configured() or smtp_configured()" in SERVER
+    assert "if u and email_configured():" in SERVER

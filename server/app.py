@@ -17,6 +17,7 @@ import hashlib
 import uuid
 import threading
 import smtplib
+import urllib.request
 from email.message import EmailMessage
 from datetime import datetime, timezone
 from functools import wraps
@@ -2942,17 +2943,65 @@ def business_page(slug):
 
 
 # ---------------------------------------------------------------------------
-# SMTP email — disabled safely until required environment variables are set
+# Transactional email — Brevo HTTPS API preferred, SMTP retained as fallback
 # ---------------------------------------------------------------------------
+BREVO_EMAIL_API_URL = "https://api.brevo.com/v3/smtp/email"
+
+
+def brevo_api_configured():
+    required = ("BREVO_API_KEY", "SMTP_FROM_EMAIL", "LL_PUBLIC_URL")
+    return all(os.environ.get(name, "").strip() for name in required)
+
+
 def smtp_configured():
     required = ("SMTP_HOST", "SMTP_FROM_EMAIL", "LL_PUBLIC_URL")
     return all(os.environ.get(name, "").strip() for name in required)
 
 
+def email_configured():
+    return brevo_api_configured() or smtp_configured()
+
+
 def send_email(to_address, subject, text):
+    # Prefer HTTPS when configured. This avoids outbound SMTP connection
+    # restrictions on hosting platforms and matches PixelHouse's working setup.
+    if brevo_api_configured():
+        payload = {
+            "sender": {
+                "name": os.environ.get("MAIL_FROM_NAME", "Lanka Lens").strip() or "Lanka Lens",
+                "email": os.environ["SMTP_FROM_EMAIL"].strip(),
+            },
+            "to": [{"email": to_address}],
+            "subject": subject,
+            "textContent": text,
+        }
+        api_request = urllib.request.Request(
+            BREVO_EMAIL_API_URL,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "api-key": os.environ["BREVO_API_KEY"].strip(),
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(api_request, timeout=10) as response:
+                if not 200 <= response.status < 300:
+                    app.logger.error("Brevo API delivery failed: HTTP %s", response.status)
+                    return False
+            return True
+        except Exception as exc:
+            # Never log the request, API key, reset token, or provider response.
+            app.logger.error("Brevo API delivery failed: %s", exc.__class__.__name__)
+            return False
+
     if not smtp_configured():
-        app.logger.warning("Email not sent: SMTP_HOST, SMTP_FROM_EMAIL and LL_PUBLIC_URL are required")
+        app.logger.warning(
+            "Email not sent: configure BREVO_API_KEY or SMTP, plus SMTP_FROM_EMAIL and LL_PUBLIC_URL"
+        )
         return False
+
     host = os.environ["SMTP_HOST"].strip()
     port = int(os.environ.get("SMTP_PORT", "587"))
     username = os.environ.get("SMTP_USERNAME", "").strip()
@@ -3100,7 +3149,7 @@ def forgot_password():
     if missing:
         return missing
     u = query("SELECT * FROM users WHERE email = ?", (email,), one=True)
-    if u and smtp_configured():
+    if u and email_configured():
         token = make_token(u["id"], "reset", ttl=3600)
         if not send_reset_email(email, token):
             execute("DELETE FROM tokens WHERE token = ?", (token_digest(token),))
