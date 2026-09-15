@@ -618,13 +618,18 @@
     host.innerHTML = html;
     sheetCbs = options.map(function (o) { return o.onClick; });
     requestAnimationFrame(function () {
-      $('.sheet-mask', host).classList.add('open');
+      var mask = $('.sheet-mask', host);
+      var panel = $('.sheet', host);
+      if (mask) mask.classList.add('open');
+      if (panel) panel.classList.add('open');
     });
   }
   function closeSheet() {
     var host = $('#sheet-host');
     var mask = $('.sheet-mask', host);
+    var panel = $('.sheet', host);
     if (mask) mask.classList.remove('open');
+    if (panel) panel.classList.remove('open');
     setTimeout(function () { host.innerHTML = ''; sheetCbs = []; }, 240);
   }
 
@@ -2344,7 +2349,7 @@
     html += menuRow('chatbubble-ellipses-outline', '#3A6FB0', 'Messages', 'Chat with buyers and sellers', '#/chat');
     html += menuRow('cash-outline', '#C77D23', 'My Offers', 'Offers made and received', '#/my-offers');
     html += menuRow('bar-chart-outline', '#0E7C66', 'Analytics', 'Views, calls & offers', '#/analytics');
-    html += menuRow('briefcase-outline', '#3A6FB0', 'My Shop', 'Business page & hours', '#/my-shop');
+    if (u.seller_type === 'business') html += menuRow('briefcase-outline', '#3A6FB0', 'My Shop', 'Business page & hours', '#/my-shop');
     html += menuRow('notifications-outline', '#9C4F96', 'Notifications', 'Updates on your activity', '#/notifications');
     html += '<div class="divider-label">Explore</div>';
     html += menuRow('cart-outline', '#0E7C66', 'Camera Shops', 'Dealers across Sri Lanka', '#/shops');
@@ -2551,10 +2556,10 @@
       '<p class="form-hint" style="margin-top:6px">Individuals buy and sell personal gear with no extra steps. Business accounts are for shops — the shop still needs admin verification before it gets the verified badge.</p></div>' +
       '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save Changes</button></div></form>' +
 
-      '<div class="form-card" style="margin-top:16px">' +
+      (u.seller_type === 'business' ? '<div class="form-card" style="margin-top:16px">' +
       '<div class="section-head" style="margin-bottom:4px"><h2>' + icon('briefcase-outline') + 'Business shop</h2></div>' +
-      '<p class="form-hint" style="margin-bottom:10px">Shop details, opening hours and the verification request live here. Verification is checked by an admin — you cannot self-approve.</p>' +
-      '<a class="btn btn-outline" data-nav="#/my-shop">' + icon('create-outline') + 'Manage my shop</a></div>' +
+      '<p class="form-hint" style="margin-bottom:10px">Manage your shop details, location, opening hours and verification request.</p>' +
+      '<a class="btn btn-outline" data-nav="#/my-shop">' + icon('create-outline') + 'Manage my shop</a></div>' : '') +
 
       '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('key-outline') + 'Password</h2></div>' +
       '<form id="pw-form"><div class="form-group"><label>Current password</label><input class="input" type="password" name="old"></div>' +
@@ -2874,9 +2879,9 @@
       '<div class="form-group"><label>Message</label><textarea class="textarea" name="message" required style="min-height:120px"></textarea></div>' +
       '<button class="btn btn-primary" type="submit">' + icon('send-outline') + 'Send Message</button></div></form>' +
       '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('information-circle-outline') + 'Contact details</h2></div>' +
-      '<div class="spec-row"><span class="k">Email</span><span class="v">hello@lankalens.lk</span></div>' +
-      '<div class="spec-row"><span class="k">Phone</span><span class="v">+94 77 000 1111</span></div>' +
-      '<div class="spec-row"><span class="k">Head office</span><span class="v">Colombo, Sri Lanka</span></div></div></div><div style="height:16px"></div>';
+      '<div class="spec-row"><span class="k">Email</span><span class="v">support@lankalens.online</span></div>' +
+      '<div class="spec-row"><span class="k">Phone</span><span class="v">+94 777 4666 75</span></div>' +
+      '<div class="spec-row"><span class="k">Head office</span><span class="v">Tangalle, Sri Lanka</span></div></div></div><div style="height:16px"></div>';
     return {
       html: html,
       mount: function () {
@@ -3003,13 +3008,38 @@
         '<h3>Report it</h3><p>If something feels wrong, use the <b>Report</b> button on any listing and our team will review it.</p>'
     },
     'buying-guide': {
-      title: 'Buying Guide', hero: 'Buying Guide', sub: 'How to inspect and buy used camera gear with confidence.',
-      body: '<p class="lead">Follow this checklist before you hand over your money.</p>' +
-        '<h3>1. Inspect the sensor</h3><p>Set the camera to its smallest aperture, shoot a plain white wall, and review the image for dark specks (dust) or streaks (scratches/oil).</p>' +
-        '<h3>2. Check the shutter count</h3><p>Most shutters are rated for 150,000–200,000 actuations. Lower is better; factor a high count into your offer.</p>' +
-        '<h3>3. Examine the lens</h3><p>Hold the lens up to light and look through it for fungus, haze and dust. Rotate focus and zoom rings — they should move smoothly with no grinding.</p>' +
-        '<h3>4. Test every function</h3><p>Battery, memory card slot, flash, hotshoe, screen, and every dial and button. Bring your own memory card to test shooting.</p>' +
-        '<h3>5. Check box, receipt and warranty</h3><p>Original packaging and a receipt usually mean a genuine, well-cared-for item. Ask about any remaining warranty.</p>'
+      title: 'Buying Guide', hero: 'Buy Used Camera Gear With Confidence',
+      sub: 'Practical Sri Lankan checklists for cameras, lenses and creator gear.',
+      body: '<p class="lead">A good deal is not only a low price. Confirm the condition, ownership and full cost before you pay. Meet in a bright public place and take enough time to test.</p>' +
+        '<div class="guide-grid">' +
+        '<article class="guide-card"><img class="guide-photo" src="/images/products/sony-a7iii-1.jpg" alt="Mirrorless camera for the used camera inspection guide">' +
+        '<div class="guide-copy"><span class="guide-tag">Camera bodies</span><h2>Inspect a DSLR or mirrorless camera</h2>' +
+        '<ul><li><b>Check the exterior:</b> look for impact marks, loose doors, damaged ports and corrosion around the battery compartment.</li>' +
+        '<li><b>Test the sensor:</b> photograph a plain bright surface at a small aperture, then zoom in to identify persistent dust or marks.</li>' +
+        '<li><b>Check shutter count:</b> compare it with the manufacturer’s expected shutter life, but also judge the camera’s overall condition.</li>' +
+        '<li><b>Test controls:</b> try autofocus, burst shooting, video, card slots, hot shoe, flash, screen, viewfinder, Wi-Fi and every button.</li>' +
+        '<li><b>Review files:</b> bring a compatible memory card and inspect full-size photos and video on your own phone or laptop.</li></ul></div></article>' +
+        '<article class="guide-card"><img class="guide-photo" src="/images/products/lens-canon-1.jpg" alt="Camera lens for the used lens inspection guide">' +
+        '<div class="guide-copy"><span class="guide-tag">Lenses</span><h2>Check glass, focus and compatibility</h2>' +
+        '<ul><li><b>Confirm the mount:</b> match the exact mount to your camera; an adapter can reduce autofocus or stabilization features.</li>' +
+        '<li><b>Inspect in good light:</b> check front and rear glass for fungus, haze, separation, scratches and excessive internal dust.</li>' +
+        '<li><b>Move every ring:</b> zoom, focus and aperture controls should operate smoothly without grinding, stiffness or unusual play.</li>' +
+        '<li><b>Take sample photos:</b> test wide open and stopped down at near and far distances; check sharpness on every side of the frame.</li>' +
+        '<li><b>Test electronics:</b> verify autofocus, stabilization, aperture control and lens recognition on your own camera body.</li></ul></div></article>' +
+        '<article class="guide-card"><img class="guide-photo" src="/images/products/gopro-1.jpg" alt="Action camera for the creator gear inspection guide">' +
+        '<div class="guide-copy"><span class="guide-tag">Action cameras & creator gear</span><h2>Test batteries, recording and accessories</h2>' +
+        '<ul><li><b>Record continuously:</b> make a long high-resolution clip and check for overheating, shutdowns, corrupted files or audio problems.</li>' +
+        '<li><b>Inspect seals and ports:</b> damaged doors or seals can remove water resistance; never rely only on the seller’s claim.</li>' +
+        '<li><b>Check battery health:</b> confirm charging, runtime and whether replacement batteries are genuine and locally available.</li>' +
+        '<li><b>Verify stabilization:</b> walk while recording and review the footage for shaking, horizon problems or focus issues.</li>' +
+        '<li><b>Count the complete kit:</b> confirm mounts, cages, charger, cables, remote, microphone adapters and memory-card requirements.</li></ul></div></article>' +
+        '</div>' +
+        '<div class="guide-checklist"><h2>Before paying</h2><ol>' +
+        '<li>Compare the asking price with similar Lanka Lens listings and include the cost of missing batteries, chargers or repairs.</li>' +
+        '<li>Match the serial number on the item, box and receipt where available. Ask the seller to explain any mismatch.</li>' +
+        '<li>Confirm the seller can reset accounts, remove activation locks and transfer any valid warranty.</li>' +
+        '<li>Meet in a public place, test the exact item, and pay only after you are satisfied. Avoid deposits and payment screenshots.</li>' +
+        '<li>Write down what is included and keep the listing, chat and payment record.</li></ol></div>'
     },
     'sell-your-camera': {
       title: 'Sell Your Camera', hero: 'Sell Your Camera', sub: 'Turn your unused gear into cash in three steps.',
@@ -3026,7 +3056,7 @@
         '<h3>What we collect</h3><p>When you create an account we store your name, email, phone number and location, plus the listings, messages and offers you create.</p>' +
         '<h3>How we use it</h3><p>We use this information to run the marketplace — showing your listings, connecting you with buyers and sellers, and notifying you about activity on your ads.</p>' +
         '<h3>What we share</h3><p>Your public profile (name, location, verified badge) is shown on your listings. We never sell your personal data to third parties.</p>' +
-        '<h3>Your choices</h3><p>You can update or delete your account information from Settings. Contact us at hello@lankalens.lk with any privacy questions.</p>'
+        '<h3>Your choices</h3><p>You can update or delete your account information from Settings. Contact us at support@lankalens.online with any privacy questions.</p>'
     },
     'terms': {
       title: 'Terms', hero: 'Terms of Use', sub: 'The rules for using Lanka Lens.',
@@ -3047,7 +3077,7 @@
         '<h3>Posting a listing</h3><ul><li>Tap the orange + button, choose a category and fill in the details.</li><li>Add up to 3 photos — your first photo is the cover image.</li><li>Set a price in Sri Lankan Rupees (LKR).</li></ul>' +
         '<h3>Buying</h3><ul><li>Use search or browse by category, brand and location.</li><li>Contact sellers by Call, WhatsApp or Chat from any listing.</li><li>Save listings with the heart icon to find them again in Favorites.</li></ul>' +
         '<h3>Account</h3><ul><li>Update your name, phone and location in Settings.</li><li>Manage your ads in My Ads — mark items as sold or delete them.</li><li>Track offers in My Offers.</li></ul>' +
-        '<h3>Still stuck?</h3><p>Email hello@lankalens.lk or use the contact form.</p>'
+        '<h3>Still stuck?</h3><p>Email support@lankalens.online or use the contact form.</p>'
     }
   };
 
@@ -3247,7 +3277,7 @@
       var st = biz.verification_status || 'not_submitted';
       var meta = {
         not_submitted: ['Not submitted', '#74817C',
-          'Complete your shop details below, add a supporting business document, then submit for verification. Until an admin approves the shop it stays private — no public listing and no verified badge.'],
+          'Complete your shop details below, then submit them for admin verification. Until an admin approves the shop it stays private — no public listing and no verified badge.'],
         pending: ['Pending review', '#C77D23',
           'Your shop is under review by an administrator. You will be notified as soon as it has been checked.'],
         approved: ['Verified shop', '#0E7C66',
@@ -3295,15 +3325,12 @@
         (biz.logo ? '<img id="logo-prev" class="logo-prev" src="' + esc(biz.logo) + '" alt="' + esc(biz.name || 'Business') + ' logo">' : '<span id="logo-prev" class="logo-prev ph">' + icon('image-outline') + '</span>') +
         '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="logo-input" accept="image/*" hidden></label></div></div>' +
         '<div class="form-group"><label>Description</label><textarea class="textarea" name="description" style="min-height:90px">' + esc(biz.description || '') + '</textarea></div>' +
-        '<div class="form-group"><label>Supporting business document <span class="req">*</span></label>' +
-        '<div class="flex aic gap8">' +
-        (biz.document ? '<img id="doc-prev" class="logo-prev" src="' + esc(biz.document) + '" alt="Business document">' : '<span id="doc-prev" class="logo-prev ph">' + icon('document-text-outline') + '</span>') +
-        '<label class="btn btn-outline btn-sm" style="width:auto">Upload<input type="file" id="doc-input" accept="image/*" hidden></label></div>' +
-        '<div class="form-hint">Photo of your business registration, DSC certificate or ID card (JPG/PNG, max 1MB).</div></div>' +
         '</div>' +
         '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('location-outline') + 'Location</h2></div>' +
         locationSelectsHtml() + '</div>' +
-        '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('time-outline') + 'Opening hours</h2></div>' +
+        '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('time-outline') + 'Opening hours</h2>' +
+        '<button class="btn btn-outline btn-sm" type="button" id="hours-24-7" style="width:auto">' + icon('time-outline') + 'Open 24/7</button></div>' +
+        '<p class="form-hint" style="margin-bottom:10px">Tap Open 24/7 to set every day to “24 Hours Open”, or enter separate hours below.</p>' +
         DAYS.map(function (d) {
           return '<div class="form-group"><label>' + d[1] + '</label><input class="input" name="hours_' + d[0] + '" value="' + esc(hours[d[0]] || '') + '" placeholder="9:00 AM – 6:00 PM or Closed"></div>';
         }).join('') + '</div>';
@@ -3311,7 +3338,7 @@
       h += '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save shop details</button>';
       if (st === 'not_submitted' || st === 'rejected') {
         h += '<button class="btn btn-accent" type="button" id="shop-submit" style="margin-top:8px">' + icon('shield-checkmark') + (st === 'rejected' ? 'Save & resubmit for verification' : 'Submit for verification') + '</button>' +
-          '<p class="form-hint" style="text-align:center;margin-top:8px">An admin checks your details and document. Only approved shops get the verified badge and a public shop page.</p>';
+          '<p class="form-hint" style="text-align:center;margin-top:8px">An admin checks your shop details. Only approved shops get the verified badge and a public shop page.</p>';
       } else if (st === 'pending') {
         h += '<p class="form-hint" style="text-align:center;margin-top:10px">Changes are saved, but a new verification request is not needed while the review is running.</p>';
       } else if (st === 'approved') {
@@ -3333,6 +3360,14 @@
         });
       });
       bindLocationSelects($('#shop-root'), { province: biz.province, district: biz.district, city: biz.city });
+      var openAllDay = $('#hours-24-7');
+      if (openAllDay) openAllDay.addEventListener('click', function () {
+        DAYS.forEach(function (d) {
+          var field = $('#shop-form').querySelector('[name="hours_' + d[0] + '"]');
+          if (field) field.value = '24 Hours Open';
+        });
+        toast('Opening hours set to 24 Hours Open for every day', 'success');
+      });
 
       function uploadImage(id, setter, prevId, alt) {
         var inp = $(id);
@@ -3352,7 +3387,6 @@
         });
       }
       uploadImage('#logo-input', function (url) { biz.logo = url; }, '#logo-prev', (biz.name || 'Business') + ' logo');
-      uploadImage('#doc-input', function (url) { biz.document = url; }, '#doc-prev', 'Business document');
 
       function collectForm() {
         var form = $('#shop-form');
@@ -3371,7 +3405,6 @@
           business_category: form.querySelector('[name="business_category"]').value,
           owner_name: form.querySelector('[name="owner_name"]').value.trim(),
           registration_number: form.querySelector('[name="registration_number"]').value.trim(),
-          document: biz.document || '',
           province: sel('province'), district: sel('district'), city: sel('city'),
           opening_hours: oh
         };
@@ -3383,7 +3416,6 @@
         if (!p.phone) return 'Enter the business phone number';
         if (!p.area) return 'Enter the business address';
         if (!(p.province && p.district && p.city)) return 'Select the province, district and city';
-        if (!p.document) return 'Upload a supporting business document';
         return null;
       }
       function saveForm() { return api.put('/me/business', collectForm()); }
@@ -3622,7 +3654,6 @@
               '<div class="a-main"><b>' + esc(b.name) + '</b>' +
               '<span>' + esc(b.business_category || 'No category') + ' · ' + esc([b.city, b.district, b.province].filter(Boolean).join(', ') || 'No location') + '</span>' +
               '<span>Owner: ' + esc((b.owner && b.owner.name) || '—') + (b.owner && b.owner.phone ? ' · ' + esc(b.owner.phone) : '') + '</span></div>' +
-              (b.document ? '<a class="muted fs12" href="' + esc(b.document) + '" target="_blank" rel="noopener">document</a>' : '') +
               '<div class="a-actions">' +
               '<button class="btn btn-primary btn-sm" data-bizmod="approve" data-bid="' + b.id + '">Approve</button>' +
               '<button class="btn btn-outline btn-sm" data-bizmod="reject" data-bid="' + b.id + '">Reject</button></div></div>';
@@ -3713,7 +3744,6 @@
               '<div class="spec-row"><span class="k">Owner</span><span class="v">' + esc(biz.owner_name || '—') + ' · ' + esc(biz.phone || '—') + '</span></div>' +
               '<div class="spec-row"><span class="k">Address</span><span class="v">' + esc([biz.area, biz.city, biz.district, biz.province].filter(Boolean).join(', ') || '—') + '</span></div>' +
               (biz.registration_number ? '<div class="spec-row"><span class="k">Reg. no.</span><span class="v">' + esc(biz.registration_number) + '</span></div>' : '') +
-              (biz.document ? '<div class="spec-row"><span class="k">Document</span><span class="v"><a href="' + esc(biz.document) + '" target="_blank" rel="noopener">View document</a></span></div>' : '<div class="spec-row"><span class="k">Document</span><span class="v" style="color:#C62828">Missing</span></div>') +
               (biz.rejection_reason ? '<div class="spec-row"><span class="k">Reason</span><span class="v" style="color:#C62828">' + esc(biz.rejection_reason) + '</span></div>' : '') +
               '</div>';
           }
@@ -3929,7 +3959,7 @@
                 '<span>Owner: ' + esc((b.owner && b.owner.name) || '—') + (b.owner && b.owner.email ? ' · ' + esc(b.owner.email) : '') + (b.owner && b.owner.phone ? ' · ' + esc(b.owner.phone) : '') + '</span>' +
                 (b.rejection_reason ? '<span class="muted fs12" style="color:#C62828">' + icon('alert-circle-outline') + ' ' + esc(b.rejection_reason) + '</span>' : '') + '</div>' +
                 '<div class="a-side">' + bizStatusChip(b.verification_status) +
-                (b.document ? '<a class="muted fs12" href="' + esc(b.document) + '" target="_blank" rel="noopener">document</a>' : '<span class="muted fs12">no document</span>') + '</div>' +
+'</div>' +
                 '<div class="a-actions" style="flex-wrap:wrap;justify-content:flex-end">' + actions + '</div></div>';
             }).join('') || '<div class="empty"><p>No shops in this state yet.</p></div>';
             $$('#ab-list [data-biz-act]').forEach(function (b2) {
@@ -4743,10 +4773,12 @@
       ['chatbubble-ellipses-outline', 'Messages', '#/chat'],
       ['cash-outline', 'My Offers', '#/my-offers'],
       ['bar-chart-outline', 'Analytics', '#/analytics'],
-      ['briefcase-outline', 'My Shop', '#/my-shop'],
       ['notifications-outline', 'Notifications', '#/notifications'],
       ['settings-outline', 'Settings', '#/settings']
     ] : [];
+    if (state.user && state.user.seller_type === 'business') {
+      account.splice(account.length - 2, 0, ['briefcase-outline', 'My Shop', '#/my-shop']);
+    }
     if (state.user && state.user.is_admin) {
       account.push(['speedometer-outline', 'Admin Panel', '#/admin']);
     }
