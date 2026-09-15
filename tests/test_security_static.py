@@ -82,7 +82,7 @@ def test_business_features_are_scoped_and_documents_are_optional():
 
 
 def test_business_owner_can_set_all_days_open_24_hours():
-    assert "Set 24/7 opening hours" in CLIENT
+    assert "Open 24/7" in CLIENT
     assert "24 Hours Open" in CLIENT
     assert "hours_sunday" in CLIENT
 
