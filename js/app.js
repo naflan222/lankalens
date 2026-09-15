@@ -747,6 +747,11 @@
       '<button type="submit">Search</button></form>';
 
     var sections = '';
+    if (state.user && !state.user.email_verified) {
+      sections += '<div class="verify-home-banner"><div><b>' + icon('mail-unread-outline') + 'Verify Email</b>' +
+        '<span>Verify your email to publish listings.</span></div>' +
+        '<button class="btn btn-primary btn-sm" id="home-verify-email">Verify Email</button></div>';
+    }
     sections += '<div class="section"><div class="section-head"><h2>' + icon('grid-outline') + 'Browse Categories</h2>' +
       '<a class="more" data-nav="#/categories">View all</a></div><div id="home-cats">' + loadingHtml('Loading categories…') + '</div></div>';
 
@@ -769,6 +774,11 @@
     return {
       html: stats + sections + footer(),
       mount: function () {
+        var verifyHome = $('#home-verify-email');
+        if (verifyHome) verifyHome.addEventListener('click', function () {
+          requestEmailOtp('#/');
+        });
+
         var f = $('#home-search');
         if (f) f.addEventListener('submit', function (e) {
           e.preventDefault();
@@ -825,11 +835,12 @@
         renderAsync({
           into: '#home-posts-body',
           load: function () { return api.get('/posts'); },
-          isEmpty: function (p) { return !p || !p.length; },
-          emptyText: 'No guides published yet',
+          isEmpty: function () { return false; },
           render: function (posts) {
+            posts = (posts && posts.length) ? posts : builtInBuyingGuides();
             return '<div class="hscroll">' + posts.slice(0, 4).map(function (p) {
-              return '<div class="lcard card-sm" data-nav="#/blog/' + esc(p.slug) + '">' +
+              var href = p.href || ('#/blog/' + p.slug);
+              return '<div class="lcard card-sm" data-nav="' + esc(href) + '">' +
                 '<div class="thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '<span class="ph">' + icon('reader-outline') + '</span>') + '</div>' +
                 '<div class="body"><div class="title" style="min-height:auto">' + esc(p.title) + '</div>' +
                 '<div class="meta"><span>' + esc(p.category || 'Guide') + '</span><span class="sep">·</span><span>' + fmtDate(p.created_at) + '</span></div></div></div>';
@@ -839,6 +850,29 @@
       }
     };
   };
+
+  function builtInBuyingGuides() {
+    return [
+      {
+        title: 'How to inspect a used camera body',
+        excerpt: 'Check shutter count, sensor condition, controls, autofocus and included accessories before paying.',
+        image: '/images/products/sony-a7iii-1.jpg',
+        href: '#/buying-guide'
+      },
+      {
+        title: 'How to check a second-hand lens',
+        excerpt: 'Inspect glass, fungus, aperture, stabilisation, focus and mount compatibility with your camera.',
+        image: '/images/products/lens-canon-1.jpg',
+        href: '#/buying-guide'
+      },
+      {
+        title: 'Buying action cameras and creator gear',
+        excerpt: 'Test recording, batteries, ports, microphones, stabilisation and waterproof seals safely.',
+        image: '/images/products/gopro-1.jpg',
+        href: '#/buying-guide'
+      }
+    ];
+  }
 
   function shopCardSmall(s) {
     return '<div class="lcard card-sm" data-nav="#/shop/' + esc(s.slug) + '">' +
@@ -2616,13 +2650,7 @@
         });
         var rv = $('#resend-verify');
         if (rv) rv.addEventListener('click', function () {
-          api.post('/auth/resend-verification').then(function (d) {
-            if (d.dev && d.dev.verify_email_token) {
-              location.hash = '#/verify-email?token=' + encodeURIComponent(d.dev.verify_email_token);
-            } else {
-              toast('Verification link sent to your email', 'success');
-            }
-          }).catch(function (er) { toast(er.message, 'error'); });
+          requestEmailOtp('#/settings');
         });
         var vp = $('#verify-phone');
         if (vp) vp.addEventListener('click', function () {
@@ -2649,6 +2677,45 @@
   views.settingsRemount = function () { var v = views.settings(); if (v.mount) v.mount(); };
 
   /* ---------- auth form helpers ---------- */
+  function showEmailOtpDialog(nextHash, devCode) {
+    var destination = nextHash || '#/';
+    openDialog('Verify your email',
+      '<p>Enter the 6-digit code sent to <b>' + esc((state.user && state.user.email) || 'your email') + '</b>.</p>' +
+      (devCode ? '<p class="form-hint">Development code: <b>' + esc(devCode) + '</b></p>' : '') +
+      '<div class="form-group mt16"><label>Verification code</label>' +
+      '<input class="input" id="email-otp-code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="000000"></div>' +
+      '<button class="btn btn-outline btn-sm" type="button" id="email-otp-skip" style="margin-top:8px">Skip for now</button>',
+      'Verify code', false, function () {
+        var code = ($('#email-otp-code').value || '').trim();
+        if (!/^\d{6}$/.test(code)) { toast('Enter the 6-digit code', 'error'); return; }
+        api.post('/auth/verify-email', { code: code }).then(function () {
+          state.user.email_verified = true;
+          renderDrawer(); renderTabbar(); closeDialog();
+          toast('Email verified', 'success');
+          location.hash = destination;
+        }).catch(function (e) { toast(e.message, 'error'); });
+      });
+    var skip = $('#email-otp-skip');
+    if (skip) skip.addEventListener('click', function () {
+      closeDialog();
+      location.hash = destination;
+      toast('You can browse now. Verify your email before posting an ad.');
+    });
+    var input = $('#email-otp-code');
+    if (input) input.focus();
+  }
+
+  function requestEmailOtp(nextHash) {
+    api.post('/auth/resend-verification').then(function (d) {
+      if (d.verified) {
+        state.user.email_verified = true;
+        toast('Your email is already verified', 'success');
+        return;
+      }
+      showEmailOtpDialog(nextHash, d.dev && d.dev.email_code);
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
   var EMAIL_RE_CLIENT = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
   function formErrorBox(form) {
@@ -2784,7 +2851,7 @@
       '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
       '<div class="opt active" data-stype="individual" role="button" tabindex="0">Individual</div>' +
       '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div>' +
-      '<p class="form-hint" id="stype-hint">For personal buying &amp; selling. No shop features or verification needed.</p></div>' +
+      '<p class="form-hint" id="stype-hint">For personal buying &amp; selling. Verify your email before posting ads.</p></div>' +
       '<button class="btn btn-primary" type="submit">Create Account</button>' +
       '<p class="form-hint" style="margin-top:12px;text-align:center">By creating an account you agree to our ' +
       '<a data-nav="#/terms">Terms</a> and <a data-nav="#/privacy">Privacy Policy</a>.</p></form>' +
@@ -2799,7 +2866,7 @@
         if (!form) return;
         var stype = 'individual';
         var stypeHints = {
-          individual: 'For personal buying &amp; selling. No shop features or verification needed.',
+          individual: 'For personal buying &amp; selling. Verify your email before posting ads.',
           business: 'For shops &amp; camera stores. After sign up you complete shop details and request verification — a verified badge is only granted after admin approval.'
         };
         $$('#stype-seg .opt').forEach(function (o) {
@@ -2837,8 +2904,13 @@
             // request verification.
             var next = (stype === 'business') ? '#/my-shop'
               : safeNext(query && query.get ? query.get('next') : '');
-            if (d.verification_sent) toast('Check your email for the verification link', 'success');
-            location.hash = next;
+            if (d.verification_sent) {
+              toast('We sent a 6-digit code to your email', 'success');
+              showEmailOtpDialog(next, d.dev && d.dev.email_code);
+            } else {
+              toast('Account created, but the verification email could not be sent.', 'error');
+              location.hash = next;
+            }
           }).catch(function (er) {
             setPending(form, false);
             showFormError(form, (er && er.message) || 'Sign up failed. Please try again.');
@@ -2911,14 +2983,13 @@
         renderAsync({
           into: '#posts-list',
           load: function () { return api.get('/posts'); },
-          isEmpty: function (posts) { return !posts || !posts.length; },
-          emptyText: 'No guides published yet',
-          emptySub: 'Buying advice for used cameras, lenses and drones will appear here.',
-          emptyIcon: 'reader-outline',
+          isEmpty: function () { return false; },
           retryLabel: 'Reload guides',
           render: function (posts) {
+            posts = (posts && posts.length) ? posts : builtInBuyingGuides();
             return posts.map(function (p) {
-              return '<div class="post-card" data-nav="#/blog/' + esc(p.slug) + '">' +
+              var href = p.href || ('#/blog/' + p.slug);
+              return '<div class="post-card" data-nav="' + esc(href) + '">' +
                 (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '') +
                 '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + esc(p.title) + '</b>' +
                 '<span class="excerpt">' + esc(p.excerpt) + '</span></div></div>';
@@ -3345,7 +3416,25 @@
         h += '<p class="form-hint" style="text-align:center;margin-top:10px">Your shop is verified — changes below update your live shop page.</p>';
       }
       h += '</div></form></div><div style="height:16px"></div>';
+      if (isBizUser) {
+        h += '<div class="detail-wrap" id="shop-admin-contact"><div class="info-card"><b>' +
+          icon('chatbubble-ellipses-outline') + 'Need help from Lanka Lens?</b>' +
+          '<p class="form-hint" style="margin:6px 0 10px">Business owners can message an administrator directly.</p>' +
+          '<span class="muted fs12">Loading admin contact…</span></div></div>';
+      }
       $('#shop-root').innerHTML = h;
+
+      if (isBizUser) {
+        api.get('/support/admin').then(function (admin) {
+          var contact = $('#shop-admin-contact');
+          if (contact) contact.innerHTML = '<div class="info-card"><b>' + icon('chatbubble-ellipses-outline') +
+            'Lanka Lens support</b><p class="form-hint" style="margin:6px 0 10px">Message ' + esc(admin.name) +
+            ' about verification or your shop.</p><a class="btn btn-outline btn-sm" data-nav="#/chat/' + admin.id + '">Message admin</a></div>';
+        }).catch(function () {
+          var contact = $('#shop-admin-contact');
+          if (contact) contact.innerHTML = '';
+        });
+      }
 
       if (isBizUser && biz.slug) {
         var label = st === 'approved' ? 'View your public shop page' : 'Preview your shop page';
@@ -3655,12 +3744,14 @@
               '<span>' + esc(b.business_category || 'No category') + ' · ' + esc([b.city, b.district, b.province].filter(Boolean).join(', ') || 'No location') + '</span>' +
               '<span>Owner: ' + esc((b.owner && b.owner.name) || '—') + (b.owner && b.owner.phone ? ' · ' + esc(b.owner.phone) : '') + '</span></div>' +
               '<div class="a-actions">' +
+              '<button class="btn btn-outline btn-sm" data-biz-view="' + b.id + '">Check details</button>' +
               '<button class="btn btn-primary btn-sm" data-bizmod="approve" data-bid="' + b.id + '">Approve</button>' +
               '<button class="btn btn-outline btn-sm" data-bizmod="reject" data-bid="' + b.id + '">Reject</button></div></div>';
           }).join('') : '<p class="muted fs12 pad16">No shops waiting for verification.</p>';
           h += '<div class="a-sec-head"><h3>' + icon('people-outline') + 'Newest users</h3></div>';
           h += adminTable(['Name', 'Email', 'Status', 'Joined'], (d.recent_users || []).map(function (u) {
-            return '<tr><td>' + esc(u.name) + '</td><td>' + esc(u.email) + '</td><td>' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</td><td>' + fmtDate(u.created_at) + '</td></tr>';
+            return '<tr><td>' + esc(u.name) + (u.seller_type === 'business' ? ' ' + aChip('Business', '#9C4F96') : '') +
+              '</td><td>' + esc(u.email) + '</td><td>' + aChip(u.status, u.status === 'banned' ? '#E5484D' : u.status === 'suspended' ? '#C77D23' : '#0E7C66') + '</td><td>' + fmtDate(u.created_at) + '</td></tr>';
           }).join(''));
           h += '<div class="a-sec-head"><h3>' + icon('flag-outline') + 'Recent reports</h3></div>';
           h += (d.recent_reports || []).length ? adminTable(['Listing', 'Reason', 'Status'], d.recent_reports.map(function (r) {
@@ -3804,6 +3895,15 @@
         var lid = b.getAttribute('data-lid');
         // `mod` (not `act`) so the global act() helper cannot be shadowed here.
         var mod = b.getAttribute('data-mod');
+        if (mod === 'delete') {
+          openDialog('Delete listing', '<p>Permanently delete this fake or unsafe listing? Its stored listing images will also be removed.</p>',
+            'Delete listing', true, function () {
+              api.del('/listings/' + lid).then(function () {
+                closeDialog(); toast('Listing deleted', 'success'); loadAdminSection('listings');
+              }).catch(function (e) { toast(e.message, 'error'); });
+            });
+          return;
+        }
         if (mod === 'reject') {
           openDialog('Reject listing', '<p>Send the seller a reason for the rejection.</p><div class="form-group mt16"><label>Reason</label>' +
             '<textarea class="textarea" id="reject-reason" style="min-height:70px" placeholder="e.g. Missing photos / not enough details"></textarea></div>',
@@ -3822,8 +3922,57 @@
     });
   }
 
+  function openAdminBusinessDetails(bid, reload) {
+    api.get('/admin/businesses/' + bid).then(function (b) {
+      var owner = b.owner || {};
+      var hours = b.opening_hours || {};
+      var hourRows = Object.keys(hours).map(function (day) {
+        return '<div class="spec-row"><span class="k">' + esc(day.charAt(0).toUpperCase() + day.slice(1)) +
+          '</span><span class="v">' + esc(hours[day] || '—') + '</span></div>';
+      }).join('');
+      var html = (b.logo ? '<img src="' + esc(b.logo) + '" alt="' + esc(b.name) + ' logo" style="width:88px;height:88px;object-fit:cover;border-radius:16px;margin-bottom:12px">' : '') +
+        '<div class="info-card">' +
+        '<div class="spec-row"><span class="k">Shop</span><span class="v">' + esc(b.name || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Category</span><span class="v">' + esc(b.business_category || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Description</span><span class="v">' + esc(b.description || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Owner</span><span class="v">' + esc(owner.name || b.owner_name || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Owner email</span><span class="v">' + esc(owner.email || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Owner phone</span><span class="v">' + esc(owner.phone || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Shop phone</span><span class="v">' + esc(b.phone || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">WhatsApp</span><span class="v">' + esc(b.whatsapp || owner.whatsapp || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Address</span><span class="v">' + esc([b.area, b.city, b.district, b.province].filter(Boolean).join(', ') || '—') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Registration no.</span><span class="v">' + esc(b.registration_number || 'Not provided') + '</span></div>' +
+        '<div class="spec-row"><span class="k">Listings</span><span class="v">' + (b.listings || []).length + '</span></div>' +
+        '<div class="spec-row"><span class="k">Submitted</span><span class="v">' + (b.submitted_at ? fmtDate(b.submitted_at) : 'Not submitted') + '</span></div>' +
+        '</div>' +
+        (hourRows ? '<h3 style="margin:16px 0 8px">Opening hours</h3><div class="info-card">' + hourRows + '</div>' : '') +
+        '<div class="flex" style="gap:8px;flex-wrap:wrap;margin-top:14px">' +
+        '<button class="btn btn-outline btn-sm" id="admin-message-owner">' + icon('chatbubble-ellipses-outline') + 'Message owner</button>' +
+        (b.verification_status === 'approved'
+          ? '<button class="btn btn-outline btn-sm" id="admin-pin-shop">' + icon('pin-outline') + (b.pinned ? 'Unpin shop' : 'Pin shop to top') + '</button>'
+          : '') + '</div>';
+      openDialog('Check shop details', html, 'Close', false, closeDialog);
+      var message = $('#admin-message-owner');
+      if (message) message.addEventListener('click', function () {
+        closeDialog(); location.hash = '#/chat/' + owner.id;
+      });
+      var pin = $('#admin-pin-shop');
+      if (pin) pin.addEventListener('click', function () {
+        api.post('/admin/businesses/' + bid + '/moderate', { action: b.pinned ? 'unpin' : 'pin' }).then(function () {
+          closeDialog(); toast(b.pinned ? 'Shop unpinned' : 'Shop pinned to top', 'success');
+          if (reload) reload();
+        }).catch(function (e) { toast(e.message, 'error'); });
+      });
+    }).catch(function (e) { toast(e.message, 'error'); });
+  }
+
   /* Approve / reject shop verification from any admin surface (dashboard). */
   function bindBusinessModeration(root) {
+    $$('[data-biz-view]', root).forEach(function (button) {
+      button.addEventListener('click', function () {
+        openAdminBusinessDetails(button.getAttribute('data-biz-view'), function () { loadAdminSection('dashboard'); });
+      });
+    });
     $$('[data-bizmod]', root).forEach(function (b) {
       b.addEventListener('click', function () {
         var bid = b.getAttribute('data-bid');
@@ -3877,7 +4026,8 @@
               if (l.status === 'paused') {
                 actions += '<button class="btn btn-primary btn-sm" data-mod="approve" data-lid="' + l.id + '">Activate</button>';
               }
-              actions += '<button class="btn btn-outline btn-sm" data-nav="#/ads/' + l.id + '">View</button>';
+              actions += '<button class="btn btn-outline btn-sm" data-nav="#/ads/' + l.id + '">View</button>' +
+                '<button class="btn btn-danger btn-sm" data-mod="delete" data-lid="' + l.id + '">Delete</button>';
               return '<div class="a-row">' +
                 '<div class="a-thumb">' + (l.images && l.images[0] ? '<img src="' + esc(l.images[0]) + '" alt="' + esc(l.title || 'Listing') + '">' : icon('camera-outline')) + '</div>' +
                 '<div class="a-main"><b>' + esc(l.title) + '</b>' +
@@ -3918,6 +4068,12 @@
       html: adminBody(html),
       mount: function () {
         function moderate(bid, action, label, needReason) {
+          if (action === 'pin' || action === 'unpin') {
+            api.post('/admin/businesses/' + bid + '/moderate', { action: action }).then(function () {
+              toast(action === 'pin' ? 'Shop pinned to top' : 'Shop unpinned', 'success'); load();
+            }).catch(function (e) { toast(e.message, 'error'); });
+            return;
+          }
           if (needReason) {
             openDialog(label, '<p>Send the owner a reason. They can fix the details and resubmit from My Shop.</p>' +
               '<div class="form-group mt16"><label>Reason</label>' +
@@ -3946,12 +4102,16 @@
                   '<button class="btn btn-outline btn-sm" data-biz-act="reject" data-bid="' + b.id + '">Reject</button>';
               }
               if (b.verification_status === 'approved') {
-                actions += '<button class="btn btn-outline btn-sm" data-biz-act="revoke" data-bid="' + b.id + '">Revoke</button>';
+                actions += '<button class="btn btn-outline btn-sm" data-biz-act="revoke" data-bid="' + b.id + '">Revoke</button>' +
+                  '<button class="btn btn-outline btn-sm" data-biz-act="' + (b.pinned ? 'unpin' : 'pin') + '" data-bid="' + b.id + '">' +
+                  icon('pin-outline') + (b.pinned ? 'Unpin' : 'Pin to top') + '</button>';
               }
               if (b.verification_status === 'rejected' || b.verification_status === 'not_submitted') {
                 actions += '<button class="btn btn-outline btn-sm" data-nav="#/admin/users/' + b.user_id + '">Owner</button>';
               }
-              actions += '<button class="btn btn-outline btn-sm" data-nav="#/shop/' + esc(b.slug) + '">View</button>';
+              actions += '<button class="btn btn-outline btn-sm" data-biz-view="' + b.id + '">Check details</button>' +
+                '<button class="btn btn-outline btn-sm" data-nav="#/chat/' + b.user_id + '">Message owner</button>' +
+                '<button class="btn btn-outline btn-sm" data-nav="#/shop/' + esc(b.slug) + '">View</button>';
               return '<div class="a-row">' +
                 '<div class="a-thumb">' + (b.logo ? '<img src="' + esc(b.logo) + '" alt="' + esc(b.name) + ' logo">' : icon('storefront-outline')) + '</div>' +
                 '<div class="a-main"><b>' + esc(b.name) + (b.verified ? ' ' + icon('shield-checkmark') : '') + '</b>' +
@@ -3962,11 +4122,18 @@
 '</div>' +
                 '<div class="a-actions" style="flex-wrap:wrap;justify-content:flex-end">' + actions + '</div></div>';
             }).join('') || '<div class="empty"><p>No shops in this state yet.</p></div>';
+            $$('#ab-list [data-biz-view]').forEach(function (button) {
+              button.addEventListener('click', function () {
+                openAdminBusinessDetails(button.getAttribute('data-biz-view'), load);
+              });
+            });
             $$('#ab-list [data-biz-act]').forEach(function (b2) {
               b2.addEventListener('click', function () {
                 moderate(b2.getAttribute('data-bid'), b2.getAttribute('data-biz-act'),
                   b2.getAttribute('data-biz-act') === 'approve' ? 'Approve shop'
-                    : b2.getAttribute('data-biz-act') === 'reject' ? 'Reject shop' : 'Revoke verification',
+                    : b2.getAttribute('data-biz-act') === 'reject' ? 'Reject shop'
+                      : b2.getAttribute('data-biz-act') === 'pin' ? 'Pin shop to top'
+                        : b2.getAttribute('data-biz-act') === 'unpin' ? 'Unpin shop' : 'Revoke verification',
                   b2.getAttribute('data-biz-act') === 'reject' || b2.getAttribute('data-biz-act') === 'revoke');
               });
             });

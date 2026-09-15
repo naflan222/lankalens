@@ -110,3 +110,39 @@ def test_locations_use_complete_application_catalogue():
         "Northern Province",
     ):
         assert province in REFERENCE_DATA
+
+
+def test_email_otp_is_hashed_short_lived_and_required_for_posting():
+    assert '"email_otp"' in SERVER
+    assert 'value=token_digest(code), ttl=600' in SERVER
+    assert 'secrets.compare_digest' in SERVER
+    assert 'Verify your email before posting an ad' in SERVER
+    assert 'showEmailOtpDialog' in CLIENT
+    assert 'verify-home-banner' in CLIENT
+
+
+def test_admin_can_inspect_contact_pin_and_delete():
+    assert 'def admin_business_detail' in SERVER
+    assert 'openAdminBusinessDetails' in CLIENT
+    assert 'Message owner' in CLIENT
+    assert 'pinned_shop_id' in SERVER
+    assert 'Pin shop to top' in CLIENT
+    assert 'data-mod="delete"' in CLIENT
+    assert "api.del('/listings/' + lid)" in CLIENT
+
+
+def test_admin_chat_is_available_only_to_business_accounts():
+    assert 'def support_admin' in SERVER
+    assert 'Admin messaging is available to business accounts only' in SERVER
+    assert 'Only business accounts can message an administrator' in SERVER
+    assert 'Message admin' in CLIENT
+
+
+def test_home_has_builtin_buying_guides_when_posts_are_empty():
+    assert 'builtInBuyingGuides' in CLIENT
+    assert "posts = (posts && posts.length) ? posts : builtInBuyingGuides()" in CLIENT
+    assert CLIENT.count("href: '#/buying-guide'") >= 3
+
+
+def test_admin_dashboard_marks_business_users():
+    assert "aChip('Business', '#9C4F96')" in CLIENT
