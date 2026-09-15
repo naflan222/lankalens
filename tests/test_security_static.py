@@ -2,7 +2,10 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = (ROOT / "server" / "app.py").read_text(encoding="utf-8")
+SERVER = "\n".join(
+    path.read_text(encoding="utf-8")
+    for path in (ROOT / "server" / "app.py", ROOT / "server" / "core_app.py")
+)
 CSS = (ROOT / "css" / "lankalens.css").read_text(encoding="utf-8")
 REFERENCE_DATA = (ROOT / "server" / "reference_data.py").read_text(encoding="utf-8")
 CLIENT = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
