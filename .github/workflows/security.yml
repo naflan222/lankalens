@@ -34,7 +34,8 @@ jobs:
           node --check js/app.js
           node --check js/auth-policy.js
           node --check js/browse-sheet-fix.js
+          node --check js/shop-inventory.js
       - name: Run security regression tests
-        run: python -m pytest -q tests/test_security_static.py tests/test_password_policy_otp.py tests/test_browse_controls.py
+        run: python -m pytest -q tests/test_security_static.py tests/test_password_policy_otp.py tests/test_browse_controls.py tests/test_shop_inventory.py
       - name: Audit Python dependencies
         run: python -m pip_audit -r server/requirements.txt
