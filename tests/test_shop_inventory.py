@@ -12,8 +12,8 @@ def test_inventory_script_is_loaded():
 def test_inventory_reuses_existing_listing_api_and_statuses():
     assert "'/me/listings'" in JS
     assert "method: 'PATCH'" in JS
-    assert "status: 'paused'" in JS
-    assert "status: 'sold'" in JS
+    assert "patchStatus(id, 'paused'" in JS
+    assert "patchStatus(id, 'sold'" in JS
     assert "'/renew'" in JS
 
 
