@@ -5,7 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="theme-color" content="#0E7C66">
   <meta name="application-name" content="LankaLens">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="LankaLens">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
   <meta name="description" content="Lanka Lens — Buy & sell cameras, lenses, drones and photography gear in Sri Lanka. Prices in LKR.">
   <title>Lanka Lens — Buy &amp; Sell Cameras in Sri Lanka</title>
   <meta name="author" content="Lanka Lens">
@@ -13,6 +16,7 @@
   <meta name="geo.region" content="LK">
   <meta name="geo.placename" content="Sri Lanka">
   <link rel="canonical" href="https://lankalens.lk/">
+  <link rel="manifest" href="/manifest.webmanifest?v=1">
   <!-- Open Graph / Twitter: WhatsApp and Facebook previews are how most Sri
        Lankan buyers share listings, so these must exist in the static shell. -->
   <meta property="og:site_name" content="Lanka Lens">
@@ -26,8 +30,8 @@
   <meta name="twitter:title" content="Lanka Lens — Buy & Sell Cameras in Sri Lanka">
   <meta name="twitter:description" content="Sri Lanka's camera marketplace — bodies, lenses, drones and gear, priced in LKR.">
   <meta name="twitter:image" content="/images/hero-camera.jpg">
-  <!-- Use the actual LankaLens brand logo for browser tabs and mobile home-screen shortcuts.
-       The version query deliberately breaks caches that may still contain the old star icon. -->
+  <!-- Keep the proven PNG brand logo for browser/shortcut compatibility; the PWA
+       manifest uses a square scalable wrapper around the same logo for installs. -->
   <link rel="icon" type="image/png" href="/images/Logo.png?v=2">
   <link rel="shortcut icon" type="image/png" href="/images/Logo.png?v=2">
   <link rel="apple-touch-icon" href="/images/Logo.png?v=2">
@@ -61,5 +65,6 @@
   <script src="js/browse-sheet-fix.js"></script>
   <script src="js/remove-demo-login.js"></script>
   <script src="js/shop-inventory.js"></script>
+  <script src="js/pwa-install.js"></script>
 </body>
 </html>
