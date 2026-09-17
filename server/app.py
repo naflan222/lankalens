@@ -16,6 +16,7 @@ if __package__ in (None, ""):
 
 from server import core_app as core
 from server.password_policy import password_policy_error
+from server.pwa import register_pwa_routes
 from server.social_profiles import normalize_social_profile
 
 # Preserve the historical server.app module API, including private helpers used
@@ -26,6 +27,7 @@ for _name in dir(core):
         globals()[_name] = getattr(core, _name)
 
 app = core.app
+register_pwa_routes(app, core)
 
 
 def _social_key(business_id, platform):
