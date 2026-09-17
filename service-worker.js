@@ -1,7 +1,7 @@
 /* LankaLens PWA service worker.
    Deliberately network-only: it enables installability without caching marketplace
    pages, API responses, authentication state, or stale listing data. */
-const VERSION = 'lankalens-pwa-v1';
+const VERSION = 'lankalens-pwa-v2';
 
 self.addEventListener('install', () => {
   self.skipWaiting();
