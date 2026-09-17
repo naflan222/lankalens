@@ -71,12 +71,15 @@ def test_production_routes_set_pwa_content_types_and_scope():
     assert '@app.get("/icons/lankalens-maskable-512.png"' in source
 
 
-def test_service_worker_is_network_only_and_forces_fresh_registration():
+def test_service_worker_is_network_only_but_bypasses_external_resources():
     sw = SW_PATH.read_text(encoding="utf-8")
     pwa = PWA_JS_PATH.read_text(encoding="utf-8")
     assert "caches.open" not in sw
     assert "cache.put" not in sw
     assert "respondWith(fetch(event.request))" in sw
-    assert "register('/service-worker.js?v=2'" in pwa
+    assert "requestUrl.origin !== self.location.origin" in sw
+    assert "return;" in sw
+    assert "Backblaze B2" in sw
+    assert "register('/service-worker.js?v=3'" in pwa
     assert "updateViaCache: 'none'" in pwa
     assert "registration.update()" in pwa
