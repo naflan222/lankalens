@@ -1362,8 +1362,8 @@ def add_security_headers(resp):
     resp.headers.setdefault(
         "Content-Security-Policy",
         "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'self'; "
-        "form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
-        "img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'"
+        "form-action 'self'; script-src 'self' https://connect.facebook.net; style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self' https://www.facebook.com"
     )
     if database.production:
         resp.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
