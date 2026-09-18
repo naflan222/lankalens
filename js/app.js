@@ -688,7 +688,7 @@
       (l.urgent ? '<span class="urgent-flag">URGENT</span>' : '') +
       '<button class="fav' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '" aria-label="Favorite">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '</div><div class="body">' +
-      '<div class="title">' + esc(l.title) + '</div>' +
+      '<div class="title"><a href="/listing/' + encodeURIComponent(l.slug || 'listing') + '-' + l.id + '" style="color:inherit;text-decoration:none">' + esc(l.title) + '</a></div>' +
       '<div class="price">' + fmtLKR(l.price) + (l.negotiable ? ' <span class="neg">negotiable</span>' : '') + '</div>' +
       '<div class="meta"><span>' + icon('location-outline') + esc(l.city || l.district || l.province || '') + '</span>' +
       '<span class="sep">·</span><span>' + timeAgo(l.created_at) + '</span>' + sellerOk + '</div>' +
@@ -709,10 +709,10 @@
   function catTile(c) {
     var colors = ['#0E7C66', '#C77D23', '#3A6FB0', '#9C4F96', '#B04A3A'];
     var i = (c.id || 0) % colors.length;
-    return '<div class="cat-tile" data-nav="#/category/' + esc(c.slug) + '">' +
+    return '<a class="cat-tile" href="/category/' + esc(c.slug) + '" data-nav="#/category/' + esc(c.slug) + '" style="color:inherit;text-decoration:none">' +
       '<div class="tile-icon" style="background:' + colors[i] + '1a;color:' + colors[i] + '">' + icon(c.icon || 'camera-outline') + '</div>' +
       '<div class="tile-name">' + esc(c.name) + '</div>' +
-      '<div class="tile-count">' + (c.children ? c.children.length + ' types' : '') + '</div></div>';
+      '<div class="tile-count">' + (c.children ? c.children.length + ' types' : '') + '</div></a>';
   }
 
   function brandChips(brands) {
@@ -5040,6 +5040,7 @@
     if ((m = p.match(/^\/listing\/.+?-(\d+)$/))) return '#/ads/' + m[1];
     if ((m = p.match(/^\/guide\/([^/]+)$/))) return '#/blog/' + m[1];
     if ((m = p.match(/^\/shop\/([^/]+)$/))) return '#/shop/' + m[1];
+    if ((m = p.match(/^\/category\/([^/]+)$/))) return '#/category/' + m[1];
     return null;
   }
 
