@@ -1424,6 +1424,17 @@ def render_index(meta=None):
     html = re.sub(r'<meta name="description" content=".*?"\s*/?>',
                   f'<meta name="description" content="{esc_html(desc)}">', html)
 
+    # index.html contains default SEO tags for static previews. Remove the
+    # dynamic ones before injecting request-specific values so listing/shop/
+    # guide pages never expose conflicting canonical or social metadata.
+    html = re.sub(r'\s*<link\s+rel=["\']canonical["\'][^>]*>\s*', '\n', html, flags=re.I)
+    html = re.sub(
+        r'\s*<meta\s+property=["\']og:(?:site_name|type|title|description|url|image)["\'][^>]*>\s*',
+        '\n', html, flags=re.I)
+    html = re.sub(
+        r'\s*<meta\s+name=["\']twitter:(?:card|title|description|image)["\'][^>]*>\s*',
+        '\n', html, flags=re.I)
+
     extra = []
     extra.append(f'<link rel="canonical" href="{esc_html(canonical)}">')
     extra.append(f'<meta property="og:site_name" content="{esc_html(site)}">')
@@ -1510,7 +1521,7 @@ def seo_guide(slug):
 
 @app.route("/shop/<slug>")
 def seo_shop(slug):
-    b = query("SELECT * FROM businesses WHERE slug = ?", (slug,), one=True)
+    b = query("SELECT * FROM businesses WHERE slug = ? AND verified = 1", (slug,), one=True)
     if not b:
         abort(404)
     base = request.url_root.rstrip("/")
@@ -1538,11 +1549,11 @@ def sitemap_xml():
     base = request.url_root.rstrip("/")
     urls = []
     urls.append((base + "/", now(), "1.0"))
-    for cat in query("SELECT slug FROM categories ORDER BY id"):
-        urls.append((f"{base}/category/{cat['slug']}", now(), "0.7"))
+    # Category pages currently live only inside the SPA hash router and the
+    # server has no /category/<slug> route. Do not advertise 404 URLs to Google.
     for r in query("SELECT slug FROM posts ORDER BY id"):
         urls.append((f"{base}/guide/{r['slug']}", now(), "0.6"))
-    for b in query("SELECT slug FROM businesses ORDER BY id"):
+    for b in query("SELECT slug FROM businesses WHERE verified = 1 ORDER BY id"):
         urls.append((f"{base}/shop/{b['slug']}", now(), "0.6"))
     for l in query("SELECT id, slug, updated_at FROM listings WHERE status = 'active' ORDER BY id"):
         urls.append((f"{base}/listing/{l['slug']}-{l['id']}", l["updated_at"] or now(), "0.8"))
