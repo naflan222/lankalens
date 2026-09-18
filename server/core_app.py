@@ -7,6 +7,7 @@ Run:  python server/app.py
 """
 import os
 import re
+import html
 import json
 import time
 import logging
@@ -3002,7 +3003,7 @@ def email_configured():
     return brevo_api_configured() or smtp_configured()
 
 
-def send_email(to_address, subject, text):
+def send_email(to_address, subject, text, html_content=None):
     # Prefer HTTPS when configured. This avoids outbound SMTP connection
     # restrictions on hosting platforms and matches PixelHouse's working setup.
     if brevo_api_configured():
@@ -3015,6 +3016,11 @@ def send_email(to_address, subject, text):
             "subject": subject,
             "textContent": text,
         }
+        if html_content:
+            payload["htmlContent"] = html_content
+        reply_to = os.environ.get("MAIL_REPLY_TO", "").strip()
+        if reply_to:
+            payload["replyTo"] = {"email": reply_to}
         api_request = urllib.request.Request(
             BREVO_EMAIL_API_URL,
             data=json.dumps(payload).encode("utf-8"),
@@ -3052,7 +3058,12 @@ def send_email(to_address, subject, text):
     msg["From"] = os.environ["SMTP_FROM_EMAIL"].strip()
     msg["To"] = to_address
     msg["Subject"] = subject
+    reply_to = os.environ.get("MAIL_REPLY_TO", "").strip()
+    if reply_to:
+        msg["Reply-To"] = reply_to
     msg.set_content(text)
+    if html_content:
+        msg.add_alternative(html_content, subtype="html")
     try:
         smtp_cls = smtplib.SMTP_SSL if use_ssl else smtplib.SMTP
         with smtp_cls(host, port, timeout=10) as client:
@@ -3079,12 +3090,105 @@ def send_reset_email(email, token):
                       "If you did not request this, ignore this email.")
 
 
+def verification_email_html(code):
+    """Build a responsive, email-client-safe LankaLens OTP message."""
+    public_base = (
+        os.environ.get("LL_PUBLIC_URL", "").strip().rstrip("/")
+        or "https://lankalens.lk"
+    )
+    logo_url = html.escape(f"{public_base}/images/Logo.png?v=2", quote=True)
+    site_url = html.escape(public_base, quote=True)
+    safe_code = html.escape(str(code))
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="supported-color-schemes" content="light">
+  <title>Verify your LankaLens email</title>
+  <style>
+    @media only screen and (max-width: 620px) {{
+      .email-shell {{ width: 100% !important; }}
+      .email-pad {{ padding-left: 20px !important; padding-right: 20px !important; }}
+      .otp-code {{ font-size: 34px !important; letter-spacing: 8px !important; }}
+    }}
+  </style>
+</head>
+<body style="margin:0;padding:0;background:#F4F6F5;color:#14211D;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">
+    Your LankaLens verification code is {safe_code}. It expires in 10 minutes.
+  </div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#F4F6F5;">
+    <tr>
+      <td align="center" style="padding:28px 12px;">
+        <table role="presentation" class="email-shell" width="600" cellspacing="0" cellpadding="0" border="0" style="width:600px;max-width:600px;background:#FFFFFF;border:1px solid #E7ECE9;border-radius:20px;overflow:hidden;box-shadow:0 10px 30px rgba(7,66,54,.10);">
+          <tr>
+            <td align="center" style="padding:24px;background:#074236;">
+              <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td valign="middle" style="padding-right:12px;">
+                    <span style="display:block;width:54px;height:54px;border-radius:50%;background:#FFFFFF;text-align:center;line-height:54px;">
+                      <img src="{logo_url}" width="42" height="48" alt="LankaLens logo" style="display:inline-block;vertical-align:middle;width:42px;height:48px;object-fit:contain;border:0;">
+                    </span>
+                  </td>
+                  <td valign="middle" style="font-family:Arial,Helvetica,sans-serif;font-size:30px;line-height:36px;font-weight:800;color:#FFFFFF;letter-spacing:-.5px;">
+                    LankaLens
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+          <tr>
+            <td class="email-pad" align="center" style="padding:38px 48px 34px;font-family:Arial,Helvetica,sans-serif;">
+              <h1 style="margin:0 0 12px;font-size:30px;line-height:38px;color:#14211D;font-weight:800;">Verify your email</h1>
+              <p style="margin:0 auto 26px;max-width:430px;font-size:16px;line-height:25px;color:#3C4A45;">
+                Use the verification code below to complete your LankaLens account setup.
+              </p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+                <tr>
+                  <td align="center" style="padding:22px 14px;background:#E4F2EE;border:1px solid #CDE6DF;border-radius:16px;">
+                    <span class="otp-code" style="font-family:Arial,Helvetica,sans-serif;font-size:40px;line-height:48px;font-weight:800;letter-spacing:12px;color:#074236;white-space:nowrap;">{safe_code}</span>
+                  </td>
+                </tr>
+              </table>
+              <p style="margin:16px 0 26px;font-size:15px;line-height:22px;color:#3C4A45;">This code expires in 10 minutes.</p>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background:#F4F8F6;border-radius:14px;">
+                <tr>
+                  <td width="44" align="center" valign="middle" style="padding:16px 0 16px 16px;">
+                    <span style="display:inline-block;width:28px;height:28px;border-radius:50%;background:#0E7C66;color:#FFFFFF;font-size:17px;line-height:28px;font-family:Arial,Helvetica,sans-serif;font-weight:700;">&#10003;</span>
+                  </td>
+                  <td align="left" style="padding:16px;font-family:Arial,Helvetica,sans-serif;font-size:14px;line-height:21px;color:#3C4A45;">
+                    If you didn&rsquo;t create this account, you can safely ignore this email.
+                  </td>
+                </tr>
+              </table>
+              <div style="height:1px;background:#E7ECE9;margin:28px 0 20px;"></div>
+              <p style="margin:0 0 6px;font-size:13px;line-height:20px;color:#74817C;">LankaLens &bull; Sri Lanka&rsquo;s Camera Marketplace</p>
+              <a href="{site_url}" style="font-size:13px;line-height:20px;color:#0E7C66;font-weight:700;text-decoration:none;">lankalens.lk</a>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>"""
+
+
 def send_verification_email(email, code):
-    return send_email(email, "Your Lanka Lens verification code",
-                      "Use this 6-digit code to verify your email address:\n\n"
-                      f"{code}\n\n"
-                      "The code expires in 10 minutes. If you did not create this account, "
-                      "you can safely ignore this email.")
+    text = (
+        "Use this 6-digit code to verify your email address:\n\n"
+        f"{code}\n\n"
+        "The code expires in 10 minutes. If you did not create this account, "
+        "you can safely ignore this email."
+    )
+    return send_email(
+        email,
+        "Your LankaLens verification code",
+        text,
+        verification_email_html(code),
+    )
 
 
 def issue_email_otp(user):

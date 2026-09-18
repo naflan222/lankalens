@@ -51,6 +51,17 @@ def test_brevo_https_email_is_preferred_with_smtp_fallback():
     assert "if u and email_configured():" in SERVER
 
 
+def test_verification_email_has_branded_html_and_plain_text_fallback():
+    assert 'payload["htmlContent"] = html_content' in SERVER
+    assert 'msg.add_alternative(html_content, subtype="html")' in SERVER
+    assert 'def verification_email_html(code):' in SERVER
+    assert 'Your LankaLens verification code' in SERVER
+    assert 'LankaLens &bull; Sri Lanka&rsquo;s Camera Marketplace' in SERVER
+    assert '/images/Logo.png?v=2' in SERVER
+    assert 'payload["replyTo"] = {"email": reply_to}' in SERVER
+    assert 'msg["Reply-To"] = reply_to' in SERVER
+
+
 def test_optional_listing_contact_buttons_are_guarded():
     assert "if (whatsappButton) whatsappButton.addEventListener" in CLIENT
     assert "if (callButton) callButton.addEventListener" in CLIENT
