@@ -7,9 +7,11 @@ APP = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
 
 
 def test_browse_sheet_fix_is_loaded_after_app():
-    assert 'src="js/app.js"' in INDEX
-    assert 'src="js/browse-sheet-fix.js"' in INDEX
-    assert INDEX.index('src="js/app.js"') < INDEX.index('src="js/browse-sheet-fix.js"')
+    app_script = 'src="js/app.js'
+    browse_fix = 'src="js/browse-sheet-fix.js"'
+    assert app_script in INDEX
+    assert browse_fix in INDEX
+    assert INDEX.index(app_script) < INDEX.index(browse_fix)
 
 
 def test_sheet_backdrop_is_repaired_without_breaking_inner_controls():
