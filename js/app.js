@@ -1332,12 +1332,7 @@
       (l.description || (l.title + ' — ' + fmtLKR(l.price) + ' — ' + (l.location || 'Sri Lanka'))).slice(0, 160),
       location.origin + '/listing/' + (l.slug || slugify(l.title || '')) + '-' + l.id,
       (l.images && l.images[0]) || '');
-    var crumbs = '<nav class="breadcrumbs" aria-label="Breadcrumb">' +
-      '<a data-nav="#/">Home</a><span>/</span>' +
-      (l.top_category ? '<a data-nav="#/category/' + esc(l.top_category.slug) + '">' + esc(l.top_category.name) + '</a><span>/</span>' : '') +
-      (l.category ? '<a data-nav="#/category/' + esc(l.category.slug) + '">' + esc(l.category.name) + '</a><span>/</span>' : '') +
-      '<span class="current">' + esc(l.title) + '</span></nav>';
-    var ghtml = crumbs + '<div class="gallery">' +
+    var ghtml = '<div class="gallery">' +
       '<button class="back" data-back>' + icon('chevron-back-outline') + '</button>' +
       '<button class="favbig' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '<div class="main">' + (imgs.length ? imgs.map(function (src, i) {

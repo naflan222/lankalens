@@ -149,3 +149,9 @@ def test_home_has_builtin_buying_guides_when_posts_are_empty():
 
 def test_admin_dashboard_marks_business_users():
     assert "aChip('Business', '#9C4F96')" in CLIENT
+
+
+def test_product_detail_does_not_render_breadcrumb_directory():
+    assert 'aria-label="Breadcrumb"' not in CLIENT
+    assert "var crumbs =" not in CLIENT
+    assert "var ghtml = '<div class=\"gallery\">' +" in CLIENT
