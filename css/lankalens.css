@@ -1309,3 +1309,29 @@ button { font-family: inherit; }
 .verify-home-banner span{font-size:12px;line-height:1.45;color:var(--muted)}
 .verify-home-banner .btn{width:auto;flex:0 0 auto}
 @media(max-width:420px){.verify-home-banner{align-items:flex-start;flex-direction:column}.verify-home-banner .btn{width:100%}}
+
+
+/* Mobile top safe area ------------------------------------------------------
+   Android/iOS standalone browsers can draw the system status bar over the web
+   viewport. Keep a brand-coloured strip above the app content so the LankaLens
+   logo and sticky page headers always begin below the system icons. */
+@media (max-width: 720px) {
+  html,
+  body {
+    background: var(--brand-darker);
+  }
+
+  #app {
+    padding-top: max(env(safe-area-inset-top), 10px);
+    background: var(--brand-darker);
+  }
+
+  .page-view {
+    min-height: calc(100dvh - max(env(safe-area-inset-top), 10px));
+    background: var(--bg);
+  }
+
+  .app-header {
+    top: max(env(safe-area-inset-top), 10px);
+  }
+}
