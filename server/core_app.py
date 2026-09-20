@@ -1387,7 +1387,10 @@ SAFE_DIRS = {"css", "js", "images", "icons", "fonts", "uploads"}
 
 @app.route("/")
 def index():
-    return render_index({"jsonld": homepage_jsonld()})
+    return render_index({
+        "jsonld": homepage_jsonld(),
+        "body_html": homepage_seo_body(),
+    })
 
 
 @app.route("/favicon.svg")
@@ -1522,6 +1525,75 @@ def homepage_jsonld():
         "inLanguage": "en-LK",
     }
     return graph_jsonld(org, website)
+
+
+def listing_public_path(listing):
+    slug = listing.get("slug") or slugify(listing.get("title") or "listing")
+    return f"/listing/{slug}-{listing['id']}"
+
+
+def active_category_links(limit=12):
+    cats = query("SELECT id, slug, name, parent_id, sort FROM categories ORDER BY sort, id")
+    active_ids = {
+        row["category_id"] for row in query(
+            "SELECT DISTINCT category_id FROM listings WHERE status = 'active'")
+    }
+    by_id = {row["id"]: row for row in cats}
+    visible_ids = set(active_ids)
+    for cid in list(active_ids):
+        parent_id = by_id.get(cid, {}).get("parent_id")
+        if parent_id:
+            visible_ids.add(parent_id)
+    return [row for row in cats if row["id"] in visible_ids][:limit]
+
+
+def homepage_seo_body():
+    """Crawlable internal links beneath the JS app shell for search engines."""
+    categories = active_category_links(12)
+    listings = query(
+        listing_query_base()
+        + " WHERE l.status = 'active' ORDER BY l.created_at DESC LIMIT 12")
+    shops = query(
+        "SELECT name, slug FROM businesses WHERE verified = 1 ORDER BY id DESC LIMIT 8")
+    guides = query(
+        "SELECT title, slug FROM posts ORDER BY id DESC LIMIT 6")
+
+    category_links = "".join(
+        f'<li><a href="/category/{esc_html(row["slug"])}">{esc_html(row["name"])}</a></li>'
+        for row in categories)
+    listing_links = "".join(
+        f'<li><a href="{esc_html(listing_public_path(row))}">{esc_html(row["title"])}</a>'
+        f' — Rs. {int(row["price"] or 0):,}</li>'
+        for row in listings)
+    shop_links = "".join(
+        f'<li><a href="/shop/{esc_html(row["slug"])}">{esc_html(row["name"])}</a></li>'
+        for row in shops)
+    guide_links = "".join(
+        f'<li><a href="/guide/{esc_html(row["slug"])}">{esc_html(row["title"])}</a></li>'
+        for row in guides)
+
+    sections = [
+        '<section class="section"><h1>Buy &amp; Sell Cameras in Sri Lanka</h1>'
+        '<p>Browse cameras, lenses, action cameras, drones and photography gear '
+        'from sellers and camera shops across Sri Lanka.</p></section>',
+    ]
+    if category_links:
+        sections.append(
+            '<nav class="section" aria-label="Camera gear categories">'
+            '<h2>Browse camera gear</h2><ul>' + category_links + '</ul></nav>')
+    if listing_links:
+        sections.append(
+            '<section class="section"><h2>Latest camera gear listings</h2><ul>'
+            + listing_links + '</ul></section>')
+    if shop_links:
+        sections.append(
+            '<section class="section"><h2>Camera shops</h2><ul>'
+            + shop_links + '</ul></section>')
+    if guide_links:
+        sections.append(
+            '<section class="section"><h2>Camera buying guides</h2><ul>'
+            + guide_links + '</ul></section>')
+    return "".join(sections)
 
 
 def breadcrumb_entity(items, canonical):
@@ -1763,6 +1835,10 @@ def seo_guide(slug):
     base = request.url_root.rstrip("/")
     canonical = f"{base}/guide/{slug}"
     desc = (row["excerpt"] or row["title"])[:300]
+    related_categories = active_category_links(6)
+    category_links = "".join(
+        f'<li><a href="/category/{esc_html(cat["slug"])}">{esc_html(cat["name"])}</a></li>'
+        for cat in related_categories)
     article = {
         "@type": "Article",
         "@id": f"{canonical}#article",
@@ -1799,7 +1875,10 @@ def seo_guide(slug):
         "jsonld": jsonld,
         "body_html": (
             f'<article class="section"><h1>{esc_html(row["title"])}</h1>'
-            f'<p>{esc_html(desc)}</p></article>'),
+            f'<p>{esc_html(desc)}</p>'
+            + (('<h2>Browse camera gear</h2><ul>' + category_links + '</ul>')
+               if category_links else '')
+            + '</article>'),
     }
     return render_index(meta)
 
@@ -1813,6 +1892,15 @@ def seo_shop(slug):
     canonical = f"{base}/shop/{slug}"
     desc = (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300]
     location = ", ".join(x for x in (b.get("city"), b.get("district"), b.get("province")) if x)
+    shop_listings = query(
+        listing_query_base()
+        + " WHERE l.user_id = ? AND l.status = 'active' "
+          "ORDER BY l.created_at DESC LIMIT 12",
+        (b["user_id"],))
+    shop_listing_links = "".join(
+        f'<li><a href="{esc_html(listing_public_path(row))}">{esc_html(row["title"])}</a>'
+        f' — Rs. {int(row["price"] or 0):,}</li>'
+        for row in shop_listings)
 
     shop = {
         "@type": "LocalBusiness",
@@ -1841,8 +1929,24 @@ def seo_shop(slug):
     if len(address) > 2:
         shop["address"] = address
 
+    shop_items = {
+        "@type": "ItemList",
+        "@id": f"{canonical}#listings",
+        "name": f"Listings from {b['name']}",
+        "numberOfItems": len(shop_listings),
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": position,
+                "name": row["title"],
+                "url": f"{base}{listing_public_path(row)}",
+            }
+            for position, row in enumerate(shop_listings, 1)
+        ],
+    } if shop_listings else None
     jsonld = graph_jsonld(
         shop,
+        shop_items,
         breadcrumb_entity([
             ("Lanka Lens", f"{base}/"),
             (b["name"], None),
@@ -1857,7 +1961,10 @@ def seo_shop(slug):
         "body_html": (
             f'<section class="section"><h1>{esc_html(b["name"])}</h1>'
             f'<p>{esc_html(desc)}</p>'
-            + (f'<p>{esc_html(location)}, Sri Lanka</p>' if location else '') + '</section>'),
+            + (f'<p>{esc_html(location)}, Sri Lanka</p>' if location else '')
+            + (('<h2>Current listings</h2><ul>' + shop_listing_links + '</ul>')
+               if shop_listing_links else '<p>No active listings are available from this shop right now.</p>')
+            + '</section>'),
     }
     return render_index(meta)
 
