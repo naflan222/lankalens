@@ -745,6 +745,10 @@
     return seoTrim(listingSeoIdentity(l) + ' for sale in ' + where, 125);
   }
 
+  function listingPublicHref(l) {
+    return '/listing/' + encodeURIComponent((l && l.slug) || slugify((l && l.title) || 'listing')) + '-' + l.id;
+  }
+
   function lcard(l) {
     var img = (l.images && l.images[0])
       ? '<img src="' + esc(l.images[0]) + '" loading="lazy" alt="' + esc(listingImageAlt(l)) + '">'
@@ -758,7 +762,7 @@
       (l.urgent ? '<span class="urgent-flag">URGENT</span>' : '') +
       '<button class="fav' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '" aria-label="Favorite">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '</div><div class="body">' +
-      '<div class="title"><a href="/listing/' + encodeURIComponent(l.slug || 'listing') + '-' + l.id + '" style="color:inherit;text-decoration:none">' + esc(l.title) + '</a></div>' +
+      '<div class="title"><a href="' + listingPublicHref(l) + '" data-nav="#/ads/' + l.id + '" style="color:inherit;text-decoration:none">' + esc(l.title) + '</a></div>' +
       '<div class="price">' + fmtLKR(l.price) + (l.negotiable ? ' <span class="neg">negotiable</span>' : '') + '</div>' +
       '<div class="meta"><span>' + icon('location-outline') + esc(l.city || l.district || l.province || '') + '</span>' +
       '<span class="sep">·</span><span>' + timeAgo(l.created_at) + '</span>' + sellerOk + '</div>' +
@@ -910,9 +914,10 @@
             posts = (posts && posts.length) ? posts : builtInBuyingGuides();
             return '<div class="hscroll">' + posts.slice(0, 4).map(function (p) {
               var href = p.href || ('#/blog/' + p.slug);
+              var cleanGuide = p.slug ? ('/guide/' + encodeURIComponent(p.slug)) : '';
               return '<div class="lcard card-sm" data-nav="' + esc(href) + '">' +
                 '<div class="thumb">' + (p.image ? '<img src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '<span class="ph">' + icon('reader-outline') + '</span>') + '</div>' +
-                '<div class="body"><div class="title" style="min-height:auto">' + esc(p.title) + '</div>' +
+                '<div class="body"><div class="title" style="min-height:auto">' + (cleanGuide ? '<a href="' + cleanGuide + '" data-nav="' + esc(href) + '" style="color:inherit;text-decoration:none">' + esc(p.title) + '</a>' : esc(p.title)) + '</div>' +
                 '<div class="meta"><span>' + esc(p.category || 'Guide') + '</span><span class="sep">·</span><span>' + fmtDate(p.created_at) + '</span></div></div></div>';
             }).join('') + '</div>';
           }
@@ -945,10 +950,10 @@
   }
 
   function shopCardSmall(s) {
-    return '<div class="lcard card-sm" data-nav="#/shop/' + esc(s.slug) + '">' +
+    return '<a class="lcard card-sm" href="/shop/' + esc(s.slug) + '" data-nav="#/shop/' + esc(s.slug) + '" style="color:inherit;text-decoration:none">' +
       '<div class="thumb">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="' + esc(s.name || 'Shop') + ' logo' + '">' : '<span class="ph">' + icon('cart-outline') + '</span>') + '</div>' +
       '<div class="body"><div class="title" style="min-height:auto">' + esc(s.name) + (s.verified ? ' ' + icon('shield-checkmark') : '') + '</div>' +
-      '<div class="meta"><span>' + icon('location-outline') + esc(s.city || s.area) + '</span></div></div></div>';
+      '<div class="meta"><span>' + icon('location-outline') + esc(s.city || s.area) + '</span></div></div></a>';
   }
 
   function promoBanner(ic, title, sub, link) {
@@ -1014,7 +1019,7 @@
             return cats.map(function (c) {
               return '<div class="divider-label">' + esc(c.name) + '</div><div class="subcats" style="padding:0 16px 6px">' +
                 (c.children || []).map(function (s) {
-                  return '<a class="chip" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
+                  return '<a class="chip" href="/category/' + esc(s.slug) + '" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
                 }).join('') + '</div>';
             }).join('');
           }
@@ -1074,9 +1079,9 @@
   function siblingsHtml(found, slug) {
     var parent = found.sub ? found.parent : found;
     var kids = parent.children || [];
-    return '<a class="chip" data-nav="#/browse?category=' + esc(parent.slug) + '">All ' + esc(parent.name) + '</a>' +
+    return '<a class="chip" href="/category/' + esc(parent.slug) + '" data-nav="#/category/' + esc(parent.slug) + '">All ' + esc(parent.name) + '</a>' +
       kids.map(function (s) {
-        return '<a class="chip' + (s.slug === slug ? ' active' : '') + '" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
+        return '<a class="chip' + (s.slug === slug ? ' active' : '') + '" href="/category/' + esc(s.slug) + '" data-nav="#/category/' + esc(s.slug) + '">' + esc(s.name) + '</a>';
       }).join('');
   }
 
@@ -1456,7 +1461,7 @@
       '<div class="loc">' + icon('location-outline') + esc([s.city, s.province].filter(Boolean).join(', ') || 'Sri Lanka') + '</div>' +
       '<div class="loc">' + icon('time-outline') + 'Member since ' + fmtDate(s.created_at) + '</div></div>' +
       '<div class="chev">' + icon('chevron-forward-outline') + '</div></div>' +
-      (s.business ? '<a class="biz-link" data-nav="#/shop/' + esc(s.business.slug) + '">' + icon('briefcase-outline') + ' Visit shop: ' + esc(s.business.name) + icon('chevron-forward-outline') + '</a>' : '') +
+      (s.business ? '<a class="biz-link" href="/shop/' + esc(s.business.slug) + '" data-nav="#/shop/' + esc(s.business.slug) + '">' + icon('briefcase-outline') + ' Visit shop: ' + esc(s.business.name) + icon('chevron-forward-outline') + '</a>' : '') +
       '</div>';
 
     var related = (l.related || []).length ? '<div class="section"><div class="section-head"><h2>' + icon('albums-outline') + 'Related Listings</h2></div>' +
@@ -1528,7 +1533,7 @@
   }
 
   function shareListing(l) {
-    var url = location.origin + location.pathname + '#/ads/' + l.id;
+    var url = location.origin + listingPublicHref(l);
     if (navigator.share) {
       navigator.share({ title: l.title, text: l.title + ' — ' + fmtLKR(l.price), url: url })
         .catch(function (e) {
@@ -3054,9 +3059,10 @@
             posts = (posts && posts.length) ? posts : builtInBuyingGuides();
             return posts.map(function (p) {
               var href = p.href || ('#/blog/' + p.slug);
+              var cleanGuide = p.slug ? ('/guide/' + encodeURIComponent(p.slug)) : '';
               return '<div class="post-card" data-nav="' + esc(href) + '">' +
                 (p.image ? '<img class="thumb" src="' + esc(p.image) + '" alt="' + esc(p.title || 'Guide') + '">' : '') +
-                '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + esc(p.title) + '</b>' +
+                '<div class="meta"><span class="cat">' + esc(p.category || 'Guide') + '</span><b>' + (cleanGuide ? '<a href="' + cleanGuide + '" data-nav="' + esc(href) + '" style="color:inherit;text-decoration:none">' + esc(p.title) + '</a>' : esc(p.title)) + '</b>' +
                 '<span class="excerpt">' + esc(p.excerpt) + '</span></div></div>';
             }).join('');
           }
@@ -3105,7 +3111,7 @@
             return '<div class="detail-wrap" style="display:grid;gap:14px">' + shops.map(function (s) {
               return '<div class="shop-card" data-nav="#/shop/' + esc(s.slug) + '">' +
                 '<div class="cover">' + (s.logo ? '<img src="' + esc(s.logo) + '" alt="' + esc(s.name || 'Shop') + ' logo' + '">' : '<span class="ph">' + icon('storefront-outline') + '</span>') + '</div>' +
-                '<div class="body"><div class="name">' + esc(s.name) + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
+                '<div class="body"><div class="name"><a href="/shop/' + esc(s.slug) + '" data-nav="#/shop/' + esc(s.slug) + '" style="color:inherit;text-decoration:none">' + esc(s.name) + '</a>' + (s.verified ? '<span class="vbadge">' + icon('shield-checkmark') + 'Verified</span>' : '') + '</div>' +
                 '<div class="area">' + icon('location-outline') + esc([s.area, s.city, s.province].filter(Boolean).join(', ')) + '</div>' +
                 '<p class="fs13 muted" style="margin-top:8px;line-height:1.5">' + esc(s.description) + '</p>' +
                 '<div class="specs">' + (s.listing_count ? '<span class="chip">' + s.listing_count + ' listings</span>' : '') +

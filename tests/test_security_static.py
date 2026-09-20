@@ -166,3 +166,17 @@ def test_product_detail_does_not_render_breadcrumb_directory():
     assert 'aria-label="Breadcrumb"' not in CLIENT
     assert "var crumbs =" not in CLIENT
     assert "var ghtml = '<div class=\"gallery\">' +" in CLIENT
+
+
+def test_seo_internal_links_use_clean_crawlable_urls():
+    assert "def homepage_seo_body():" in SERVER
+    assert '"body_html": homepage_seo_body()' in SERVER
+    assert "def listing_public_path(listing):" in SERVER
+    assert 'href="/category/' in SERVER
+    assert 'href="/shop/' in SERVER
+    assert 'href="/guide/' in SERVER
+    assert "shop_listing_links" in SERVER
+    assert "function listingPublicHref(l)" in CLIENT
+    assert 'href="/shop/' in CLIENT
+    assert 'href="/category/' in CLIENT
+    assert "location.origin + listingPublicHref(l)" in CLIENT
