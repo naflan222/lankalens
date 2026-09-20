@@ -23,9 +23,9 @@ def test_pwa_files_exist_and_are_wired():
     assert PWA_SERVER_PATH.exists()
     assert LOGO_PATH.exists()
     assert 'rel="manifest" href="/manifest.webmanifest?v=3"' in INDEX
-    assert 'href="css/lankalens.css?v=20260918-3"' in INDEX
+    assert 'href="/css/lankalens.css?v=20260918-3"' in INDEX
     assert '<meta name="theme-color" content="#074236">' in INDEX
-    assert '<script src="js/pwa-install.js"></script>' in INDEX
+    assert '<script src="/js/pwa-install.js"></script>' in INDEX
     assert "register_pwa_routes(app, core)" in APP_PATH.read_text(encoding="utf-8")
 
 

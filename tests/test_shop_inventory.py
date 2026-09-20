@@ -6,7 +6,7 @@ INDEX = (ROOT / "index.html").read_text(encoding="utf-8")
 
 
 def test_inventory_script_is_loaded():
-    assert '<script src="js/shop-inventory.js"></script>' in INDEX
+    assert '<script src="/js/shop-inventory.js"></script>' in INDEX
 
 
 def test_inventory_reuses_existing_listing_api_and_statuses():
