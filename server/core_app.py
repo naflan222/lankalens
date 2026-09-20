@@ -1562,6 +1562,73 @@ def iso_timestamp(value):
         return ""
 
 
+def _seo_clean(value):
+    return " ".join(str(value or "").split())
+
+
+def _seo_trim(value, limit):
+    text = _seo_clean(value)
+    if len(text) <= limit:
+        return text
+    cut = text[:max(1, limit - 1)].rsplit(" ", 1)[0].rstrip(" -|,:;")
+    if not cut:
+        cut = text[:max(1, limit - 1)].rstrip()
+    return cut + "…"
+
+
+def listing_seo_identity(l):
+    brand = _seo_clean(l.get("brand"))
+    model = _seo_clean(l.get("model"))
+    if brand and model:
+        # Brand + model is usually the strongest model-specific search phrase.
+        # Avoid repeating the brand if the model field already contains it.
+        if model.lower().startswith(brand.lower()):
+            return model
+        return f"{brand} {model}"
+    return _seo_clean(l.get("title")) or "Camera Gear"
+
+
+def listing_seo_title(l):
+    suffix = " for Sale in Sri Lanka | Lanka Lens"
+    identity = listing_seo_identity(l)
+    room = max(20, 68 - len(suffix))
+    return _seo_trim(identity, room) + suffix
+
+
+def listing_seo_description(l):
+    identity = listing_seo_identity(l)
+    condition = _seo_clean(l.get("condition")).lower()
+    condition_map = {
+        "like new": "like-new",
+        "brand new": "brand-new",
+    }
+    condition = condition_map.get(condition, condition)
+    location = (_seo_clean(l.get("city")) or _seo_clean(l.get("district"))
+                or _seo_clean(l.get("province")) or "Sri Lanka")
+    where = "Sri Lanka" if location.lower() == "sri lanka" else f"{location}, Sri Lanka"
+
+    lead = "Find "
+    if condition:
+        lead += f"a {condition} "
+    lead += f"{identity} for sale in {where}"
+
+    try:
+        price = int(l.get("price") or 0)
+    except (TypeError, ValueError):
+        price = 0
+    if price > 0:
+        lead += f" for Rs. {price:,}"
+    lead += ". View photos, condition and seller details on LankaLens."
+    return _seo_trim(lead, 160)
+
+
+def listing_image_alt(l):
+    identity = listing_seo_identity(l)
+    location = (_seo_clean(l.get("city")) or _seo_clean(l.get("province")) or "Sri Lanka")
+    where = "Sri Lanka" if location.lower() == "sri lanka" else f"{location}, Sri Lanka"
+    return _seo_trim(f"{identity} for sale in {where}", 125)
+
+
 def listing_product_entity(l, canonical, category_name=""):
     images = [absolute_url(img) for img in (l.get("images") or [])[:5] if img]
     condition = schema_condition(l.get("condition"))
@@ -1570,7 +1637,7 @@ def listing_product_entity(l, canonical, category_name=""):
         "@id": f"{canonical}#product",
         "name": l["title"],
         "url": canonical,
-        "description": (l.get("description") or "")[:500],
+        "description": (l.get("description") or listing_seo_description(l))[:500],
         "offers": {
             "@type": "Offer",
             "url": canonical,
@@ -1601,29 +1668,60 @@ def seo_listing(slug):
     lid = int(m.group(1))
     row = query(listing_query_base() + " WHERE l.id = ? AND l.status = 'active'", (lid,), one=True)
     if not row:
+        # Draft, pending, rejected, paused, sold and expired listings must not
+        # become indexable public SEO pages.
         abort(404)
+
     l = serialize_listing(row, include_seller=False)
-    cat = query("SELECT name, slug FROM categories WHERE id = ?", (row["category_id"],), one=True)
     base = request.url_root.rstrip("/")
     canonical = f"{base}/listing/{slug}"
-    desc = (l.get("description") or f"{l['title']} — {l['price']:,.0f} LKR. "
-            f"Buy and sell camera gear in Sri Lanka on Lanka Lens.")[:300]
+    seo_title = listing_seo_title(l)
+    seo_desc = listing_seo_description(l)
+    image_alt = listing_image_alt(l)
+
+    cat_name = l.get("category_name") or ""
+    cat_slug = l.get("category_slug") or ""
+    category_html = (
+        f'<p><a href="{base}/category/{esc_html(cat_slug)}">{esc_html(cat_name)}</a></p>'
+        if cat_name and cat_slug else "")
+
+    image_html = ""
+    if l.get("images"):
+        image_html = (
+            f'<p><img src="{esc_html(l["images"][0])}" '
+            f'alt="{esc_html(image_alt)}" loading="eager"></p>')
+
+    facts = []
+    for label, value in (
+        ("Brand", l.get("brand")),
+        ("Model", l.get("model")),
+        ("Condition", l.get("condition")),
+        ("Location", l.get("location") or l.get("province")),
+    ):
+        if _seo_clean(value):
+            facts.append(f'<li><strong>{label}:</strong> {esc_html(value)}</li>')
+    facts_html = f'<ul>{"".join(facts)}</ul>' if facts else ""
+
+    visible_desc = _seo_clean(l.get("description")) or seo_desc
     body_html = (
         f'<article class="section"><h1>{esc_html(l["title"])}</h1>'
-        f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
-        f'<p>{esc_html(desc)}</p></article>')
+        + category_html
+        + image_html
+        + f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
+        + facts_html
+        + f'<p>{esc_html(visible_desc)}</p></article>')
 
     crumbs = [("Lanka Lens", f"{base}/")]
-    if cat:
-        crumbs.append((cat["name"], f"{base}/category/{cat['slug']}"))
+    if cat_name and cat_slug:
+        crumbs.append((cat_name, f"{base}/category/{cat_slug}"))
     crumbs.append((l["title"], None))
     jsonld = graph_jsonld(
-        listing_product_entity(l, canonical, cat["name"] if cat else ""),
+        listing_product_entity(l, canonical, cat_name),
         breadcrumb_entity(crumbs, canonical),
     )
     meta = {
-        "title": f"{l['title']} — Lanka Lens",
-        "description": desc,
+        "title": seo_title,
+        "description": seo_desc,
         "canonical": canonical,
         "og_type": "product",
         "image": (l["images"][0] if l["images"] else ""),
