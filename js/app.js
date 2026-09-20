@@ -5180,6 +5180,19 @@
       renderDrawer();
       renderTabbar();
       render();
+
+      // The server may include crawlable SEO fallback content in #page so search
+      // engines can discover clean links before JavaScript runs. Keep that from
+      // flashing to users during refresh, then uncover the real SPA after its
+      // first synchronous render has been painted.
+      var cover = document.getElementById('app-boot-cover');
+      if (cover) {
+        requestAnimationFrame(function () {
+          requestAnimationFrame(function () {
+            if (cover.parentNode) cover.parentNode.removeChild(cover);
+          });
+        });
+      }
     }
     // Never leave the shell blank if the API is unreachable/very slow.
     setTimeout(function () { if (!bootDone) firstRender(); }, 6000);
