@@ -42,9 +42,54 @@
        lankalens.css ("Base element resets"). -->
   <link rel="stylesheet" href="/css/style.css">
   <link rel="stylesheet" href="/css/lankalens.css?v=20260918-3">
+  <style>
+    /* Cover the server-rendered SEO fallback only while the SPA is booting.
+       The fallback remains in the DOM for crawlers and for no-JS users. */
+    #app-boot-cover {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      background: #f7f9f8;
+    }
+    #app-boot-cover img {
+      width: 64px;
+      height: 64px;
+      object-fit: contain;
+      border-radius: 16px;
+    }
+    #app-boot-cover .boot-spinner {
+      width: 28px;
+      height: 28px;
+      border: 3px solid rgba(7, 66, 54, .18);
+      border-top-color: #0E7C66;
+      border-radius: 50%;
+      animation: ll-boot-spin .8s linear infinite;
+    }
+    @keyframes ll-boot-spin { to { transform: rotate(360deg); } }
+  </style>
 </head>
 <body>
-  <noscript><img height="1" width="1" style="display:none" alt="" src="https://www.facebook.com/tr?id=2295151224578176&amp;ev=PageView&amp;noscript=1"></noscript>
+  <noscript>
+    <style>#app-boot-cover{display:none!important}</style>
+    <img height="1" width="1" style="display:none" alt="" src="https://www.facebook.com/tr?id=2295151224578176&amp;ev=PageView&amp;noscript=1">
+  </noscript>
+  <div id="app-boot-cover" aria-hidden="true">
+    <img src="/images/Logo.png?v=2" alt="">
+    <div class="boot-spinner"></div>
+  </div>
+  <script>
+    /* If the main app ever fails to boot, do not leave visitors stuck behind
+       the cover; reveal the server-rendered fallback after a short timeout. */
+    window.setTimeout(function () {
+      var cover = document.getElementById('app-boot-cover');
+      if (cover && cover.parentNode) cover.parentNode.removeChild(cover);
+    }, 7000);
+  </script>
   <div id="app">
     <main id="page" class="page-view"></main>
 
@@ -61,7 +106,7 @@
   </div>
 
   <script src="/js/ionicons.js"></script>
-  <script src="/js/app.js?v=20260918-2"></script>
+  <script src="/js/app.js?v=20260920-1"></script>
   <script src="/js/business-social.js"></script>
   <script src="/js/auth-policy.js"></script>
   <script src="/js/browse-sheet-fix.js"></script>
