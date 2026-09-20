@@ -33,7 +33,7 @@ def test_auth_entrypoint_replaces_all_password_creation_routes():
 def test_otp_dialog_cannot_be_dismissed_by_backdrop_touch():
     client = (ROOT / "js" / "auth-policy.js").read_text(encoding="utf-8")
     index = (ROOT / "index.html").read_text(encoding="utf-8")
-    assert 'src="js/auth-policy.js"' in index
+    assert 'src="/js/auth-policy.js"' in index
     assert "mask.removeAttribute('data-dialog-cancel')" in client
     assert "data-email-otp-verify" in client
     assert "data-auth-otp-close" in client
