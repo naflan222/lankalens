@@ -1387,7 +1387,7 @@ SAFE_DIRS = {"css", "js", "images", "icons", "fonts", "uploads"}
 
 @app.route("/")
 def index():
-    return render_index()
+    return render_index({"jsonld": homepage_jsonld()})
 
 
 @app.route("/favicon.svg")
@@ -1466,22 +1466,131 @@ def esc_html(s):
             .replace('"', "&quot;").replace("'", "&#39;"))
 
 
-def listing_jsonld(l):
-    base = request.url_root.rstrip("/")
-    return json.dumps({
+def absolute_url(value):
+    """Return an absolute URL for structured-data image/page values."""
+    if not value:
+        return ""
+    value = str(value)
+    if value.startswith(("https://", "http://")):
+        return value
+    return request.url_root.rstrip("/") + "/" + value.lstrip("/")
+
+
+def jsonld_dumps(data):
+    """Serialize JSON-LD safely for embedding inside a <script> element."""
+    return (json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026"))
+
+
+def graph_jsonld(*entities):
+    return jsonld_dumps({
         "@context": "https://schema.org",
+        "@graph": [entity for entity in entities if entity],
+    })
+
+
+def organization_entity(base):
+    return {
+        "@type": "Organization",
+        "@id": f"{base}/#organization",
+        "name": "Lanka Lens",
+        "alternateName": "LankaLens",
+        "url": f"{base}/",
+        "logo": {
+            "@type": "ImageObject",
+            "url": f"{base}/images/Logo.png?v=2",
+        },
+        "areaServed": {
+            "@type": "Country",
+            "name": "Sri Lanka",
+        },
+    }
+
+
+def homepage_jsonld():
+    base = request.url_root.rstrip("/")
+    org = organization_entity(base)
+    website = {
+        "@type": "WebSite",
+        "@id": f"{base}/#website",
+        "url": f"{base}/",
+        "name": "Lanka Lens",
+        "alternateName": "LankaLens",
+        "publisher": {"@id": f"{base}/#organization"},
+        "inLanguage": "en-LK",
+    }
+    return graph_jsonld(org, website)
+
+
+def breadcrumb_entity(items, canonical):
+    elements = []
+    for position, (name, url) in enumerate(items, 1):
+        item = {
+            "@type": "ListItem",
+            "position": position,
+            "name": str(name),
+        }
+        if url:
+            item["item"] = url
+        elements.append(item)
+    return {
+        "@type": "BreadcrumbList",
+        "@id": f"{canonical}#breadcrumb",
+        "itemListElement": elements,
+    }
+
+
+def schema_condition(value):
+    key = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
+    if key in {"new", "brand-new"}:
+        return "https://schema.org/NewCondition"
+    if key in {"refurbished", "reconditioned"}:
+        return "https://schema.org/RefurbishedCondition"
+    if key in {"damaged", "for-parts", "parts"}:
+        return "https://schema.org/DamagedCondition"
+    if key:
+        return "https://schema.org/UsedCondition"
+    return ""
+
+
+def iso_timestamp(value):
+    try:
+        return datetime.fromtimestamp(int(value), tz=timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError):
+        return ""
+
+
+def listing_product_entity(l, canonical, category_name=""):
+    images = [absolute_url(img) for img in (l.get("images") or [])[:5] if img]
+    condition = schema_condition(l.get("condition"))
+    product = {
         "@type": "Product",
+        "@id": f"{canonical}#product",
         "name": l["title"],
-        "image": l["images"][:5],
+        "url": canonical,
         "description": (l.get("description") or "")[:500],
         "offers": {
             "@type": "Offer",
+            "url": canonical,
             "priceCurrency": "LKR",
             "price": str(l["price"]),
             "availability": "https://schema.org/InStock",
-            "url": f"{base}/listing/{l['slug']}-{l['id']}",
         },
-    })
+    }
+    if images:
+        product["image"] = images
+    if l.get("brand"):
+        product["brand"] = {"@type": "Brand", "name": l["brand"]}
+    if l.get("model"):
+        product["model"] = l["model"]
+    if category_name:
+        product["category"] = category_name
+    if condition:
+        product["itemCondition"] = condition
+        product["offers"]["itemCondition"] = condition
+    return product
 
 
 @app.route("/listing/<path:slug>")
@@ -1494,21 +1603,31 @@ def seo_listing(slug):
     if not row:
         abort(404)
     l = serialize_listing(row, include_seller=False)
-    cat = query("SELECT name FROM categories WHERE id = ?", (row["category_id"],), one=True)
+    cat = query("SELECT name, slug FROM categories WHERE id = ?", (row["category_id"],), one=True)
     base = request.url_root.rstrip("/")
+    canonical = f"{base}/listing/{slug}"
     desc = (l.get("description") or f"{l['title']} — {l['price']:,.0f} LKR. "
             f"Buy and sell camera gear in Sri Lanka on Lanka Lens.")[:300]
     body_html = (
         f'<article class="section"><h1>{esc_html(l["title"])}</h1>'
         f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
         f'<p>{esc_html(desc)}</p></article>')
+
+    crumbs = [("Lanka Lens", f"{base}/")]
+    if cat:
+        crumbs.append((cat["name"], f"{base}/category/{cat['slug']}"))
+    crumbs.append((l["title"], None))
+    jsonld = graph_jsonld(
+        listing_product_entity(l, canonical, cat["name"] if cat else ""),
+        breadcrumb_entity(crumbs, canonical),
+    )
     meta = {
         "title": f"{l['title']} — Lanka Lens",
         "description": desc,
-        "canonical": f"{base}/listing/{slug}",
+        "canonical": canonical,
         "og_type": "product",
         "image": (l["images"][0] if l["images"] else ""),
-        "jsonld": listing_jsonld(l),
+        "jsonld": jsonld,
         "body_html": body_html,
     }
     resp = app.make_response(render_index(meta))
@@ -1522,12 +1641,42 @@ def seo_guide(slug):
     if not row:
         abort(404)
     base = request.url_root.rstrip("/")
+    canonical = f"{base}/guide/{slug}"
     desc = (row["excerpt"] or row["title"])[:300]
+    article = {
+        "@type": "Article",
+        "@id": f"{canonical}#article",
+        "headline": row["title"],
+        "description": desc,
+        "url": canonical,
+        "mainEntityOfPage": {"@type": "WebPage", "@id": canonical},
+        "publisher": {"@id": f"{base}/#organization"},
+    }
+    if row["image"]:
+        article["image"] = [absolute_url(row["image"])]
+    if row["author"]:
+        article["author"] = {
+            "@type": "Organization" if "lanka lens" in row["author"].lower() else "Person",
+            "name": row["author"],
+        }
+    published = iso_timestamp(row["created_at"])
+    if published:
+        article["datePublished"] = published
+
+    jsonld = graph_jsonld(
+        organization_entity(base),
+        article,
+        breadcrumb_entity([
+            ("Lanka Lens", f"{base}/"),
+            (row["title"], None),
+        ], canonical),
+    )
     meta = {
         "title": f"{row['title']} — Lanka Lens Buying Guide",
         "description": desc,
-        "canonical": f"{base}/guide/{slug}",
+        "canonical": canonical,
         "image": row["image"] or "",
+        "jsonld": jsonld,
         "body_html": (
             f'<article class="section"><h1>{esc_html(row["title"])}</h1>'
             f'<p>{esc_html(desc)}</p></article>'),
@@ -1541,13 +1690,50 @@ def seo_shop(slug):
     if not b:
         abort(404)
     base = request.url_root.rstrip("/")
+    canonical = f"{base}/shop/{slug}"
     desc = (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300]
     location = ", ".join(x for x in (b.get("city"), b.get("district"), b.get("province")) if x)
+
+    shop = {
+        "@type": "LocalBusiness",
+        "@id": f"{canonical}#business",
+        "name": b["name"],
+        "url": canonical,
+        "description": desc,
+        "currenciesAccepted": "LKR",
+        "areaServed": {"@type": "Country", "name": "Sri Lanka"},
+    }
+    if b["logo"]:
+        shop["image"] = absolute_url(b["logo"])
+        shop["logo"] = absolute_url(b["logo"])
+    if b["phone"]:
+        shop["telephone"] = b["phone"]
+
+    address = {"@type": "PostalAddress", "addressCountry": "LK"}
+    if b.get("area"):
+        address["streetAddress"] = b["area"]
+    if b.get("city"):
+        address["addressLocality"] = b["city"]
+    if b.get("district"):
+        address["addressRegion"] = b["district"]
+    elif b.get("province"):
+        address["addressRegion"] = b["province"]
+    if len(address) > 2:
+        shop["address"] = address
+
+    jsonld = graph_jsonld(
+        shop,
+        breadcrumb_entity([
+            ("Lanka Lens", f"{base}/"),
+            (b["name"], None),
+        ], canonical),
+    )
     meta = {
         "title": f"{b['name']} — Camera Shop on Lanka Lens",
         "description": desc,
-        "canonical": f"{base}/shop/{slug}",
+        "canonical": canonical,
         "image": b["logo"] or "",
+        "jsonld": jsonld,
         "body_html": (
             f'<section class="section"><h1>{esc_html(b["name"])}</h1>'
             f'<p>{esc_html(desc)}</p>'
@@ -1594,13 +1780,39 @@ def seo_category(slug):
         f'<p>{esc_html(desc)}</p>'
         + (f'<ul>{links}</ul>' if links else '<p>New listings are added regularly.</p>')
         + '</section>')
-    jsonld = json.dumps({
-        "@context": "https://schema.org",
+
+    item_list = {
+        "@type": "ItemList",
+        "@id": f"{canonical}#itemlist",
+        "name": f"{name} for sale in Sri Lanka",
+        "numberOfItems": len(rows),
+        "itemListElement": [
+            {
+                "@type": "ListItem",
+                "position": i,
+                "name": r["title"],
+                "url": f"{base}/listing/{r['slug']}-{r['id']}",
+            }
+            for i, r in enumerate(rows, 1)
+        ],
+    }
+    collection = {
         "@type": "CollectionPage",
+        "@id": canonical,
         "name": f"{name} for sale in Sri Lanka",
         "description": desc,
         "url": canonical,
-    })
+        "mainEntity": {"@id": f"{canonical}#itemlist"},
+        "inLanguage": "en-LK",
+    }
+    jsonld = graph_jsonld(
+        collection,
+        item_list,
+        breadcrumb_entity([
+            ("Lanka Lens", f"{base}/"),
+            (name, None),
+        ], canonical),
+    )
     return render_index({
         "title": f"{name} for Sale in Sri Lanka | Lanka Lens",
         "description": desc,
