@@ -180,3 +180,12 @@ def test_seo_internal_links_use_clean_crawlable_urls():
     assert 'href="/shop/' in CLIENT
     assert 'href="/category/' in CLIENT
     assert "location.origin + listingPublicHref(l)" in CLIENT
+
+
+def test_boot_cover_prevents_server_seo_flash_without_removing_fallback():
+    index = (ROOT / "index.html").read_text(encoding="utf-8")
+    assert 'id="app-boot-cover"' in index
+    assert 'window.setTimeout(function () {' in index
+    assert "document.getElementById('app-boot-cover')" in CLIENT
+    assert "requestAnimationFrame(function ()" in CLIENT
+    assert 'id="page" class="page-view"' in index
