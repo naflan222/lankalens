@@ -689,14 +689,34 @@
     return cut + '…';
   }
 
-  function listingSeoIdentity(l) {
+  var SEO_PLACEHOLDER_BRANDS = {
+    'other': true,
+    'others': true,
+    'unbranded': true,
+    'no brand': true,
+    'no-brand': true,
+    'n/a': true,
+    'na': true,
+    'none': true,
+    'unknown': true,
+    'not specified': true,
+    'generic': true
+  };
+
+  function listingSeoBrand(l) {
     var brand = seoClean(l && l.brand);
+    return SEO_PLACEHOLDER_BRANDS[brand.toLowerCase()] ? '' : brand;
+  }
+
+  function listingSeoIdentity(l) {
+    var brand = listingSeoBrand(l);
     var model = seoClean(l && l.model);
+    var title = seoClean(l && l.title);
     if (brand && model) {
       if (model.toLowerCase().indexOf(brand.toLowerCase()) === 0) return model;
       return brand + ' ' + model;
     }
-    return seoClean(l && l.title) || 'Camera Gear';
+    return title || model || 'Camera Gear';
   }
 
   function listingSeoTitle(l) {
