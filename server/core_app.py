@@ -1413,6 +1413,7 @@ def render_index(meta=None):
     og_type = meta.get("og_type") or "website"
     image = meta.get("image") or ""
     jsonld = meta.get("jsonld") or ""
+    body_html = meta.get("body_html") or ""
 
     try:
         with open(os.path.join(ROOT, "index.html"), "r", encoding="utf-8") as fh:
@@ -1452,6 +1453,10 @@ def render_index(meta=None):
         extra.append(f'<script type="application/ld+json">{jsonld}</script>')
 
     html = html.replace("</head>", "\n".join(extra) + "\n</head>")
+    if body_html:
+        html = html.replace(
+            '<main id="page" class="page-view"></main>',
+            '<main id="page" class="page-view">' + body_html + '</main>')
     return html
 
 
@@ -1491,14 +1496,20 @@ def seo_listing(slug):
     l = serialize_listing(row, include_seller=False)
     cat = query("SELECT name FROM categories WHERE id = ?", (row["category_id"],), one=True)
     base = request.url_root.rstrip("/")
+    desc = (l.get("description") or f"{l['title']} — {l['price']:,.0f} LKR. "
+            f"Buy and sell camera gear in Sri Lanka on Lanka Lens.")[:300]
+    body_html = (
+        f'<article class="section"><h1>{esc_html(l["title"])}</h1>'
+        f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
+        f'<p>{esc_html(desc)}</p></article>')
     meta = {
         "title": f"{l['title']} — Lanka Lens",
-        "description": (l.get("description") or f"{l['title']} — {l['price']:,.0f} LKR. "
-                        f"Buy and sell camera gear in Sri Lanka on Lanka Lens.")[:300],
+        "description": desc,
         "canonical": f"{base}/listing/{slug}",
         "og_type": "product",
-        "image": (l["images"][0] if l["images"] else "") ,
+        "image": (l["images"][0] if l["images"] else ""),
         "jsonld": listing_jsonld(l),
+        "body_html": body_html,
     }
     resp = app.make_response(render_index(meta))
     resp.headers["X-Robots-Tag"] = "index, follow"
@@ -1511,11 +1522,15 @@ def seo_guide(slug):
     if not row:
         abort(404)
     base = request.url_root.rstrip("/")
+    desc = (row["excerpt"] or row["title"])[:300]
     meta = {
         "title": f"{row['title']} — Lanka Lens Buying Guide",
-        "description": (row["excerpt"] or row["title"])[:300],
+        "description": desc,
         "canonical": f"{base}/guide/{slug}",
         "image": row["image"] or "",
+        "body_html": (
+            f'<article class="section"><h1>{esc_html(row["title"])}</h1>'
+            f'<p>{esc_html(desc)}</p></article>'),
     }
     return render_index(meta)
 
@@ -1526,13 +1541,73 @@ def seo_shop(slug):
     if not b:
         abort(404)
     base = request.url_root.rstrip("/")
+    desc = (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300]
+    location = ", ".join(x for x in (b.get("city"), b.get("district"), b.get("province")) if x)
     meta = {
         "title": f"{b['name']} — Camera Shop on Lanka Lens",
-        "description": (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300],
+        "description": desc,
         "canonical": f"{base}/shop/{slug}",
         "image": b["logo"] or "",
+        "body_html": (
+            f'<section class="section"><h1>{esc_html(b["name"])}</h1>'
+            f'<p>{esc_html(desc)}</p>'
+            + (f'<p>{esc_html(location)}, Sri Lanka</p>' if location else '') + '</section>'),
     }
     return render_index(meta)
+
+
+@app.route("/category/<slug>")
+def seo_category(slug):
+    cat = query(
+        "SELECT id, slug, name, parent_id FROM categories WHERE slug = ?",
+        (slug,), one=True)
+    if not cat:
+        abort(404)
+
+    category_ids = [cat["id"]]
+    if cat["parent_id"] is None:
+        category_ids.extend(
+            r["id"] for r in query(
+                "SELECT id FROM categories WHERE parent_id = ? ORDER BY sort, id",
+                (cat["id"],)))
+
+    ph = ",".join(["?"] * len(category_ids))
+    rows = query(
+        listing_query_base()
+        + f" WHERE l.status = 'active' AND l.category_id IN ({ph}) "
+          "ORDER BY l.created_at DESC LIMIT 12",
+        category_ids)
+
+    base = request.url_root.rstrip("/")
+    name = cat["name"]
+    desc = (
+        f"Browse new and used {name.lower()} for sale in Sri Lanka on Lanka Lens. "
+        "Compare prices in LKR, condition and sellers across Sri Lanka.")
+    canonical = f"{base}/category/{slug}"
+
+    links = "".join(
+        f'<li><a href="{base}/listing/{esc_html(r["slug"])}-{r["id"]}">'
+        f'{esc_html(r["title"])}</a> — Rs. {int(r["price"] or 0):,}</li>'
+        for r in rows)
+    body_html = (
+        f'<section class="section"><h1>{esc_html(name)} for sale in Sri Lanka</h1>'
+        f'<p>{esc_html(desc)}</p>'
+        + (f'<ul>{links}</ul>' if links else '<p>New listings are added regularly.</p>')
+        + '</section>')
+    jsonld = json.dumps({
+        "@context": "https://schema.org",
+        "@type": "CollectionPage",
+        "name": f"{name} for sale in Sri Lanka",
+        "description": desc,
+        "url": canonical,
+    })
+    return render_index({
+        "title": f"{name} for Sale in Sri Lanka | Lanka Lens",
+        "description": desc,
+        "canonical": canonical,
+        "jsonld": jsonld,
+        "body_html": body_html,
+    })
 
 
 @app.route("/robots.txt")
@@ -1550,8 +1625,19 @@ def sitemap_xml():
     base = request.url_root.rstrip("/")
     urls = []
     urls.append((base + "/", now(), "1.0"))
-    # Category pages currently live only inside the SPA hash router and the
-    # server has no /category/<slug> route. Do not advertise 404 URLs to Google.
+    cats = query("SELECT id, slug, parent_id FROM categories ORDER BY id")
+    active_category_ids = {
+        r["category_id"] for r in query(
+            "SELECT DISTINCT category_id FROM listings WHERE status = 'active'")}
+    sitemap_category_ids = set(active_category_ids)
+    by_id = {r["id"]: r for r in cats}
+    for cid in list(active_category_ids):
+        parent_id = by_id.get(cid, {}).get("parent_id")
+        if parent_id:
+            sitemap_category_ids.add(parent_id)
+    for cat in cats:
+        if cat["id"] in sitemap_category_ids:
+            urls.append((f"{base}/category/{cat['slug']}", now(), "0.7"))
     for r in query("SELECT slug FROM posts ORDER BY id"):
         urls.append((f"{base}/guide/{r['slug']}", now(), "0.6"))
     for b in query("SELECT slug FROM businesses WHERE verified = 1 ORDER BY id"):
