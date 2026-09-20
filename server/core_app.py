@@ -1576,16 +1576,32 @@ def _seo_trim(value, limit):
     return cut + "…"
 
 
-def listing_seo_identity(l):
+SEO_PLACEHOLDER_BRANDS = {
+    "other", "others", "unbranded", "no brand", "no-brand", "n/a", "na",
+    "none", "unknown", "not specified", "generic",
+}
+
+
+def listing_seo_brand(l):
     brand = _seo_clean(l.get("brand"))
+    if brand.lower() in SEO_PLACEHOLDER_BRANDS:
+        return ""
+    return brand
+
+
+def listing_seo_identity(l):
+    brand = listing_seo_brand(l)
     model = _seo_clean(l.get("model"))
+    title = _seo_clean(l.get("title"))
     if brand and model:
         # Brand + model is usually the strongest model-specific search phrase.
         # Avoid repeating the brand if the model field already contains it.
         if model.lower().startswith(brand.lower()):
             return model
         return f"{brand} {model}"
-    return _seo_clean(l.get("title")) or "Camera Gear"
+    # When a seller chose a placeholder brand such as "Other", the listing title
+    # usually contains the useful search phrase (for example "2m stick for gopro").
+    return title or model or "Camera Gear"
 
 
 def listing_seo_title(l):
@@ -1648,8 +1664,9 @@ def listing_product_entity(l, canonical, category_name=""):
     }
     if images:
         product["image"] = images
-    if l.get("brand"):
-        product["brand"] = {"@type": "Brand", "name": l["brand"]}
+    seo_brand = listing_seo_brand(l)
+    if seo_brand:
+        product["brand"] = {"@type": "Brand", "name": seo_brand}
     if l.get("model"):
         product["model"] = l["model"]
     if category_name:

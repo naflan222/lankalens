@@ -36,3 +36,14 @@ def test_spa_metadata_and_image_alt_text_match_server_seo():
     assert "setMeta(listingSeoTitle(l)," in CLIENT
     assert "esc(listingImageAlt(l))" in CLIENT
     assert 'href="/category/' in CLIENT
+
+
+def test_placeholder_brands_are_not_used_as_search_terms_or_product_brands():
+    assert "SEO_PLACEHOLDER_BRANDS" in SERVER
+    assert '"other", "others", "unbranded", "no brand", "no-brand"' in SERVER
+    assert "def listing_seo_brand(l):" in SERVER
+    assert "seo_brand = listing_seo_brand(l)" in SERVER
+    assert "if seo_brand:" in SERVER
+    assert "SEO_PLACEHOLDER_BRANDS" in CLIENT
+    assert "function listingSeoBrand(l)" in CLIENT
+    assert "var brand = listingSeoBrand(l);" in CLIENT
