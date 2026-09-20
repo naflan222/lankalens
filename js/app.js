@@ -675,9 +675,59 @@
       '<' + tag + ' class="title">' + esc(title) + '</' + tag + '>' + '<div class="spacer"></div>' + right + '</div></header>';
   }
 
+  function seoClean(v) {
+    return String(v || '').trim().replace(/\s+/g, ' ');
+  }
+
+  function seoTrim(v, limit) {
+    var text = seoClean(v);
+    if (text.length <= limit) return text;
+    var cut = text.slice(0, Math.max(1, limit - 1));
+    var lastSpace = cut.lastIndexOf(' ');
+    if (lastSpace > 12) cut = cut.slice(0, lastSpace);
+    cut = cut.replace(/[\s\-|,:;]+$/g, '');
+    return cut + '…';
+  }
+
+  function listingSeoIdentity(l) {
+    var brand = seoClean(l && l.brand);
+    var model = seoClean(l && l.model);
+    if (brand && model) {
+      if (model.toLowerCase().indexOf(brand.toLowerCase()) === 0) return model;
+      return brand + ' ' + model;
+    }
+    return seoClean(l && l.title) || 'Camera Gear';
+  }
+
+  function listingSeoTitle(l) {
+    var suffix = ' for Sale in Sri Lanka | Lanka Lens';
+    var room = Math.max(20, 68 - suffix.length);
+    return seoTrim(listingSeoIdentity(l), room) + suffix;
+  }
+
+  function listingSeoDescription(l) {
+    var identity = listingSeoIdentity(l);
+    var condition = seoClean(l && l.condition).toLowerCase();
+    if (condition === 'like new') condition = 'like-new';
+    if (condition === 'brand new') condition = 'brand-new';
+    var locationName = seoClean(l && (l.city || l.district || l.province)) || 'Sri Lanka';
+    var where = locationName.toLowerCase() === 'sri lanka' ? 'Sri Lanka' : locationName + ', Sri Lanka';
+    var text = 'Find ' + (condition ? 'a ' + condition + ' ' : '') + identity + ' for sale in ' + where;
+    var price = Number(l && l.price || 0);
+    if (price > 0) text += ' for Rs. ' + Math.round(price).toLocaleString('en-US');
+    text += '. View photos, condition and seller details on LankaLens.';
+    return seoTrim(text, 160);
+  }
+
+  function listingImageAlt(l) {
+    var locationName = seoClean(l && (l.city || l.province)) || 'Sri Lanka';
+    var where = locationName.toLowerCase() === 'sri lanka' ? 'Sri Lanka' : locationName + ', Sri Lanka';
+    return seoTrim(listingSeoIdentity(l) + ' for sale in ' + where, 125);
+  }
+
   function lcard(l) {
     var img = (l.images && l.images[0])
-      ? '<img src="' + esc(l.images[0]) + '" loading="lazy" alt="' + esc(l.title) + '">'
+      ? '<img src="' + esc(l.images[0]) + '" loading="lazy" alt="' + esc(listingImageAlt(l)) + '">'
       : '<span class="ph">' + icon('camera-outline') + '</span>';
     var favOn = isFav(l.id);
     var sellerOk = l.seller && l.seller.verified ? '<span class="seller-ok">' + icon('shield-checkmark') + '</span>' : '';
@@ -1328,19 +1378,19 @@
   function renderDetail(l) {
     var imgs = l.images && l.images.length ? l.images : [];
     var favOn = isFav(l.id);
-    setMeta((l.title || 'Listing') + ' — ' + fmtLKR(l.price) + ' — ' + siteName(),
-      (l.description || (l.title + ' — ' + fmtLKR(l.price) + ' — ' + (l.location || 'Sri Lanka'))).slice(0, 160),
+    setMeta(listingSeoTitle(l),
+      listingSeoDescription(l),
       location.origin + '/listing/' + (l.slug || slugify(l.title || '')) + '-' + l.id,
       (l.images && l.images[0]) || '');
     var ghtml = '<div class="gallery">' +
       '<button class="back" data-back>' + icon('chevron-back-outline') + '</button>' +
       '<button class="favbig' + (favOn ? ' active' : '') + '" data-fav="' + l.id + '">' + icon(favOn ? 'heart' : 'heart-outline') + '</button>' +
       '<div class="main">' + (imgs.length ? imgs.map(function (src, i) {
-        return '<div class="slide"><img src="' + esc(src) + '" alt="' + esc(l.title || 'Listing') + ' photo ' + (i + 1) + '"></div>';
+        return '<div class="slide"><img src="' + esc(src) + '" alt="' + esc(listingImageAlt(l)) + ' photo ' + (i + 1) + '"></div>';
       }).join('') : '<div class="slide" style="display:flex;align-items:center;justify-content:center;color:#889;font-size:60px">' + icon('camera-outline') + '</div>') + '</div>' +
       '<span class="counter" id="g-counter">1 / ' + Math.max(1, imgs.length) + '</span></div>' +
       (imgs.length > 1 ? '<div class="thumbs">' + imgs.map(function (src, i) {
-        return '<div class="t' + (i === 0 ? ' active' : '') + '" data-thumb="' + i + '"><img src="' + esc(src) + '" alt="' + esc(l.title || 'Listing') + ' thumbnail ' + (i + 1) + '"></div>';
+        return '<div class="t' + (i === 0 ? ' active' : '') + '" data-thumb="' + i + '"><img src="' + esc(src) + '" alt="' + esc(listingImageAlt(l)) + ' thumbnail ' + (i + 1) + '"></div>';
       }).join('') + '</div>' : '');
 
     var cond = l.condition || '—';
@@ -1350,7 +1400,7 @@
         (l.featured ? '<span class="vbadge" style="background:var(--accent-light);color:var(--accent-dark);margin-right:6px">' + icon('flash-outline') + ' Featured</span>' : '') +
         (l.urgent ? '<span class="vbadge" style="background:#FDE8E8;color:#C62828">' + icon('flame-outline') + ' Urgent</span>' : '') + '</div>' : '') +
       '<div class="detail-price-row"><div><div class="detail-price">' + fmtLKR(l.price) + (l.negotiable ? ' <small>negotiable</small>' : '') + '</div></div>' +
-      '<span class="vbadge">' + icon('pricetag-outline') + esc(catName) + '</span></div>' +
+      (l.category_slug ? '<a class="vbadge" href="/category/' + esc(l.category_slug) + '" data-nav="#/category/' + esc(l.category_slug) + '" style="text-decoration:none">' + icon('pricetag-outline') + esc(catName) + '</a>' : '<span class="vbadge">' + icon('pricetag-outline') + esc(catName) + '</span>') + '</div>' +
       '<h1 class="detail-title">' + esc(l.title) + '</h1>' +
       '<div class="detail-meta">' +
       '<span>' + icon('location-outline') + esc(l.location || 'Sri Lanka') + '</span>' +
