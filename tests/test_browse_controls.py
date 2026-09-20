@@ -7,8 +7,8 @@ APP = (ROOT / "js" / "app.js").read_text(encoding="utf-8")
 
 
 def test_browse_sheet_fix_is_loaded_after_app():
-    app_script = 'src="js/app.js'
-    browse_fix = 'src="js/browse-sheet-fix.js"'
+    app_script = 'src="/js/app.js'
+    browse_fix = 'src="/js/browse-sheet-fix.js"'
     assert app_script in INDEX
     assert browse_fix in INDEX
     assert INDEX.index(app_script) < INDEX.index(browse_fix)
