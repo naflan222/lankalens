@@ -23,7 +23,7 @@ from email.message import EmailMessage
 from datetime import datetime, timezone
 from functools import wraps
 
-from flask import Flask, request, jsonify, g, abort, send_from_directory
+from flask import Flask, request, jsonify, g, abort, send_from_directory, redirect
 from werkzeug.exceptions import HTTPException
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -1673,6 +1673,11 @@ def seo_listing(slug):
         abort(404)
 
     l = serialize_listing(row, include_seller=False)
+    expected_slug = f"{l['slug']}-{l['id']}"
+    if slug != expected_slug:
+        # Keep one canonical URL per listing even if an old/wrong slug is linked.
+        return redirect(f"/listing/{expected_slug}", code=301)
+
     base = request.url_root.rstrip("/")
     canonical = f"{base}/listing/{slug}"
     seo_title = listing_seo_title(l)
