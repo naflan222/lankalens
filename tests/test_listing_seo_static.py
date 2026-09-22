@@ -47,3 +47,13 @@ def test_placeholder_brands_are_not_used_as_search_terms_or_product_brands():
     assert "SEO_PLACEHOLDER_BRANDS" in CLIENT
     assert "function listingSeoBrand(l)" in CLIENT
     assert "var brand = listingSeoBrand(l);" in CLIENT
+
+
+def test_listing_pages_link_verified_shops_and_related_gear():
+    assert "seller_business = query(" in SERVER
+    assert "WHERE user_id = ? AND verified = 1 LIMIT 1" in SERVER
+    assert 'Sold by <a href="{base}/shop/' in SERVER
+    assert "Related camera gear" in SERVER
+    assert "AND l.category_id = ? AND l.id <> ?" in SERVER
+    assert "listing_product_entity(l, canonical, cat_name, seller_business)" in SERVER
+    assert 'product["offers"]["seller"]' in SERVER
