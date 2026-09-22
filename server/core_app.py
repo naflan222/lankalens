@@ -1717,7 +1717,7 @@ def listing_image_alt(l):
     return _seo_trim(f"{identity} for sale in {where}", 125)
 
 
-def listing_product_entity(l, canonical, category_name=""):
+def listing_product_entity(l, canonical, category_name="", seller_business=None):
     images = [absolute_url(img) for img in (l.get("images") or [])[:5] if img]
     condition = schema_condition(l.get("condition"))
     product = {
@@ -1746,6 +1746,14 @@ def listing_product_entity(l, canonical, category_name=""):
     if condition:
         product["itemCondition"] = condition
         product["offers"]["itemCondition"] = condition
+    if seller_business:
+        shop_url = f"{request.url_root.rstrip('/')}/shop/{seller_business['slug']}"
+        product["offers"]["seller"] = {
+            "@type": "Organization",
+            "@id": f"{shop_url}#business",
+            "name": seller_business["name"],
+            "url": shop_url,
+        }
     return product
 
 
@@ -1768,6 +1776,15 @@ def seo_listing(slug):
         return redirect(f"/listing/{expected_slug}", code=301)
 
     base = request.url_root.rstrip("/")
+    seller_business = query(
+        "SELECT name, slug FROM businesses "
+        "WHERE user_id = ? AND verified = 1 LIMIT 1",
+        (row["user_id"],), one=True)
+    related_rows = query(
+        listing_query_base()
+        + " WHERE l.status = 'active' AND l.category_id = ? AND l.id <> ? "
+          "ORDER BY l.featured DESC, l.updated_at DESC LIMIT 6",
+        (row["category_id"], row["id"]))
     canonical = f"{base}/listing/{slug}"
     seo_title = listing_seo_title(l)
     seo_desc = listing_seo_description(l)
@@ -1778,6 +1795,17 @@ def seo_listing(slug):
     category_html = (
         f'<p><a href="{base}/category/{esc_html(cat_slug)}">{esc_html(cat_name)}</a></p>'
         if cat_name and cat_slug else "")
+    seller_html = (
+        f'<p>Sold by <a href="{base}/shop/{esc_html(seller_business["slug"])}">'
+        f'{esc_html(seller_business["name"])}</a></p>'
+        if seller_business else "")
+    related_links = "".join(
+        f'<li><a href="{esc_html(listing_public_path(item))}">{esc_html(item["title"])}</a>'
+        f' — Rs. {int(item["price"] or 0):,}</li>'
+        for item in related_rows)
+    related_html = (
+        '<aside><h2>Related camera gear</h2><ul>' + related_links + '</ul></aside>'
+        if related_links else "")
 
     image_html = ""
     if l.get("images"):
@@ -1800,17 +1828,20 @@ def seo_listing(slug):
     body_html = (
         f'<article class="section"><h1>{esc_html(l["title"])}</h1>'
         + category_html
+        + seller_html
         + image_html
         + f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
         + facts_html
-        + f'<p>{esc_html(visible_desc)}</p></article>')
+        + f'<p>{esc_html(visible_desc)}</p>'
+        + related_html
+        + '</article>')
 
     crumbs = [("Lanka Lens", f"{base}/")]
     if cat_name and cat_slug:
         crumbs.append((cat_name, f"{base}/category/{cat_slug}"))
     crumbs.append((l["title"], None))
     jsonld = graph_jsonld(
-        listing_product_entity(l, canonical, cat_name),
+        listing_product_entity(l, canonical, cat_name, seller_business),
         breadcrumb_entity(crumbs, canonical),
     )
     meta = {
