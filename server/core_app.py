@@ -705,7 +705,7 @@ def listing_ctx(rows, include_seller=True):
         ctx["sellers"] = {r["id"]: r for r in query(
             f"SELECT {SELLER_COLS} FROM users WHERE id IN ({uph})", tuple(uids))}
         ctx["businesses"] = {r["user_id"]: r for r in query(
-            f"SELECT id, name, slug, logo, user_id FROM businesses WHERE user_id IN ({uph})", tuple(uids))}
+            f"SELECT id, name, slug, logo, opening_hours, user_id FROM businesses WHERE user_id IN ({uph})", tuple(uids))}
     return ctx
 
 
@@ -762,12 +762,15 @@ def serialize_listing(l, include_seller=True, ctx=None):
         if seller:
             out["seller"] = public_user(seller)
             biz = (ctx["businesses"].get(seller["id"]) if ctx
-                   else query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
+                   else query("SELECT id, name, slug, logo, opening_hours FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
             if biz:
                 biz_logo = biz["logo"]
                 if biz_logo and _is_b2_key(biz_logo):
                     biz_logo = resolve_image_url(biz_logo)
-                out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz_logo}
+                out["seller"]["business"] = {
+                    "id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz_logo,
+                    "merchant_policy": merchant_policy_from_hours(biz.get("opening_hours")),
+                }
     return out
 
 
@@ -1821,6 +1824,19 @@ def listing_return_policy(specs):
     return policy
 
 
+def merchant_policy_from_hours(value):
+    """Read shop-wide merchant defaults embedded in opening_hours JSON."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value or "{}")
+        except Exception:
+            value = {}
+    if not isinstance(value, dict):
+        return {}
+    policy = value.get("_merchant_policy")
+    return dict(policy) if isinstance(policy, dict) else {}
+
+
 def listing_policy_text(specs):
     """Human-readable delivery/return facts matching the structured data."""
     shipping = listing_shipping_details(specs)
@@ -1890,11 +1906,14 @@ def listing_product_entity(l, canonical, category_name="", seller_business=None)
         product["itemCondition"] = condition
         product["offers"]["itemCondition"] = condition
 
-    shipping_details = listing_shipping_details(specs)
+    business_policy = merchant_policy_from_hours(
+        seller_business.get("opening_hours") if seller_business else None
+    )
+    shipping_details = listing_shipping_details(specs) or listing_shipping_details(business_policy)
     if shipping_details:
         product["offers"]["shippingDetails"] = shipping_details
 
-    return_policy = listing_return_policy(specs)
+    return_policy = listing_return_policy(specs) or listing_return_policy(business_policy)
     if return_policy:
         product["offers"]["hasMerchantReturnPolicy"] = return_policy
 
@@ -1929,7 +1948,7 @@ def seo_listing(slug):
 
     base = request.url_root.rstrip("/")
     seller_business = query(
-        "SELECT name, slug FROM businesses "
+        "SELECT name, slug, opening_hours FROM businesses "
         "WHERE user_id = ? AND verified = 1 LIMIT 1",
         (row["user_id"],), one=True)
     related_rows = query(
@@ -1980,7 +1999,18 @@ def seo_listing(slug):
     ):
         if _seo_clean(value):
             facts.append(f'<li><strong>{label}:</strong> {esc_html(value)}</li>')
-    for label, value in listing_policy_text(identifier_specs):
+    visible_policy = dict(identifier_specs)
+    shop_policy = merchant_policy_from_hours(seller_business.get("opening_hours") if seller_business else None)
+    if not listing_shipping_details(visible_policy) and listing_shipping_details(shop_policy):
+        for key in ("shipping_rate_lkr", "handling_min_days", "handling_max_days",
+                    "transit_min_days", "transit_max_days"):
+            if key in shop_policy:
+                visible_policy[key] = shop_policy[key]
+    if not listing_return_policy(visible_policy) and listing_return_policy(shop_policy):
+        for key in ("return_policy", "return_days"):
+            if key in shop_policy:
+                visible_policy[key] = shop_policy[key]
+    for label, value in listing_policy_text(visible_policy):
         facts.append(f'<li><strong>{label}:</strong> {esc_html(value)}</li>')
     facts_html = f'<ul>{"".join(facts)}</ul>' if facts else ""
 
@@ -3565,6 +3595,9 @@ def business_payload(b):
         hours = {}
     if not isinstance(hours, dict):
         hours = {}
+    merchant_policy = hours.pop("_merchant_policy", {})
+    if not isinstance(merchant_policy, dict):
+        merchant_policy = {}
     logo = b.get("logo") or ""
     if logo and _is_b2_key(logo):
         logo = resolve_image_url(logo)
@@ -3580,7 +3613,8 @@ def business_payload(b):
         "district": b.get("district") or "",
         "city": b.get("city") or "", "area": b.get("area") or "", "phone": b.get("phone") or "",
         "whatsapp": b.get("whatsapp") or "",
-        "opening_hours": hours, "verified": bool(b.get("verified")),
+        "opening_hours": hours, "merchant_policy": merchant_policy,
+        "verified": bool(b.get("verified")),
         "user_id": b.get("user_id"),
         "business_category": b.get("business_category") or "",
         "owner_name": b.get("owner_name") or "",
@@ -3620,6 +3654,59 @@ def my_business():
     business_category = (body.get("business_category") or "").strip()[:60]
     owner_name = (body.get("owner_name") or "").strip()[:60]
     registration_number = (body.get("registration_number") or "").strip()[:40]
+    merchant_policy = body.get("merchant_policy") or {}
+    if not isinstance(merchant_policy, dict):
+        return err("Merchant policy must be an object")
+    merchant_policy = {str(k): str(v).strip() for k, v in merchant_policy.items()
+                       if v is not None and str(v).strip()}
+
+    shipping_keys = (
+        "shipping_rate_lkr", "handling_min_days", "handling_max_days",
+        "transit_min_days", "transit_max_days",
+    )
+    shipping_present = [key for key in shipping_keys if merchant_policy.get(key, "") != ""]
+    if shipping_present:
+        if len(shipping_present) != len(shipping_keys):
+            return err("Complete all merchant shipping fields or leave them all blank")
+        for key in shipping_keys:
+            try:
+                value = int(merchant_policy[key])
+            except (TypeError, ValueError):
+                return err("Merchant shipping values must be whole numbers")
+            maximum = 1_000_000 if key == "shipping_rate_lkr" else 365
+            if value < 0 or value > maximum:
+                return err("Merchant shipping values are outside the allowed range")
+            merchant_policy[key] = str(value)
+        if int(merchant_policy["handling_min_days"]) > int(merchant_policy["handling_max_days"]):
+            return err("Minimum handling days cannot exceed maximum handling days")
+        if int(merchant_policy["transit_min_days"]) > int(merchant_policy["transit_max_days"]):
+            return err("Minimum transit days cannot exceed maximum transit days")
+
+    return_key = _seo_clean(merchant_policy.get("return_policy")).lower()
+    if return_key:
+        if return_key not in RETURN_POLICY_CATEGORIES:
+            return err("Invalid merchant return policy")
+        merchant_policy["return_policy"] = return_key
+        if return_key == "finite":
+            try:
+                days = int(merchant_policy.get("return_days") or "")
+            except (TypeError, ValueError):
+                return err("Enter the merchant return window in days")
+            if days < 1 or days > 365:
+                return err("Merchant return window must be between 1 and 365 days")
+            merchant_policy["return_days"] = str(days)
+        else:
+            merchant_policy.pop("return_days", None)
+    else:
+        merchant_policy.pop("return_days", None)
+
+    opening_hours = body.get("opening_hours") or {}
+    if not isinstance(opening_hours, dict):
+        opening_hours = {}
+    opening_hours = dict(opening_hours)
+    if merchant_policy:
+        opening_hours["_merchant_policy"] = merchant_policy
+
     existing = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)
     if existing:
         slug = existing["slug"]
@@ -3628,6 +3715,10 @@ def my_business():
         # If logo_val is None (not provided), keep existing; else use new
         final_logo = logo_val if logo_val is not None else existing["logo"]
         final_doc = doc_val if doc_val is not None else (existing["document"] or "")
+        if "merchant_policy" not in body:
+            old_policy = merchant_policy_from_hours(existing.get("opening_hours"))
+            if old_policy:
+                opening_hours["_merchant_policy"] = old_policy
         # Delete old B2 logo if replaced
         if logo_val is not None and existing["logo"] and existing["logo"] != final_logo and _is_b2_key(existing["logo"]):
             b2_delete_key(_normalize_b2_key(existing["logo"]))
@@ -3639,7 +3730,7 @@ def my_business():
              body.get("province") or existing["province"] or "", body.get("district") or existing["district"] or "",
              body.get("city") or existing["city"] or "", body.get("area") or existing["area"] or "",
              body.get("phone") or existing["phone"] or "", body.get("whatsapp") or existing["whatsapp"] or "",
-             json.dumps(body.get("opening_hours") or {}), business_category, owner_name, registration_number,
+             json.dumps(opening_hours), business_category, owner_name, registration_number,
              final_doc, u["id"]))
     else:
         slug = slugify(body.get("slug") or name)
@@ -3656,7 +3747,7 @@ def my_business():
             (u["id"], name, slug, logo_val or "", body.get("description") or "",
              body.get("province") or "", body.get("district") or "", body.get("city") or "",
              body.get("area") or "", body.get("phone") or "", body.get("whatsapp") or "",
-             json.dumps(body.get("opening_hours") or {}), business_category, owner_name,
+             json.dumps(opening_hours), business_category, owner_name,
              registration_number, doc_val or "", now()))
         execute("UPDATE users SET seller_type = 'business' WHERE id = ?", (u["id"],))
     b = query("SELECT * FROM businesses WHERE user_id = ?", (u["id"],), one=True)

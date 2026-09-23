@@ -1445,7 +1445,7 @@
     if (l.specs && l.specs.mpn) specRows += '<div class="spec-row"><span class="k">MPN</span><span class="v">' + esc(l.specs.mpn) + '</span></div>';
 
     var policyRows = '';
-    var sp = l.specs || {};
+    var sp = Object.assign({}, (l.seller && l.seller.business && l.seller.business.merchant_policy) || {}, l.specs || {});
     var hasShipping = ['shipping_rate_lkr', 'handling_min_days', 'handling_max_days', 'transit_min_days', 'transit_max_days'].every(function (k) {
       return sp[k] !== undefined && sp[k] !== null && String(sp[k]).trim() !== '';
     });
@@ -3496,6 +3496,7 @@
     }
     function render(biz) {
       var hours = biz.opening_hours || {};
+      var merchantPolicy = biz.merchant_policy || {};
       var st = biz.verification_status || 'not_submitted';
       var isBizUser = (state.user.seller_type || 'individual') === 'business';
       var h = '';
@@ -3529,7 +3530,23 @@
         '<p class="form-hint" style="margin-bottom:10px">Tap Open 24/7 to set every day to “24 Hours Open”, or enter separate hours below.</p>' +
         DAYS.map(function (d) {
           return '<div class="form-group"><label>' + d[1] + '</label><input class="input" name="hours_' + d[0] + '" value="' + esc(hours[d[0]] || '') + '" placeholder="9:00 AM – 6:00 PM or Closed"></div>';
-        }).join('') + '</div>';
+        }).join('') + '</div>' +
+        '<div class="form-card" style="margin-top:16px"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('cart-outline') + 'Merchant listing settings</h2></div>' +
+        '<p class="form-hint" style="margin-bottom:10px">Set your default delivery and return policy once. These values are used for your shop listings unless a listing has its own delivery/return details.</p>' +
+        '<div class="form-group"><label>Shipping cost (LKR)</label><input class="input" name="merchant_shipping_rate_lkr" type="number" min="0" max="1000000" step="1" value="' + esc(merchantPolicy.shipping_rate_lkr || '') + '" placeholder="0 for free shipping"></div>' +
+        '<div class="form-group"><label>Handling time (days)</label><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+        '<input class="input" name="merchant_handling_min_days" type="number" min="0" max="365" step="1" value="' + esc(merchantPolicy.handling_min_days || '') + '" placeholder="Min">' +
+        '<input class="input" name="merchant_handling_max_days" type="number" min="0" max="365" step="1" value="' + esc(merchantPolicy.handling_max_days || '') + '" placeholder="Max"></div></div>' +
+        '<div class="form-group"><label>Transit time (days)</label><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+        '<input class="input" name="merchant_transit_min_days" type="number" min="0" max="365" step="1" value="' + esc(merchantPolicy.transit_min_days || '') + '" placeholder="Min">' +
+        '<input class="input" name="merchant_transit_max_days" type="number" min="0" max="365" step="1" value="' + esc(merchantPolicy.transit_max_days || '') + '" placeholder="Max"></div></div>' +
+        '<div class="form-group"><label>Return policy</label><select class="select" name="merchant_return_policy">' +
+        '<option value="">Not specified</option>' +
+        '<option value="not_permitted"' + (merchantPolicy.return_policy === 'not_permitted' ? ' selected' : '') + '>Returns not accepted</option>' +
+        '<option value="finite"' + (merchantPolicy.return_policy === 'finite' ? ' selected' : '') + '>Returns accepted within a set number of days</option>' +
+        '<option value="unlimited"' + (merchantPolicy.return_policy === 'unlimited' ? ' selected' : '') + '>Unlimited return window</option></select></div>' +
+        '<div class="form-group"><label>Return window (days)</label><input class="input" name="merchant_return_days" type="number" min="1" max="365" step="1" value="' + esc(merchantPolicy.return_days || '') + '" placeholder="Only needed for a set return window"></div>' +
+        '<p class="form-hint">Only enter your real shop policy. Leave fields blank if they do not apply.</p></div>';
       h += '<div class="detail-wrap" style="padding-top:14px">';
       h += '<button class="btn btn-primary" type="submit">' + icon('checkmark-outline') + 'Save shop details</button>';
       if (st === 'not_submitted' || st === 'rejected') {
@@ -3610,6 +3627,10 @@
           if (el && el.value.trim()) oh[d[0]] = el.value.trim();
         });
         var sel = function (loc) { var el = $('#shop-root').querySelector('[data-loc="' + loc + '"]'); return el ? el.value : ''; };
+        function shopValue(name) {
+          var el = form.querySelector('[name="' + name + '"]');
+          return el ? el.value.trim() : '';
+        }
         return {
           name: form.querySelector('[name="name"]').value.trim(),
           logo: biz.logo || '', description: form.querySelector('[name="description"]').value,
@@ -3620,7 +3641,16 @@
           owner_name: form.querySelector('[name="owner_name"]').value.trim(),
           registration_number: form.querySelector('[name="registration_number"]').value.trim(),
           province: sel('province'), district: sel('district'), city: sel('city'),
-          opening_hours: oh
+          opening_hours: oh,
+          merchant_policy: {
+            shipping_rate_lkr: shopValue('merchant_shipping_rate_lkr'),
+            handling_min_days: shopValue('merchant_handling_min_days'),
+            handling_max_days: shopValue('merchant_handling_max_days'),
+            transit_min_days: shopValue('merchant_transit_min_days'),
+            transit_max_days: shopValue('merchant_transit_max_days'),
+            return_policy: shopValue('merchant_return_policy'),
+            return_days: shopValue('merchant_return_days')
+          }
         };
       }
       function validate(p) {
