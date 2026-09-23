@@ -1648,6 +1648,29 @@ def _seo_trim(value, limit):
     return cut + "…"
 
 
+GTIN_LENGTHS = {8, 12, 13, 14}
+
+
+def normalize_gtin(value):
+    """Return a digits-only GTIN candidate, accepting common spaces/hyphens."""
+    text = re.sub(r"[\s-]+", "", str(value or "").strip())
+    return text if text.isdigit() else ""
+
+
+def valid_gtin(value):
+    """Validate GTIN-8/12/13/14 length and GS1 check digit."""
+    gtin = normalize_gtin(value)
+    if len(gtin) not in GTIN_LENGTHS:
+        return False
+    digits = [int(ch) for ch in gtin]
+    total = sum(
+        digit * (3 if pos % 2 == 0 else 1)
+        for pos, digit in enumerate(reversed(digits[:-1]))
+    )
+    check = (10 - (total % 10)) % 10
+    return check == digits[-1]
+
+
 SEO_PLACEHOLDER_BRANDS = {
     "other", "others", "unbranded", "no brand", "no-brand", "n/a", "na",
     "none", "unknown", "not specified", "generic",
@@ -1744,8 +1767,8 @@ def listing_product_entity(l, canonical, category_name="", seller_business=None)
 
     # Only publish manufacturer identifiers when the seller actually supplied
     # them. Never invent a GTIN/MPN just to silence a Search Console warning.
-    gtin = _seo_clean(specs.get("gtin") or specs.get("barcode"))
-    if gtin.isdigit() and len(gtin) in {8, 12, 13, 14}:
+    gtin = normalize_gtin(specs.get("gtin") or specs.get("barcode"))
+    if valid_gtin(gtin):
         product[f"gtin{len(gtin)}"] = gtin
     mpn = _seo_clean(specs.get("mpn"))
     if mpn:
@@ -1825,10 +1848,16 @@ def seo_listing(slug):
             f'<p><img src="{esc_html(l["images"][0])}" '
             f'alt="{esc_html(image_alt)}" loading="eager"></p>')
 
+    identifier_specs = l.get("specs") if isinstance(l.get("specs"), dict) else {}
+    visible_gtin = normalize_gtin(identifier_specs.get("gtin") or identifier_specs.get("barcode"))
+    visible_gtin = visible_gtin if valid_gtin(visible_gtin) else ""
+
     facts = []
     for label, value in (
         ("Brand", l.get("brand")),
         ("Model", l.get("model")),
+        ("GTIN / Barcode", visible_gtin),
+        ("MPN", _seo_clean(identifier_specs.get("mpn"))),
         ("Condition", l.get("condition")),
         ("Location", l.get("location") or l.get("province")),
     ):
@@ -2527,6 +2556,24 @@ def validate_listing_fields(body, require_complete=True):
                 clean[str(key)[:60]] = val.strip()
             else:
                 return None, f"{key} must be a simple value"
+
+        # Product identifiers are optional. If supplied, keep them truthful and
+        # normalized so invalid/fake values are not published to Google.
+        raw_gtin = clean.get("gtin") or clean.get("barcode")
+        if raw_gtin:
+            gtin = normalize_gtin(raw_gtin)
+            if not valid_gtin(gtin):
+                return None, "GTIN / barcode must be a valid 8, 12, 13 or 14 digit barcode"
+            clean["gtin"] = gtin
+        if "barcode" in clean:
+            clean.pop("barcode", None)
+
+        if "mpn" in clean:
+            mpn = _seo_clean(clean.get("mpn"))
+            if len(mpn) > 70:
+                return None, "MPN must be 70 characters or fewer"
+            clean["mpn"] = mpn
+
         out["specs"] = clean
 
     if "category_id" in body or require_complete:
