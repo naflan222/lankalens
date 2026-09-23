@@ -57,3 +57,11 @@ def test_listing_pages_link_verified_shops_and_related_gear():
     assert "AND l.category_id = ? AND l.id <> ?" in SERVER
     assert "listing_product_entity(l, canonical, cat_name, seller_business)" in SERVER
     assert 'product["offers"]["seller"]' in SERVER
+
+
+def test_product_schema_uses_stable_and_real_identifiers_only():
+    assert '"sku": f"LL-{l[\'id\']}"' in SERVER
+    assert 'specs.get("gtin") or specs.get("barcode")' in SERVER
+    assert 'gtin.isdigit() and len(gtin) in {8, 12, 13, 14}' in SERVER
+    assert 'specs.get("mpn")' in SERVER
+    assert 'Never invent a GTIN/MPN just to silence a Search Console warning.' in SERVER
