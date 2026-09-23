@@ -1720,10 +1720,12 @@ def listing_image_alt(l):
 def listing_product_entity(l, canonical, category_name="", seller_business=None):
     images = [absolute_url(img) for img in (l.get("images") or [])[:5] if img]
     condition = schema_condition(l.get("condition"))
+    specs = l.get("specs") if isinstance(l.get("specs"), dict) else {}
     product = {
         "@type": "Product",
         "@id": f"{canonical}#product",
         "name": l["title"],
+        "sku": f"LL-{l['id']}",
         "url": canonical,
         "description": (l.get("description") or listing_seo_description(l))[:500],
         "offers": {
@@ -1739,6 +1741,16 @@ def listing_product_entity(l, canonical, category_name="", seller_business=None)
     seo_brand = listing_seo_brand(l)
     if seo_brand:
         product["brand"] = {"@type": "Brand", "name": seo_brand}
+
+    # Only publish manufacturer identifiers when the seller actually supplied
+    # them. Never invent a GTIN/MPN just to silence a Search Console warning.
+    gtin = _seo_clean(specs.get("gtin") or specs.get("barcode"))
+    if gtin.isdigit() and len(gtin) in {8, 12, 13, 14}:
+        product[f"gtin{len(gtin)}"] = gtin
+    mpn = _seo_clean(specs.get("mpn"))
+    if mpn:
+        product["mpn"] = mpn
+
     if l.get("model"):
         product["model"] = l["model"]
     if category_name:
