@@ -705,7 +705,7 @@ def listing_ctx(rows, include_seller=True):
         ctx["sellers"] = {r["id"]: r for r in query(
             f"SELECT {SELLER_COLS} FROM users WHERE id IN ({uph})", tuple(uids))}
         ctx["businesses"] = {r["user_id"]: r for r in query(
-            f"SELECT id, name, slug, logo, user_id FROM businesses WHERE user_id IN ({uph})", tuple(uids))}
+            f"SELECT id, name, slug, logo, opening_hours, user_id FROM businesses WHERE user_id IN ({uph})", tuple(uids))}
     return ctx
 
 
@@ -762,12 +762,15 @@ def serialize_listing(l, include_seller=True, ctx=None):
         if seller:
             out["seller"] = public_user(seller)
             biz = (ctx["businesses"].get(seller["id"]) if ctx
-                   else query("SELECT id, name, slug, logo FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
+                   else query("SELECT id, name, slug, logo, opening_hours FROM businesses WHERE user_id = ?", (seller["id"],), one=True))
             if biz:
                 biz_logo = biz["logo"]
                 if biz_logo and _is_b2_key(biz_logo):
                     biz_logo = resolve_image_url(biz_logo)
-                out["seller"]["business"] = {"id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz_logo}
+                out["seller"]["business"] = {
+                    "id": biz["id"], "name": biz["name"], "slug": biz["slug"], "logo": biz_logo,
+                    "merchant_policy": merchant_policy_from_hours(biz.get("opening_hours")),
+                }
     return out
 
 
