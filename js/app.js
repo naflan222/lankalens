@@ -1438,6 +1438,12 @@
       var v = l.specs && l.specs[f.name] ? l.specs[f.name] : '';
       if (v) specRows += '<div class="spec-row"><span class="k">' + esc(f.label) + '</span><span class="v">' + esc(v) + '</span></div>';
     });
+    // Product identifiers are safe to show publicly and should match the
+    // structured data Google sees. They are not unique item serial numbers.
+    var gtinValue = l.specs && (l.specs.gtin || l.specs.barcode);
+    if (gtinValue) specRows += '<div class="spec-row"><span class="k">GTIN / Barcode</span><span class="v">' + esc(gtinValue) + '</span></div>';
+    if (l.specs && l.specs.mpn) specRows += '<div class="spec-row"><span class="k">MPN</span><span class="v">' + esc(l.specs.mpn) + '</span></div>';
+
     // extras not in schema
     var extraKeys = ['warranty', 'receipt', 'charger', 'original_box', 'box', 'battery', 'batteries', 'accessories', 'reason_for_selling'];
     var doneKeys = (l.fields || []).map(function (f) { return f.name; });
@@ -1713,6 +1719,12 @@
         if (field('year')) {
           b += '<div class="form-group"><label>Year</label><input class="input" data-spec="year" value="' + esc(wz.specs.year || '') + '" placeholder="e.g. 2021"></div>';
         }
+        b += '<div class="form-group"><label>GTIN / Barcode <span class="muted">(optional)</span></label>' +
+          '<input class="input" data-spec="gtin" inputmode="numeric" maxlength="18" value="' + esc(wz.specs.gtin || wz.specs.barcode || '') + '" placeholder="e.g. 012345678905">' +
+          '<div class="form-hint">Use the product barcode number only. Leave blank if the item has no GTIN.</div></div>';
+        b += '<div class="form-group"><label>Manufacturer part number (MPN) <span class="muted">(optional)</span></label>' +
+          '<input class="input" data-spec="mpn" maxlength="70" value="' + esc(wz.specs.mpn || '') + '" placeholder="e.g. CHDHX-121-RW">' +
+          '<div class="form-hint">Use the manufacturer\'s part number, not the item serial number.</div></div>';
         b += '</div>';
       } else if (i === 1) {
         // Remaining dynamic fields
@@ -1861,7 +1873,10 @@
       function val(sel) { var el = $(sel, root); return el ? el.value : ''; }
       function checked(sel) { var el = $(sel, root); return el ? !!el.checked : false; }
       if (i === 0) {
-        $$('[data-spec]', root).forEach(function (inp) { wz.specs[inp.getAttribute('data-spec')] = inp.value.trim(); });
+        $('[data-spec]', root).forEach(function (inp) { wz.specs[inp.getAttribute('data-spec')] = inp.value.trim(); });
+        // Older listings may have stored this as "barcode"; new edits use the
+        // canonical "gtin" key so the same identifier is never submitted twice.
+        delete wz.specs.barcode;
       } else if (i === 1) {
         // Store every value (including cleared ones) so editing an ad can remove
         // a spec instead of silently keeping the old value.
