@@ -1748,7 +1748,8 @@ RETURN_POLICY_CATEGORIES = {
 
 
 def _policy_int(specs, key, maximum):
-    value = str((specs or {}).get(key) or "").strip()
+    raw = (specs or {}).get(key)
+    value = "" if raw is None else str(raw).strip()
     if not value:
         return None
     try:
