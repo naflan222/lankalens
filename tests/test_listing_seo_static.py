@@ -101,7 +101,7 @@ def test_merchant_listing_shipping_and_returns_are_optional_truthful_and_visible
     assert "MerchantReturnNotPermitted" in SERVER
     assert "MerchantReturnUnlimitedWindow" in SERVER
     assert "Complete all delivery fields or leave all delivery fields blank" in SERVER
-    assert "listing_policy_text(identifier_specs)" in SERVER
+    assert "listing_policy_text(visible_policy)" in SERVER
     assert "Delivery &amp; Returns <span class=\"muted\">(optional)</span>" in CLIENT
     assert 'data-spec="shipping_rate_lkr"' in CLIENT
     assert 'data-spec="handling_min_days"' in CLIENT
