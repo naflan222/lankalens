@@ -62,6 +62,28 @@ def test_listing_pages_link_verified_shops_and_related_gear():
 def test_product_schema_uses_stable_and_real_identifiers_only():
     assert '"sku": f"LL-{l[\'id\']}"' in SERVER
     assert 'specs.get("gtin") or specs.get("barcode")' in SERVER
-    assert 'gtin.isdigit() and len(gtin) in {8, 12, 13, 14}' in SERVER
+    assert "GTIN_LENGTHS = {8, 12, 13, 14}" in SERVER
+    assert "if valid_gtin(gtin):" in SERVER
     assert 'specs.get("mpn")' in SERVER
     assert 'Never invent a GTIN/MPN just to silence a Search Console warning.' in SERVER
+
+
+
+def test_listing_form_collects_optional_product_identifiers_without_new_layout_css():
+    assert 'GTIN / Barcode <span class="muted">(optional)</span>' in CLIENT
+    assert 'data-spec="gtin"' in CLIENT
+    assert 'Manufacturer part number (MPN)' in CLIENT
+    assert 'data-spec="mpn"' in CLIENT
+    assert 'delete wz.specs.barcode;' in CLIENT
+    assert 'GTIN / Barcode</span>' in CLIENT
+
+
+def test_gtin_is_normalized_checksum_validated_and_only_then_published():
+    assert "GTIN_LENGTHS = {8, 12, 13, 14}" in SERVER
+    assert "def normalize_gtin(value):" in SERVER
+    assert "def valid_gtin(value):" in SERVER
+    assert 'return None, "GTIN / barcode must be a valid 8, 12, 13 or 14 digit barcode"' in SERVER
+    assert 'if valid_gtin(gtin):' in SERVER
+    assert 'product[f"gtin{len(gtin)}"] = gtin' in SERVER
+    assert '("GTIN / Barcode", visible_gtin)' in SERVER
+    assert '("MPN", _seo_clean(identifier_specs.get("mpn")))' in SERVER
