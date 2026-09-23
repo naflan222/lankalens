@@ -37,7 +37,7 @@ jobs:
           node --check js/shop-inventory.js
           node --check js/pwa-install.js
           node --check service-worker.js
-      - name: Run security regression tests
-        run: python -m pytest -q tests/test_security_static.py tests/test_password_policy_otp.py tests/test_browse_controls.py tests/test_shop_inventory.py tests/test_app_icon.py tests/test_pwa_install.py
+      - name: Run security and SEO regression tests
+        run: python -m pytest -q tests/test_security_static.py tests/test_password_policy_otp.py tests/test_browse_controls.py tests/test_shop_inventory.py tests/test_app_icon.py tests/test_pwa_install.py tests/test_listing_seo_static.py
       - name: Audit Python dependencies
         run: python -m pip_audit -r server/requirements.txt
