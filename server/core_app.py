@@ -1740,6 +1740,114 @@ def listing_image_alt(l):
     return _seo_trim(f"{identity} for sale in {where}", 125)
 
 
+RETURN_POLICY_CATEGORIES = {
+    "not_permitted": "https://schema.org/MerchantReturnNotPermitted",
+    "finite": "https://schema.org/MerchantReturnFiniteReturnWindow",
+    "unlimited": "https://schema.org/MerchantReturnUnlimitedWindow",
+}
+
+
+def _policy_int(specs, key, maximum):
+    raw = (specs or {}).get(key)
+    value = "" if raw is None else str(raw).strip()
+    if not value:
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    if number < 0 or number > maximum:
+        return None
+    return number
+
+
+def listing_shipping_details(specs):
+    """Return Google shippingDetails only when the seller supplied a full policy."""
+    rate = _policy_int(specs, "shipping_rate_lkr", 1_000_000)
+    handling_min = _policy_int(specs, "handling_min_days", 365)
+    handling_max = _policy_int(specs, "handling_max_days", 365)
+    transit_min = _policy_int(specs, "transit_min_days", 365)
+    transit_max = _policy_int(specs, "transit_max_days", 365)
+    values = (rate, handling_min, handling_max, transit_min, transit_max)
+    if any(value is None for value in values):
+        return None
+    if handling_min > handling_max or transit_min > transit_max:
+        return None
+    return {
+        "@type": "OfferShippingDetails",
+        "shippingRate": {
+            "@type": "MonetaryAmount",
+            "value": rate,
+            "currency": "LKR",
+        },
+        "shippingDestination": {
+            "@type": "DefinedRegion",
+            "addressCountry": "LK",
+        },
+        "deliveryTime": {
+            "@type": "ShippingDeliveryTime",
+            "handlingTime": {
+                "@type": "QuantitativeValue",
+                "minValue": handling_min,
+                "maxValue": handling_max,
+                "unitCode": "DAY",
+            },
+            "transitTime": {
+                "@type": "QuantitativeValue",
+                "minValue": transit_min,
+                "maxValue": transit_max,
+                "unitCode": "DAY",
+            },
+        },
+    }
+
+
+def listing_return_policy(specs):
+    """Return Google hasMerchantReturnPolicy only for an explicit seller policy."""
+    key = _seo_clean((specs or {}).get("return_policy")).lower()
+    category = RETURN_POLICY_CATEGORIES.get(key)
+    if not category:
+        return None
+    policy = {
+        "@type": "MerchantReturnPolicy",
+        "applicableCountry": "LK",
+        "returnPolicyCategory": category,
+    }
+    if key == "finite":
+        days = _policy_int(specs, "return_days", 365)
+        if days is None or days < 1:
+            return None
+        policy["merchantReturnDays"] = days
+    return policy
+
+
+def listing_policy_text(specs):
+    """Human-readable delivery/return facts matching the structured data."""
+    shipping = listing_shipping_details(specs)
+    returns = listing_return_policy(specs)
+    facts = []
+    if shipping:
+        rate = shipping["shippingRate"]["value"]
+        handling = shipping["deliveryTime"]["handlingTime"]
+        transit = shipping["deliveryTime"]["transitTime"]
+        facts.append(("Shipping", "Free" if rate == 0 else f"Rs. {rate:,}"))
+        facts.append((
+            "Delivery time",
+            f"Handling {handling['minValue']}-{handling['maxValue']} day(s); "
+            f"transit {transit['minValue']}-{transit['maxValue']} day(s)",
+        ))
+    if returns:
+        category = returns["returnPolicyCategory"]
+        if category.endswith("MerchantReturnNotPermitted"):
+            text = "Returns not accepted"
+        elif category.endswith("MerchantReturnUnlimitedWindow"):
+            text = "Unlimited return window"
+        else:
+            text = f"Returns accepted within {returns['merchantReturnDays']} day(s)"
+        facts.append(("Returns", text))
+    return facts
+
+
 def listing_product_entity(l, canonical, category_name="", seller_business=None):
     images = [absolute_url(img) for img in (l.get("images") or [])[:5] if img]
     condition = schema_condition(l.get("condition"))
@@ -1781,6 +1889,15 @@ def listing_product_entity(l, canonical, category_name="", seller_business=None)
     if condition:
         product["itemCondition"] = condition
         product["offers"]["itemCondition"] = condition
+
+    shipping_details = listing_shipping_details(specs)
+    if shipping_details:
+        product["offers"]["shippingDetails"] = shipping_details
+
+    return_policy = listing_return_policy(specs)
+    if return_policy:
+        product["offers"]["hasMerchantReturnPolicy"] = return_policy
+
     if seller_business:
         shop_url = f"{request.url_root.rstrip('/')}/shop/{seller_business['slug']}"
         product["offers"]["seller"] = {
@@ -1863,6 +1980,8 @@ def seo_listing(slug):
     ):
         if _seo_clean(value):
             facts.append(f'<li><strong>{label}:</strong> {esc_html(value)}</li>')
+    for label, value in listing_policy_text(identifier_specs):
+        facts.append(f'<li><strong>{label}:</strong> {esc_html(value)}</li>')
     facts_html = f'<ul>{"".join(facts)}</ul>' if facts else ""
 
     visible_desc = _seo_clean(l.get("description")) or seo_desc
@@ -2573,6 +2692,49 @@ def validate_listing_fields(body, require_complete=True):
             if len(mpn) > 70:
                 return None, "MPN must be 70 characters or fewer"
             clean["mpn"] = mpn
+
+        # Delivery and returns are optional, but once a seller starts entering a
+        # shipping policy all Google-required shipping values must be present.
+        shipping_keys = (
+            "shipping_rate_lkr", "handling_min_days", "handling_max_days",
+            "transit_min_days", "transit_max_days",
+        )
+        shipping_present = [key for key in shipping_keys if str(clean.get(key) or "").strip()]
+        if shipping_present:
+            if len(shipping_present) != len(shipping_keys):
+                return None, "Complete all delivery fields or leave all delivery fields blank"
+            for key in shipping_keys:
+                raw = str(clean.get(key) or "").strip()
+                try:
+                    value = int(raw)
+                except (TypeError, ValueError):
+                    return None, "Delivery cost and delivery times must be whole numbers"
+                maximum = 1_000_000 if key == "shipping_rate_lkr" else 365
+                if value < 0 or value > maximum:
+                    return None, "Delivery values are outside the allowed range"
+                clean[key] = str(value)
+            if int(clean["handling_min_days"]) > int(clean["handling_max_days"]):
+                return None, "Minimum handling days cannot exceed maximum handling days"
+            if int(clean["transit_min_days"]) > int(clean["transit_max_days"]):
+                return None, "Minimum transit days cannot exceed maximum transit days"
+
+        return_policy = _seo_clean(clean.get("return_policy")).lower()
+        if return_policy:
+            if return_policy not in RETURN_POLICY_CATEGORIES:
+                return None, "Invalid return policy"
+            clean["return_policy"] = return_policy
+            if return_policy == "finite":
+                try:
+                    return_days = int(str(clean.get("return_days") or "").strip())
+                except (TypeError, ValueError):
+                    return None, "Enter the number of days allowed for returns"
+                if return_days < 1 or return_days > 365:
+                    return None, "Return window must be between 1 and 365 days"
+                clean["return_days"] = str(return_days)
+            else:
+                clean.pop("return_days", None)
+        else:
+            clean.pop("return_days", None)
 
         out["specs"] = clean
 

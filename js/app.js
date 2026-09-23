@@ -1444,6 +1444,28 @@
     if (gtinValue) specRows += '<div class="spec-row"><span class="k">GTIN / Barcode</span><span class="v">' + esc(gtinValue) + '</span></div>';
     if (l.specs && l.specs.mpn) specRows += '<div class="spec-row"><span class="k">MPN</span><span class="v">' + esc(l.specs.mpn) + '</span></div>';
 
+    var policyRows = '';
+    var sp = l.specs || {};
+    var hasShipping = ['shipping_rate_lkr', 'handling_min_days', 'handling_max_days', 'transit_min_days', 'transit_max_days'].every(function (k) {
+      return sp[k] !== undefined && sp[k] !== null && String(sp[k]).trim() !== '';
+    });
+    if (hasShipping) {
+      var shippingRate = parseInt(sp.shipping_rate_lkr, 10) || 0;
+      policyRows += '<div class="spec-row"><span class="k">Shipping</span><span class="v">' +
+        (shippingRate === 0 ? 'Free' : fmtLKR(shippingRate)) + '</span></div>';
+      policyRows += '<div class="spec-row"><span class="k">Delivery time</span><span class="v">Handling ' +
+        esc(sp.handling_min_days) + '-' + esc(sp.handling_max_days) + ' day(s); transit ' +
+        esc(sp.transit_min_days) + '-' + esc(sp.transit_max_days) + ' day(s)</span></div>';
+    }
+    if (sp.return_policy === 'not_permitted') {
+      policyRows += '<div class="spec-row"><span class="k">Returns</span><span class="v">Returns not accepted</span></div>';
+    } else if (sp.return_policy === 'unlimited') {
+      policyRows += '<div class="spec-row"><span class="k">Returns</span><span class="v">Unlimited return window</span></div>';
+    } else if (sp.return_policy === 'finite' && sp.return_days) {
+      policyRows += '<div class="spec-row"><span class="k">Returns</span><span class="v">Returns accepted within ' +
+        esc(sp.return_days) + ' day(s)</span></div>';
+    }
+
     // extras not in schema
     var extraKeys = ['warranty', 'receipt', 'charger', 'original_box', 'box', 'battery', 'batteries', 'accessories', 'reason_for_selling'];
     var doneKeys = (l.fields || []).map(function (f) { return f.name; });
@@ -1454,7 +1476,8 @@
     });
 
     var specs = '<div class="detail-wrap" style="padding-top:0"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('list-outline') + 'Specifications</h2></div>' +
-      '<div class="info-card">' + (specRows || '<div class="spec-row"><span class="k">Details</span><span class="v">Contact seller for more info</span></div>') + '</div></div>';
+      '<div class="info-card">' + (specRows || '<div class="spec-row"><span class="k">Details</span><span class="v">Contact seller for more info</span></div>') + '</div></div>' +
+      (policyRows ? '<div class="detail-wrap" style="padding-top:0"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('car-outline') + 'Delivery &amp; Returns</h2></div><div class="info-card">' + policyRows + '</div></div>' : '');
 
     var desc = l.description ? '<div class="detail-wrap" style="padding-top:0"><div class="section-head" style="margin-bottom:8px"><h2>' + icon('document-text-outline') + 'Description</h2></div>' +
       '<div class="info-card" style="padding:14px"><p style="font-size:14px;line-height:1.65;color:var(--ink-2);white-space:pre-line">' + esc(l.description) + '</p></div></div>' : '';
@@ -1738,6 +1761,22 @@
           });
         }
         b += '</div>';
+        b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('car-outline') + 'Delivery &amp; Returns <span class="muted">(optional)</span></h2></div>' +
+          '<p class="form-hint" style="margin-bottom:10px">Add these only if you offer delivery. The information is shown to buyers and may be used by Google Merchant listings.</p>' +
+          '<div class="form-group"><label>Shipping cost (LKR)</label><input class="input" type="number" min="0" max="1000000" step="1" data-spec="shipping_rate_lkr" value="' + esc(wz.specs.shipping_rate_lkr || '') + '" placeholder="0 for free shipping"></div>' +
+          '<div class="form-group"><label>Handling time (days)</label><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+          '<input class="input" type="number" min="0" max="365" step="1" data-spec="handling_min_days" value="' + esc(wz.specs.handling_min_days || '') + '" placeholder="Min">' +
+          '<input class="input" type="number" min="0" max="365" step="1" data-spec="handling_max_days" value="' + esc(wz.specs.handling_max_days || '') + '" placeholder="Max"></div></div>' +
+          '<div class="form-group"><label>Transit time (days)</label><div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+          '<input class="input" type="number" min="0" max="365" step="1" data-spec="transit_min_days" value="' + esc(wz.specs.transit_min_days || '') + '" placeholder="Min">' +
+          '<input class="input" type="number" min="0" max="365" step="1" data-spec="transit_max_days" value="' + esc(wz.specs.transit_max_days || '') + '" placeholder="Max"></div></div>' +
+          '<div class="form-group"><label>Return policy</label><select class="select" data-spec="return_policy">' +
+          '<option value="">Not specified</option>' +
+          '<option value="not_permitted"' + (wz.specs.return_policy === 'not_permitted' ? ' selected' : '') + '>Returns not accepted</option>' +
+          '<option value="finite"' + (wz.specs.return_policy === 'finite' ? ' selected' : '') + '>Returns accepted within a set number of days</option>' +
+          '<option value="unlimited"' + (wz.specs.return_policy === 'unlimited' ? ' selected' : '') + '>Unlimited return window</option></select></div>' +
+          '<div class="form-group"><label>Return window (days)</label><input class="input" type="number" min="1" max="365" step="1" data-spec="return_days" value="' + esc(wz.specs.return_days || '') + '" placeholder="Only needed for a set return window">' +
+          '<div class="form-hint">Leave blank when returns are not accepted or the return window is unlimited.</div></div></div>';
       } else if (i === 2) {
         b += '<div class="form-card"><div class="section-head" style="margin-bottom:4px"><h2>' + icon('checkmark-circle-outline') + 'Condition</h2></div>' +
           '<div class="seg seg-2" id="wz-cond">' +

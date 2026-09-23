@@ -87,3 +87,27 @@ def test_gtin_is_normalized_checksum_validated_and_only_then_published():
     assert 'product[f"gtin{len(gtin)}"] = gtin' in SERVER
     assert '("GTIN / Barcode", visible_gtin)' in SERVER
     assert '("MPN", _seo_clean(identifier_specs.get("mpn")))' in SERVER
+
+
+
+def test_merchant_listing_shipping_and_returns_are_optional_truthful_and_visible():
+    assert "def listing_shipping_details(specs):" in SERVER
+    assert "def listing_return_policy(specs):" in SERVER
+    assert '"addressCountry": "LK"' in SERVER
+    assert '"currency": "LKR"' in SERVER
+    assert 'product["offers"]["shippingDetails"] = shipping_details' in SERVER
+    assert 'product["offers"]["hasMerchantReturnPolicy"] = return_policy' in SERVER
+    assert "MerchantReturnFiniteReturnWindow" in SERVER
+    assert "MerchantReturnNotPermitted" in SERVER
+    assert "MerchantReturnUnlimitedWindow" in SERVER
+    assert "Complete all delivery fields or leave all delivery fields blank" in SERVER
+    assert "listing_policy_text(identifier_specs)" in SERVER
+    assert "Delivery &amp; Returns <span class=\"muted\">(optional)</span>" in CLIENT
+    assert 'data-spec="shipping_rate_lkr"' in CLIENT
+    assert 'data-spec="handling_min_days"' in CLIENT
+    assert 'data-spec="handling_max_days"' in CLIENT
+    assert 'data-spec="transit_min_days"' in CLIENT
+    assert 'data-spec="transit_max_days"' in CLIENT
+    assert 'data-spec="return_policy"' in CLIENT
+    assert 'data-spec="return_days"' in CLIENT
+    assert "Delivery &amp; Returns</h2>" in CLIENT
