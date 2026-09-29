@@ -1578,7 +1578,14 @@ def homepage_seo_body():
     sections = [
         '<section class="section"><h1>Buy &amp; Sell Cameras in Sri Lanka</h1>'
         '<p>Browse cameras, lenses, action cameras, drones and photography gear '
-        'from sellers and camera shops across Sri Lanka.</p></section>',
+        'from sellers and camera shops across Sri Lanka.</p>'
+        '<p>Compare current prices in LKR, item condition, seller details and available '
+        'delivery information before you buy. Lanka Lens gives each active listing a '
+        'crawlable page and groups related gear into categories so buyers can discover '
+        'new and used equipment more easily.</p>'
+        '<p>Use the category links below to explore camera gear, visit verified shop pages '
+        'for store listings, or open an individual product page for photos, specifications '
+        'and contact options.</p></section>',
     ]
     if category_links:
         sections.append(
@@ -1919,12 +1926,19 @@ def listing_product_entity(l, canonical, category_name="", seller_business=None)
 
     if seller_business:
         shop_url = f"{request.url_root.rstrip('/')}/shop/{seller_business['slug']}"
-        product["offers"]["seller"] = {
+        seller_entity = {
             "@type": "Organization",
             "@id": f"{shop_url}#business",
             "name": seller_business["name"],
             "url": shop_url,
         }
+        seller_logo = seller_business.get("logo") or ""
+        if seller_logo:
+            if _is_b2_key(seller_logo):
+                seller_logo = resolve_image_url(seller_logo) or ""
+            if seller_logo:
+                seller_entity["logo"] = absolute_url(seller_logo)
+        product["offers"]["seller"] = seller_entity
     return product
 
 
@@ -1948,7 +1962,7 @@ def seo_listing(slug):
 
     base = request.url_root.rstrip("/")
     seller_business = query(
-        "SELECT name, slug, opening_hours FROM businesses "
+        "SELECT name, slug, logo, opening_hours FROM businesses "
         "WHERE user_id = ? AND verified = 1 LIMIT 1",
         (row["user_id"],), one=True)
     related_rows = query(
@@ -2015,6 +2029,21 @@ def seo_listing(slug):
     facts_html = f'<ul>{"".join(facts)}</ul>' if facts else ""
 
     visible_desc = _seo_clean(l.get("description")) or seo_desc
+    condition_text = _seo_clean(l.get("condition")) or "listed"
+    location_text = _seo_clean(l.get("location") or l.get("province")) or "Sri Lanka"
+    discovery_copy = (
+        f'<section aria-label="Buying information"><h2>About this listing</h2>'
+        f'<p>This {esc_html(condition_text.lower())} {esc_html(l["title"])} is listed in '
+        f'{esc_html(location_text)}. Compare the asking price, photos, stated condition '
+        'and seller information before arranging payment, collection or delivery.</p>'
+        '<p>For used camera gear, ask about usage history, included accessories, compatibility '
+        'and anything that is not clear in the photos. Prices and availability can change, so '
+        'confirm the final price and delivery or collection method directly with the seller.</p>'
+        f'<p><a href="{base}/">Browse more camera gear on Lanka Lens</a>'
+        + (f' or <a href="{base}/category/{esc_html(cat_slug)}">see more {esc_html(cat_name)}</a>'
+           if cat_name and cat_slug else '')
+        + '.</p></section>'
+    )
     body_html = (
         f'<article class="section"><h1>{esc_html(l["title"])}</h1>'
         + category_html
@@ -2023,6 +2052,7 @@ def seo_listing(slug):
         + f'<p><strong>Rs. {int(l["price"] or 0):,}</strong></p>'
         + facts_html
         + f'<p>{esc_html(visible_desc)}</p>'
+        + discovery_copy
         + related_html
         + '</article>')
 
@@ -2122,6 +2152,10 @@ def seo_shop(slug):
         f'<li><a href="{esc_html(listing_public_path(row))}">{esc_html(row["title"])}</a>'
         f' — Rs. {int(row["price"] or 0):,}</li>'
         for row in shop_listings)
+    shop_categories = active_category_links(6)
+    shop_category_links = "".join(
+        f'<li><a href="/category/{esc_html(cat["slug"])}">{esc_html(cat["name"])}</a></li>'
+        for cat in shop_categories)
 
     shop = {
         "@type": "LocalBusiness",
@@ -2183,8 +2217,15 @@ def seo_shop(slug):
             f'<section class="section"><h1>{esc_html(b["name"])}</h1>'
             f'<p>{esc_html(desc)}</p>'
             + (f'<p>{esc_html(location)}, Sri Lanka</p>' if location else '')
+            + '<p>Browse current products from this verified Lanka Lens shop and open each '
+              'listing to compare price, condition, specifications, photos and seller-provided '
+              'delivery or return information. Availability can change, so confirm the latest '
+              'stock and final purchase details with the shop before ordering.</p>'
             + (('<h2>Current listings</h2><ul>' + shop_listing_links + '</ul>')
                if shop_listing_links else '<p>No active listings are available from this shop right now.</p>')
+            + (('<nav aria-label="More camera gear"><h2>Explore more camera gear</h2><ul>'
+                + shop_category_links + '</ul></nav>') if shop_category_links else '')
+            + '<p><a href="/">Browse all Lanka Lens listings</a>.</p>'
             + '</section>'),
     }
     return render_index(meta)
@@ -2223,10 +2264,22 @@ def seo_category(slug):
         f'<li><a href="{base}/listing/{esc_html(r["slug"])}-{r["id"]}">'
         f'{esc_html(r["title"])}</a> — Rs. {int(r["price"] or 0):,}</li>'
         for r in rows)
+    related_categories = [row for row in active_category_links(12) if row["id"] != cat["id"]][:6]
+    related_category_links = "".join(
+        f'<li><a href="/category/{esc_html(row["slug"])}">{esc_html(row["name"])}</a></li>'
+        for row in related_categories)
     body_html = (
         f'<section class="section"><h1>{esc_html(name)} for sale in Sri Lanka</h1>'
         f'<p>{esc_html(desc)}</p>'
-        + (f'<ul>{links}</ul>' if links else '<p>New listings are added regularly.</p>')
+        f'<p>Use this category to compare {esc_html(name.lower())} by price, condition and seller. '
+        'Open a listing to see photos, specifications, location and contact options before you buy. '
+        'For used gear, check compatibility and condition carefully and confirm any accessories '
+        'included with the seller.</p>'
+        + (f'<h2>Current {esc_html(name.lower())} listings</h2><ul>{links}</ul>'
+           if links else '<p>There are no active listings in this category right now. New listings are added regularly.</p>')
+        + (('<nav aria-label="Related camera gear"><h2>Explore related camera gear</h2><ul>'
+            + related_category_links + '</ul></nav>') if related_category_links else '')
+        + '<p><a href="/">Browse all camera gear on Lanka Lens</a>.</p>'
         + '</section>')
 
     item_list = {

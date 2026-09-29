@@ -118,7 +118,7 @@ def test_shop_account_exposes_merchant_defaults_and_listings_inherit_them():
     assert "def merchant_policy_from_hours(value):" in SERVER
     assert '"merchant_policy": merchant_policy' in SERVER
     assert '"_merchant_policy"' in SERVER
-    assert '"SELECT name, slug, opening_hours FROM businesses "' in SERVER
+    assert '"SELECT name, slug, logo, opening_hours FROM businesses "' in SERVER
     assert "listing_shipping_details(business_policy)" in SERVER
     assert "listing_return_policy(business_policy)" in SERVER
     assert '"merchant_policy": merchant_policy_from_hours(biz.get("opening_hours"))' in SERVER
@@ -132,3 +132,26 @@ def test_shop_account_exposes_merchant_defaults_and_listings_inherit_them():
     assert 'name="merchant_return_days"' in CLIENT
     assert "merchant_policy: {" in CLIENT
     assert "Object.assign({}, (l.seller && l.seller.business && l.seller.business.merchant_policy) || {}, l.specs || {})" in CLIENT
+
+
+
+def test_crawlable_pages_have_richer_content_and_internal_discovery():
+    assert "Compare current prices in LKR" in SERVER
+    assert "About this listing" in SERVER
+    assert "Browse more camera gear on Lanka Lens" in SERVER
+    assert "Browse current products from this verified Lanka Lens shop" in SERVER
+    assert "Explore more camera gear" in SERVER
+    assert "Use this category to compare" in SERVER
+    assert "Browse all camera gear on Lanka Lens" in SERVER
+
+
+def test_verified_shop_seller_schema_includes_real_logo_when_available():
+    assert '"SELECT name, slug, logo, opening_hours FROM businesses "' in SERVER
+    assert 'seller_logo = seller_business.get("logo") or ""' in SERVER
+    assert 'seller_entity["logo"] = absolute_url(seller_logo)' in SERVER
+
+
+def test_shared_shell_images_have_descriptive_alt_text():
+    index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+    assert 'alt="Lanka Lens camera marketplace logo"' in index_html
+    assert 'alt="Facebook tracking pixel"' in index_html
