@@ -118,7 +118,7 @@ def test_shop_account_exposes_merchant_defaults_and_listings_inherit_them():
     assert "def merchant_policy_from_hours(value):" in SERVER
     assert '"merchant_policy": merchant_policy' in SERVER
     assert '"_merchant_policy"' in SERVER
-    assert '"SELECT name, slug, opening_hours FROM businesses "' in SERVER
+    assert '"SELECT name, slug, logo, opening_hours FROM businesses "' in SERVER
     assert "listing_shipping_details(business_policy)" in SERVER
     assert "listing_return_policy(business_policy)" in SERVER
     assert '"merchant_policy": merchant_policy_from_hours(biz.get("opening_hours"))' in SERVER
