@@ -155,3 +155,17 @@ def test_shared_shell_images_have_descriptive_alt_text():
     index_html = (ROOT / "index.html").read_text(encoding="utf-8")
     assert 'alt="Lanka Lens camera marketplace logo"' in index_html
     assert 'alt="Facebook tracking pixel"' in index_html
+
+
+
+def test_sitemap_uses_truthful_lastmod_dates_instead_of_request_time():
+    assert "active_listings = query(" in SERVER
+    assert "Google recommends truthful lastmod values" in SERVER
+    assert 'modified(listing, "updated_at", "created_at")' in SERVER
+    assert 'modified(shop, "reviewed_at", "submitted_at", "created_at")' in SERVER
+    assert 'lastmod = f"<lastmod>{fmt(ts)}</lastmod>" if ts else ""' in SERVER
+    sitemap_start = SERVER.index('@app.route("/sitemap.xml")')
+    sitemap_end = SERVER.index('@app.route("/<path:filename>")')
+    sitemap_code = SERVER[sitemap_start:sitemap_end]
+    assert 'urls.append((base + "/", now(), "1.0"))' not in sitemap_code
+    assert 'l["updated_at"] or now()' not in sitemap_code
