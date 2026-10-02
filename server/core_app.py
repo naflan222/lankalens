@@ -2337,26 +2337,74 @@ def robots_txt():
 def sitemap_xml():
     base = request.url_root.rstrip("/")
     urls = []
-    urls.append((base + "/", now(), "1.0"))
     cats = query("SELECT id, slug, parent_id FROM categories ORDER BY id")
-    active_category_ids = {
-        r["category_id"] for r in query(
-            "SELECT DISTINCT category_id FROM listings WHERE status = 'active'")}
+    active_listings = query(
+        "SELECT id, slug, category_id, created_at, updated_at "
+        "FROM listings WHERE status = 'active' ORDER BY id")
+    posts = query("SELECT slug, created_at FROM posts ORDER BY id")
+    shops = query(
+        "SELECT slug, created_at, submitted_at, reviewed_at "
+        "FROM businesses WHERE verified = 1 ORDER BY id")
+
+    def modified(row, *keys):
+        for key in keys:
+            value = row.get(key)
+            if value:
+                return int(value)
+        return None
+
+    # Google recommends truthful lastmod values. Do not stamp every URL with
+    # the current time on each sitemap request, because unchanged pages should
+    # not look freshly modified to crawlers.
+    site_times = [
+        modified(row, "updated_at", "created_at") for row in active_listings
+    ] + [
+        modified(row, "created_at") for row in posts
+    ] + [
+        modified(row, "reviewed_at", "submitted_at", "created_at") for row in shops
+    ]
+    site_times = [ts for ts in site_times if ts]
+    urls.append((base + "/", max(site_times) if site_times else None, "1.0"))
+
+    active_category_ids = {r["category_id"] for r in active_listings}
     sitemap_category_ids = set(active_category_ids)
     by_id = {r["id"]: r for r in cats}
     for cid in list(active_category_ids):
         parent_id = by_id.get(cid, {}).get("parent_id")
         if parent_id:
             sitemap_category_ids.add(parent_id)
+
+    category_times = {}
+    for listing in active_listings:
+        ts = modified(listing, "updated_at", "created_at")
+        cid = listing["category_id"]
+        if ts:
+            category_times[cid] = max(category_times.get(cid, 0), ts)
+        parent_id = by_id.get(cid, {}).get("parent_id")
+        if parent_id and ts:
+            category_times[parent_id] = max(category_times.get(parent_id, 0), ts)
+
     for cat in cats:
         if cat["id"] in sitemap_category_ids:
-            urls.append((f"{base}/category/{cat['slug']}", now(), "0.7"))
-    for r in query("SELECT slug FROM posts ORDER BY id"):
-        urls.append((f"{base}/guide/{r['slug']}", now(), "0.6"))
-    for b in query("SELECT slug FROM businesses WHERE verified = 1 ORDER BY id"):
-        urls.append((f"{base}/shop/{b['slug']}", now(), "0.6"))
-    for l in query("SELECT id, slug, updated_at FROM listings WHERE status = 'active' ORDER BY id"):
-        urls.append((f"{base}/listing/{l['slug']}-{l['id']}", l["updated_at"] or now(), "0.8"))
+            urls.append((
+                f"{base}/category/{cat['slug']}",
+                category_times.get(cat["id"]),
+                "0.7",
+            ))
+    for row in posts:
+        urls.append((f"{base}/guide/{row['slug']}", modified(row, "created_at"), "0.6"))
+    for shop in shops:
+        urls.append((
+            f"{base}/shop/{shop['slug']}",
+            modified(shop, "reviewed_at", "submitted_at", "created_at"),
+            "0.6",
+        ))
+    for listing in active_listings:
+        urls.append((
+            f"{base}/listing/{listing['slug']}-{listing['id']}",
+            modified(listing, "updated_at", "created_at"),
+            "0.8",
+        ))
 
     def fmt(ts):
         return datetime.fromtimestamp(int(ts), tz=timezone.utc).strftime("%Y-%m-%d")
@@ -2364,8 +2412,9 @@ def sitemap_xml():
     body = ['<?xml version="1.0" encoding="UTF-8"?>',
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">']
     for loc, ts, prio in urls:
+        lastmod = f"<lastmod>{fmt(ts)}</lastmod>" if ts else ""
         body.append(
-            f"<url><loc>{esc_html(loc)}</loc><lastmod>{fmt(ts)}</lastmod>"
+            f"<url><loc>{esc_html(loc)}</loc>{lastmod}"
             f"<priority>{prio}</priority></url>")
     body.append("</urlset>")
     return "\n".join(body), 200, {"Content-Type": "application/xml"}
