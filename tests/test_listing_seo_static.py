@@ -10,7 +10,7 @@ def test_listing_pages_generate_model_specific_google_metadata():
     assert "def listing_seo_identity(l):" in SERVER
     assert "def listing_seo_title(l):" in SERVER
     assert "def listing_seo_description(l):" in SERVER
-    assert '" for Sale in Sri Lanka | Lanka Lens"' in SERVER
+    assert '" Price in Sri Lanka | LankaLens"' in SERVER
     assert '"title": seo_title' in SERVER
     assert '"description": seo_desc' in SERVER
 

@@ -720,7 +720,7 @@
   }
 
   function listingSeoTitle(l) {
-    var suffix = ' for Sale in Sri Lanka | Lanka Lens';
+    var suffix = ' Price in Sri Lanka | LankaLens';
     var room = Math.max(20, 68 - suffix.length);
     return seoTrim(listingSeoIdentity(l), room) + suffix;
   }
@@ -3707,7 +3707,7 @@
       mount: function () {
         api.get('/business/' + params.slug).then(function (d) {
           var b = d.business;
-          setMeta(b.name + ' — Camera Shop on ' + siteName(), (b.description || b.name).slice(0, 160),
+          setMeta(seoTrim(b.name + ' | Camera Shop in Sri Lanka | LankaLens', 68), seoTrim(b.description || ('Browse cameras and photography gear from ' + b.name + ' in Sri Lanka on LankaLens. Compare current listings, prices, condition and seller contact details.'), 160),
             location.origin + '/shop/' + b.slug, b.logo || '');
           var days = [['mon', 'Mon'], ['tue', 'Tue'], ['wed', 'Wed'], ['thu', 'Thu'], ['fri', 'Fri'], ['sat', 'Sat'], ['sun', 'Sun']];
           var hoursHtml = days.map(function (dd) {

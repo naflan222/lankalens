@@ -1710,7 +1710,7 @@ def listing_seo_identity(l):
 
 
 def listing_seo_title(l):
-    suffix = " for Sale in Sri Lanka | Lanka Lens"
+    suffix = " Price in Sri Lanka | LankaLens"
     identity = listing_seo_identity(l)
     room = max(20, 68 - len(suffix))
     return _seo_trim(identity, room) + suffix
@@ -2141,7 +2141,9 @@ def seo_shop(slug):
         abort(404)
     base = request.url_root.rstrip("/")
     canonical = f"{base}/shop/{slug}"
-    desc = (b["description"] or f"{b['name']} — a camera shop on Lanka Lens.")[:300]
+    desc = _seo_trim(b["description"] or (
+        f"Browse cameras and photography gear from {b['name']} in Sri Lanka on LankaLens. "
+        "Compare current listings, prices, condition and seller contact details."), 160)
     location = ", ".join(x for x in (b.get("city"), b.get("district"), b.get("province")) if x)
     shop_listings = query(
         listing_query_base()
@@ -2208,7 +2210,7 @@ def seo_shop(slug):
         ], canonical),
     )
     meta = {
-        "title": f"{b['name']} — Camera Shop on Lanka Lens",
+        "title": _seo_trim(f"{b['name']} | Camera Shop in Sri Lanka | LankaLens", 68),
         "description": desc,
         "canonical": canonical,
         "image": b["logo"] or "",
