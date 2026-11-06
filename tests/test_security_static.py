@@ -126,13 +126,13 @@ def test_locations_use_complete_application_catalogue():
         assert province in REFERENCE_DATA
 
 
-def test_email_otp_is_hashed_short_lived_and_required_for_posting():
+def test_optional_email_otp_is_hashed_and_short_lived():
     assert '"email_otp"' in SERVER
     assert 'value=token_digest(code), ttl=600' in SERVER
     assert 'secrets.compare_digest' in SERVER
-    assert 'Verify your email before posting an ad' in SERVER
+    assert 'Verify your email before posting an ad' not in SERVER
     assert 'showEmailOtpDialog' in CLIENT
-    assert 'verify-home-banner' in CLIENT
+    assert 'Verify your email to publish listings.' not in CLIENT
 
 
 def test_admin_can_inspect_contact_pin_and_delete():
