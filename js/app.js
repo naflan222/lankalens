@@ -821,11 +821,6 @@
       '<button type="submit">Search</button></form>';
 
     var sections = '';
-    if (state.user && !state.user.email_verified) {
-      sections += '<div class="verify-home-banner"><div><b>' + icon('mail-unread-outline') + 'Verify Email</b>' +
-        '<span>Verify your email to publish listings.</span></div>' +
-        '<button class="btn btn-primary btn-sm" id="home-verify-email">Verify Email</button></div>';
-    }
     sections += '<div class="section"><div class="section-head"><h2>' + icon('grid-outline') + 'Browse Categories</h2>' +
       '<a class="more" data-nav="#/categories">View all</a></div><div id="home-cats">' + loadingHtml('Loading categories…') + '</div></div>';
 
@@ -848,11 +843,6 @@
     return {
       html: stats + sections + footer(),
       mount: function () {
-        var verifyHome = $('#home-verify-email');
-        if (verifyHome) verifyHome.addEventListener('click', function () {
-          requestEmailOtp('#/');
-        });
-
         var f = $('#home-search');
         if (f) f.addEventListener('submit', function (e) {
           e.preventDefault();
@@ -2823,7 +2813,7 @@
     if (skip) skip.addEventListener('click', function () {
       closeDialog();
       location.hash = destination;
-      toast('You can browse now. Verify your email before posting an ad.');
+      toast('You can post ads now. Email verification is optional.');
     });
     var input = $('#email-otp-code');
     if (input) input.focus();
@@ -2975,7 +2965,7 @@
       '<div class="form-group"><label>I am a…</label><div class="seg" id="stype-seg">' +
       '<div class="opt active" data-stype="individual" role="button" tabindex="0">Individual</div>' +
       '<div class="opt" data-stype="business" role="button" tabindex="0">Business</div></div>' +
-      '<p class="form-hint" id="stype-hint">For personal buying &amp; selling. Verify your email before posting ads.</p></div>' +
+      '<p class="form-hint" id="stype-hint">For personal buying &amp; selling. Start posting as soon as you register.</p></div>' +
       '<button class="btn btn-primary" type="submit">Create Account</button>' +
       '<p class="form-hint" style="margin-top:12px;text-align:center">By creating an account you agree to our ' +
       '<a data-nav="#/terms">Terms</a> and <a data-nav="#/privacy">Privacy Policy</a>.</p></form>' +
@@ -2990,7 +2980,7 @@
         if (!form) return;
         var stype = 'individual';
         var stypeHints = {
-          individual: 'For personal buying &amp; selling. Verify your email before posting ads.',
+          individual: 'For personal buying &amp; selling. Start posting as soon as you register.',
           business: 'For shops &amp; camera stores. After sign up you complete shop details and request verification — a verified badge is only granted after admin approval.'
         };
         $$('#stype-seg .opt').forEach(function (o) {
@@ -3028,13 +3018,7 @@
             // request verification.
             var next = (stype === 'business') ? '#/my-shop'
               : safeNext(query && query.get ? query.get('next') : '');
-            if (d.verification_sent) {
-              toast('We sent a 6-digit code to your email', 'success');
-              showEmailOtpDialog(next, d.dev && d.dev.email_code);
-            } else {
-              toast('Account created, but the verification email could not be sent.', 'error');
-              location.hash = next;
-            }
+            location.hash = next;
           }).catch(function (er) {
             setPending(form, false);
             showFormError(form, (er && er.message) || 'Sign up failed. Please try again.');

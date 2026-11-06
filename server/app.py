@@ -140,11 +140,8 @@ def _signup_with_password_policy():
     core.execute("INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)",
                  (core.token_digest(token), uid, core.now(), core.now() + core.SESSION_TTL_DAYS * 86400))
     user = core.query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
-    sent, otp = core.issue_email_otp(user)
-    response = {"token": token, "user": core.user_payload(user), "verification_sent": sent}
-    if sent and not core.database.production and os.environ.get("LL_ALLOW_DEV_TOKENS") == "1":
-        response["dev"] = {"email_code": otp}
-    return core.ok(response)
+    # Registration succeeds independently of the optional email service.
+    return core.ok({"token": token, "user": core.user_payload(user), "verification_sent": False})
 
 
 _signup_with_password_policy.__name__ = "signup"

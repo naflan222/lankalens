@@ -2888,8 +2888,6 @@ def validate_listing_fields(body, require_complete=True):
 @app.route("/api/listings", methods=["POST"])
 def create_listing():
     u = require_auth()
-    if not u.get("email_verified") and not u.get("is_admin"):
-        return err("Verify your email before posting an ad", 403)
     body = request.get_json(silent=True) or {}
 
     status = body.get("status") or "active"
@@ -4218,11 +4216,8 @@ def signup():
             (token_digest(token), uid, now(), now() + SESSION_TTL_DAYS * 86400))
     u = query("SELECT * FROM users WHERE id = ?", (uid,), one=True)
 
-    sent, otp = issue_email_otp(u)
-    response = {"token": token, "user": user_payload(u), "verification_sent": sent}
-    if sent and not database.production and os.environ.get("LL_ALLOW_DEV_TOKENS") == "1":
-        response["dev"] = {"email_code": otp}
-    return ok(response)
+    # Email confirmation is optional and must not delay registration or posting.
+    return ok({"token": token, "user": user_payload(u), "verification_sent": False})
 
 
 @app.route("/api/auth/login", methods=["POST"])

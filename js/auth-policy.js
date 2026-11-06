@@ -245,12 +245,7 @@
     }, '').then(function (data) {
       setPending(form, false, '');
       saveSessionToken(data.token);
-      if (data.verification_sent) {
-        renderPersistentOtp(email, destination);
-      } else {
-        formError(form, 'Account created, but the verification email could not be sent. You can request another code after signing in.');
-        window.setTimeout(function () { navigateAndRefresh(destination); }, 1200);
-      }
+      navigateAndRefresh(destination);
     }).catch(function (err) {
       setPending(form, false, '');
       formError(form, err.message);
